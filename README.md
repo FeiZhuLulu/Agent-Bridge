@@ -31,7 +31,7 @@ uv run agent-bridge
 codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
 ```
 
-Copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md`. Restart Codex after changing the config.
+Copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md`. Restart Codex after changing the config. Proxy, env, and a longer drill are in [SETUP.md](SETUP.md).
 
 ### Tools
 
@@ -82,7 +82,7 @@ uv run agent-bridge
 codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
 ```
 
-把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`。改完配置后重启 Codex。
+把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`。改完配置后重启 Codex。代理、环境和更完整的验收步骤见 [SETUP.md](SETUP.md)。
 
 ### 工具
 

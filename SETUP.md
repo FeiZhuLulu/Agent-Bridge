@@ -86,6 +86,8 @@ Copy [AGENTS.md](AGENTS.md) to:
 - the target repository root, or
 - `%USERPROFILE%\.codex\AGENTS.md` for a global default
 
+Codex reads the English file. [AGENTS.zh-CN.md](AGENTS.zh-CN.md) is a human-readable translation.
+
 Keep it under 32 KiB. Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd.
 
 ## End-to-end drill

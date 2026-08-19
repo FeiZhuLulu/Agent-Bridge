@@ -1,0 +1,634 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import subprocess
+import sys
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
+
+from acp import PROTOCOL_VERSION, connect_to_agent, text_block
+from acp.schema import (
+    AllowedOutcome,
+    ClientCapabilities,
+    DeniedOutcome,
+    Implementation,
+    PermissionOption,
+    RequestPermissionResponse,
+)
+
+from agent_bridge.adapters.base import STDIO_LIMIT, Adapter
+from agent_bridge.config import AgentConfig
+from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
+from agent_bridge.processes import (
+    drop_pid,
+    kill_tree,
+    process_create_time,
+    process_image_name,
+    record_pid,
+    resolve_command,
+)
+from agent_bridge.transcript import append_event
+from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
+from agent_bridge.worker_env import build_worker_env
+from agent_bridge.workspace import collect_update_paths
+
+log = logging.getLogger(__name__)
+
+GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
+
+# Handshake-style RPCs (initialize, session/new, session/load, setModel)
+# normally answer in seconds. A worker that wedges before the prompt would
+# otherwise hang dispatch forever; prompt itself stays unbounded by design.
+RPC_TIMEOUT_SEC = 60.0
+
+# ACP ToolKind values that can change the workspace. Read-only kinds (read,
+# search, fetch, think, ...) also carry locations; counting them would report
+# files the agent merely opened. Under-matching is safe: the disk snapshot
+# diff in merge_files_changed still catches every real write.
+MUTATING_TOOL_KINDS = {"edit", "delete", "move", "write", "create"}
+
+
+class RpcTimeoutError(RuntimeError):
+    pass
+
+
+def grok_session_meta(
+    base: dict[str, Any] | None,
+    model: str | None = None,
+    effort: str | None = None,
+) -> dict[str, Any]:
+    """Hints for Grok ``session/new`` ``_meta`` (yolo + optional model/effort).
+
+    Official pager/tests inject ``modelId`` and ``reasoningEffort`` there.
+    ``yoloMode`` must stay explicit (absent is not false). Those hints are not
+    sticky: Grok ``/new`` still lands on the campaign default (currently
+    grok-4.6 xhigh). Bridge must ``session/setModel`` after the session exists.
+    """
+    meta = dict(base or {})
+    if model:
+        meta["modelId"] = model
+    mapped = grok_effort(effort)
+    if mapped:
+        meta["reasoningEffort"] = mapped
+    return meta
+
+
+def with_grok_cli_selection(
+    command: list[str],
+    model: str | None,
+    effort: str | None,
+) -> list[str]:
+    """Stamp Grok ``agent --model/--effort`` before ``stdio``.
+
+    Process flags only seed the spawn default. Grok ``/new`` still resets to
+    the campaign model; a later ``session/setModel`` is what sticks.
+    """
+    extras: list[str] = []
+    if model:
+        extras += ["--model", model]
+    mapped = grok_effort(effort)
+    if mapped:
+        extras += ["--effort", mapped]
+    if not extras:
+        return list(command)
+    cmd = list(command)
+    for token in ("stdio", "headless", "serve"):
+        if token in cmd:
+            index = cmd.index(token)
+            return cmd[:index] + extras + cmd[index:]
+    return cmd + extras
+
+
+def dsh_needs_respawn(
+    applied_model: str | None,
+    applied_effort: str | None,
+    model: str | None,
+    effort: str | None,
+) -> bool:
+    return applied_model != model or applied_effort != dsh_effort(effort)
+
+
+def _dump(obj: Any) -> Any:
+    if obj is None:
+        return None
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if isinstance(obj, (dict, list, str, int, float, bool)):
+        return obj
+    return str(obj)
+
+
+def _collect_paths(obj: Any, into: set[str]) -> None:
+    collect_update_paths(obj, into)
+
+
+def _has_diff_content(dumped: dict[str, Any]) -> bool:
+    content = dumped.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(item, dict) and item.get("type") == "diff" for item in content)
+
+
+def should_collect_tool_paths(
+    type_name: str,
+    dumped: Any,
+    known_kinds: dict[str, str],
+) -> bool:
+    """Decide whether a session update may contribute to files_changed.
+
+    Only tool calls with a mutating ``kind`` (or an explicit diff content)
+    count. ``known_kinds`` maps toolCallId -> kind so that progress updates,
+    which often omit ``kind``, inherit it from their start event.
+    """
+    if not isinstance(dumped, dict):
+        return False
+    if type_name not in {"ToolCallStart", "ToolCallProgress", "ToolCallUpdate"}:
+        return False
+    call_id = str(dumped.get("toolCallId") or "")
+    kind = str(dumped.get("kind") or "").lower()
+    if type_name == "ToolCallStart" and call_id:
+        known_kinds[call_id] = kind
+    if not kind and call_id:
+        kind = known_kinds.get(call_id, "")
+    return kind in MUTATING_TOOL_KINDS or _has_diff_content(dumped)
+
+
+def _text_of(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if hasattr(content, "text") and isinstance(content.text, str):
+        return content.text
+    dumped = _dump(content)
+    if isinstance(dumped, dict):
+        if isinstance(dumped.get("text"), str):
+            return dumped["text"]
+        return json.dumps(dumped, ensure_ascii=False)
+    if isinstance(dumped, list):
+        return "".join(_text_of(item) for item in dumped)
+    return str(dumped)
+
+
+def _pick_permission_option(options: Iterable[PermissionOption]) -> PermissionOption | None:
+    ranked: list[tuple[int, PermissionOption]] = []
+    for option in options:
+        kind = str(getattr(option, "kind", "")).lower().replace("_", "-")
+        option_id = str(getattr(option, "option_id", "")).lower().replace("_", "-")
+        blob = f"{kind} {option_id}"
+        if "allow-always" in blob or kind == "allow-always":
+            score = 0
+        elif "allow-once" in blob or kind == "allow-once" or blob.strip().startswith("allow"):
+            score = 1
+        else:
+            score = 50
+        ranked.append((score, option))
+    ranked.sort(key=lambda item: item[0])
+    return ranked[0][1] if ranked else None
+
+
+class _BridgeClient:
+    def __init__(self, session_id: str, home: Path) -> None:
+        self.session_id = session_id
+        self.home = home
+        self.text_parts: list[str] = []
+        self.files: set[str] = set()
+        self.usage: dict[str, Any] = {}
+        self.tool_kinds: dict[str, str] = {}
+
+    def reset_turn(self) -> None:
+        self.text_parts = []
+        self.files = set()
+        self.usage = {}
+        self.tool_kinds = {}
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        option = _pick_permission_option(options or [])
+        dumped = _dump(tool_call)
+        if option is None:
+            append_event(
+                self.session_id,
+                "permission",
+                {"decision": "cancelled", "tool_call": dumped},
+                self.home,
+            )
+            return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        append_event(
+            self.session_id,
+            "permission",
+            {"decision": "selected", "option_id": option.option_id, "tool_call": dumped},
+            self.home,
+        )
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(option_id=option.option_id, outcome="selected")
+        )
+
+    async def session_update(self, session_id, update, **kwargs):
+        dumped = _dump(update)
+        type_name = type(update).__name__
+        text = ""
+        event_type = "raw"
+        if type_name == "AgentMessageChunk":
+            event_type = "message_chunk"
+            text = _text_of(getattr(update, "content", dumped))
+            if text:
+                self.text_parts.append(text)
+        elif type_name == "AgentThoughtChunk":
+            event_type = "thought_chunk"
+            text = _text_of(getattr(update, "content", dumped))
+        elif type_name == "UserMessageChunk":
+            event_type = "raw"
+        elif type_name == "ToolCallStart":
+            event_type = "tool_call"
+        elif type_name in {"ToolCallProgress", "ToolCallUpdate"}:
+            event_type = "tool_call_update"
+        elif type_name in {"AgentPlanUpdate", "AgentPlanContentUpdate"}:
+            event_type = "plan"
+        elif type_name == "UsageUpdate":
+            event_type = "raw"
+            self.usage = dumped if isinstance(dumped, dict) else {"raw": dumped}
+        if should_collect_tool_paths(type_name, dumped, self.tool_kinds):
+            _collect_paths(dumped, self.files)
+        data: dict[str, Any] = {"update_type": type_name}
+        if text:
+            data["text"] = text
+        if isinstance(dumped, dict):
+            title = dumped.get("title")
+            if title:
+                data["title"] = title
+            if dumped.get("path"):
+                data["path"] = dumped["path"]
+        append_event(self.session_id, event_type, data, self.home)
+
+    async def write_text_file(self, session_id, path, content, **kwargs):
+        raise RuntimeError("filesystem client methods are disabled")
+
+    async def read_text_file(self, session_id, path, line=None, limit=None, **kwargs):
+        raise RuntimeError("filesystem client methods are disabled")
+
+    async def create_terminal(self, session_id, command, args=None, env=None, cwd=None, output_byte_limit=None, **kwargs):
+        raise RuntimeError("terminal client methods are disabled")
+
+    async def terminal_output(self, session_id, terminal_id, **kwargs):
+        raise RuntimeError("terminal client methods are disabled")
+
+    async def release_terminal(self, session_id, terminal_id, **kwargs):
+        return None
+
+    async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
+        raise RuntimeError("terminal client methods are disabled")
+
+    async def kill_terminal(self, session_id, terminal_id, **kwargs):
+        return None
+
+    async def create_elicitation(self, message, mode, **kwargs):
+        from acp.schema import DeclineElicitationResponse
+
+        return DeclineElicitationResponse(action="decline")
+
+    async def complete_elicitation(self, elicitation_id, **kwargs):
+        return None
+
+    async def ext_method(self, method, params):
+        return {}
+
+    async def ext_notification(self, method, params):
+        return None
+
+    def on_connect(self, conn) -> None:
+        return None
+
+
+class _Live:
+    def __init__(self) -> None:
+        self.proc: asyncio.subprocess.Process | None = None
+        self.conn: Any = None
+        self.client: _BridgeClient | None = None
+        self.stderr_task: asyncio.Task[None] | None = None
+        self.prompt_task: asyncio.Task[Any] | None = None
+        self.applied_model: str | None = None
+        self.applied_effort: str | None = None
+        # Warnings raised outside a turn (e.g. during ensure_session);
+        # drained into the next TurnResult.
+        self.pending_warnings: list[str] = []
+
+
+class AcpAdapter(Adapter):
+    def __init__(self, agent: AgentConfig, home: Path, env_config=None) -> None:
+        super().__init__(agent, home, env_config)
+        self._live: dict[str, _Live] = {}
+
+    def _env(self) -> dict[str, str]:
+        return build_worker_env(self.agent.env, config=self.env_config)
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
+        if proc.stderr is None:
+            return
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    log.info("[%s %s] %s", self.agent.name, session_id, text)
+        except (ValueError, OSError):
+            log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+
+    async def _rpc(
+        self,
+        coro: Any,
+        what: str,
+        session: Session,
+        timeout: float = RPC_TIMEOUT_SEC,
+    ) -> Any:
+        """Await a handshake RPC with a timeout; kill the worker on hang."""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            log.error(
+                "%s %s timed out after %ss for %s; killing worker",
+                self.agent.name,
+                what,
+                timeout,
+                session.session_id,
+            )
+            await self.shutdown(session)
+            raise RpcTimeoutError(
+                f"{self.agent.name} {what} timed out after {int(timeout)}s"
+            ) from None
+
+    async def _spawn(self, session: Session) -> _Live:
+        await self.shutdown(session)
+        if self.agent.name == "dsh":
+            cmd = resolve_dsh_command(self.agent.command, self.agent.fallback_commands)
+        else:
+            cmd = resolve_command(self.agent.command, self.agent.fallback_commands)
+        env = self._env()
+        if self.agent.name == "dsh":
+            cmd, env = prepare_dsh_launch(
+                cmd,
+                env,
+                session_id=session.session_id,
+                model=session.model,
+                effort=session.effort,
+            )
+        elif self.agent.name == "grok":
+            cmd = with_grok_cli_selection(cmd, session.model, session.effort)
+        kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=self.agent.cwd or session.cwd or None,
+            limit=STDIO_LIMIT,
+            **kwargs,
+        )
+        if proc.stdin is None or proc.stdout is None:
+            raise RuntimeError(f"{self.agent.name} did not expose stdio")
+        live = _Live()
+        live.proc = proc
+        live.client = _BridgeClient(session.session_id, self.home)
+        live.conn = connect_to_agent(live.client, proc.stdin, proc.stdout)
+        live.stderr_task = asyncio.create_task(self._drain_stderr(proc, session.session_id))
+        self._live[session.session_id] = live
+        session.pid = proc.pid
+        session.pid_create_time = process_create_time(proc.pid) if proc.pid else None
+        session.image_name = process_image_name(proc.pid) if proc.pid else None
+        if proc.pid:
+            record_pid(self.home, session.session_id, proc.pid, session.pid_create_time, session.image_name)
+        await self._rpc(
+            live.conn.initialize(
+                protocol_version=PROTOCOL_VERSION,
+                client_info=Implementation(name="agent-bridge", version="0.1.0"),
+                client_capabilities=ClientCapabilities(),
+            ),
+            "initialize",
+            session,
+        )
+        if self.agent.name == "dsh":
+            live.applied_model = session.model
+            live.applied_effort = dsh_effort(session.effort)
+        return live
+
+    def _new_session_meta(self, session: Session) -> dict[str, Any]:
+        base = self.agent.session_meta or None
+        if self.agent.name != "grok":
+            return dict(base or {})
+        return grok_session_meta(base, session.model, session.effort)
+
+    async def _call_new_session(self, conn: Any, cwd: str, meta: dict[str, Any] | None) -> Any:
+        extra = dict(meta or {})
+        return await conn.new_session(cwd=cwd, mcp_servers=[], **extra)
+
+    async def _call_load_session(self, conn: Any, cwd: str, native_id: str) -> Any:
+        return await conn.load_session(
+            cwd=cwd,
+            session_id=native_id,
+            mcp_servers=[],
+            noReplay=True,
+        )
+
+    async def _call_grok_set_model(
+        self,
+        conn: Any,
+        native_id: str,
+        model: str,
+        effort: str | None,
+    ) -> None:
+        params: dict[str, Any] = {"sessionId": native_id, "modelId": model}
+        if effort:
+            params["_meta"] = {"reasoningEffort": effort}
+        sender = getattr(conn, "_conn", None)
+        send = getattr(sender, "send_request", None)
+        if send is None:
+            raise RuntimeError("ACP connection cannot send session/setModel")
+        last: Exception | None = None
+        for method in GROK_SET_MODEL_METHODS:
+            try:
+                await send(method, params)
+                return
+            except Exception as exc:
+                last = exc
+                code = getattr(exc, "code", None)
+                if code != -32601:
+                    raise
+        if last is not None:
+            raise last
+
+    async def _sync_grok_model(self, live: _Live, session: Session) -> None:
+        if self.agent.name != "grok" or live.conn is None or not session.native_session_id:
+            return
+        effort = grok_effort(session.effort)
+        model = session.model
+        if live.applied_model == model and live.applied_effort == effort:
+            return
+        if not model:
+            if effort and live.applied_effort != effort:
+                message = (
+                    f"grok effort={effort} ignored on live session "
+                    f"{session.session_id} without a model; "
+                    "Grok session/setModel needs a modelId"
+                )
+                log.warning("%s", message)
+                live.pending_warnings.append(message)
+            return
+        await self._rpc(
+            self._call_grok_set_model(live.conn, session.native_session_id, model, effort),
+            "session/setModel",
+            session,
+        )
+        live.applied_model = model
+        live.applied_effort = effort
+
+    async def ensure_session(self, session: Session) -> None:
+        live = self._live.get(session.session_id)
+        if (
+            live
+            and live.proc
+            and live.proc.returncode is None
+            and live.conn is not None
+            and session.native_session_id
+        ):
+            if self.agent.name == "dsh" and dsh_needs_respawn(
+                live.applied_model,
+                live.applied_effort,
+                session.model,
+                session.effort,
+            ):
+                log.info(
+                    "dsh model/effort changed (%s/%s -> %s/%s); respawning ACP process",
+                    live.applied_model,
+                    live.applied_effort,
+                    session.model,
+                    dsh_effort(session.effort),
+                )
+                session.native_session_id = None
+                await self.shutdown(session)
+            else:
+                await self._sync_grok_model(live, session)
+                return
+        live = await self._spawn(session)
+        native = session.native_session_id
+        if native and self.can_revive():
+            try:
+                await self._rpc(
+                    self._call_load_session(live.conn, session.cwd, native),
+                    "session/load",
+                    session,
+                )
+            except RpcTimeoutError:
+                # The worker is already dead; a new_session on the same
+                # connection cannot succeed.
+                raise
+            except Exception:
+                log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
+            else:
+                await self._sync_grok_model(live, session)
+                return
+        created = await self._rpc(
+            self._call_new_session(live.conn, session.cwd, self._new_session_meta(session)),
+            "session/new",
+            session,
+        )
+        session.native_session_id = created.session_id
+        if self.agent.name == "grok":
+            # Grok /new applies the _meta reasoningEffort but always lands on
+            # the campaign default model. Record the effort as applied so an
+            # effort-only dispatch does not raise a spurious warning, and let
+            # _sync_grok_model switch the model via session/setModel.
+            live.applied_effort = grok_effort(session.effort)
+        await self._sync_grok_model(live, session)
+
+    async def run_turn(self, session: Session, task: Task) -> TurnResult:
+        await self.ensure_session(session)
+        live = self._live[session.session_id]
+        assert live.conn is not None and live.client is not None
+        live.client.reset_turn()
+        warnings: list[str] = live.pending_warnings
+        live.pending_warnings = []
+        if self.agent.name not in {"grok", "dsh"} and (task.model or task.effort):
+            warnings.append(
+                f"{self.agent.name} has no model/effort selection; "
+                f"model={task.model!r} effort={task.effort!r} were ignored"
+            )
+        append_event(session.session_id, "prompt_sent", {"text": task.message}, self.home)
+        prompt = live.conn.prompt(
+            session_id=session.native_session_id,
+            prompt=[text_block(task.message)],
+        )
+        live.prompt_task = asyncio.ensure_future(prompt)
+        try:
+            response = await live.prompt_task
+        except asyncio.CancelledError:
+            append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
+            return TurnResult(
+                text="".join(live.client.text_parts),
+                files_changed=sorted(live.client.files),
+                stop_reason="cancelled",
+                warnings=warnings,
+            )
+        finally:
+            live.prompt_task = None
+        stop = getattr(response, "stop_reason", None) or "end_turn"
+        if hasattr(stop, "value"):
+            stop = stop.value
+        stop = str(stop)
+        append_event(session.session_id, "turn_end", {"stop_reason": stop}, self.home)
+        return TurnResult(
+            text="".join(live.client.text_parts),
+            files_changed=sorted(live.client.files),
+            stop_reason=stop,
+            usage=live.client.usage,
+            native_session_id=session.native_session_id,
+            warnings=warnings,
+        )
+
+    async def cancel(self, session: Session) -> None:
+        live = self._live.get(session.session_id)
+        if live is None or live.conn is None:
+            return
+        try:
+            await asyncio.wait_for(live.conn.cancel(session_id=session.native_session_id), timeout=5)
+        except Exception:
+            log.warning("ACP cancel failed for %s", session.session_id, exc_info=True)
+        if live.prompt_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(live.prompt_task), timeout=10)
+                return
+            except (asyncio.CancelledError, Exception):
+                # CancelledError derives from BaseException and must be
+                # listed explicitly; a cancelled prompt is the normal case.
+                pass
+        if live.proc and live.proc.pid:
+            kill_tree(live.proc.pid)
+            await self.shutdown(session)
+
+    async def shutdown(self, session: Session) -> None:
+        live = self._live.pop(session.session_id, None)
+        if live is None:
+            drop_pid(self.home, session.session_id)
+            session.pid = None
+            return
+        if live.stderr_task:
+            live.stderr_task.cancel()
+        if live.conn is not None:
+            try:
+                await asyncio.wait_for(live.conn.close(), timeout=2)
+            except Exception:
+                pass
+        if live.proc and live.proc.returncode is None and live.proc.pid:
+            kill_tree(live.proc.pid)
+            try:
+                await asyncio.wait_for(live.proc.wait(), timeout=5)
+            except TimeoutError:
+                pass
+        drop_pid(self.home, session.session_id)
+        session.pid = None

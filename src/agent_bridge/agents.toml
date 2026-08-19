@@ -1,0 +1,80 @@
+# Environment is first-class. Codex (and some MCP hosts) spawn this server
+# with a cleared process environment, then we spawn worker CLIs from that.
+# Interactive shell wrappers (PowerShell `function grok { $env:HTTPS_PROXY=... }`)
+# never run. Pin values in ~/.agent-bridge/agents.toml or inherit them back.
+
+[env]
+# Restore these from the Windows user/machine environment when missing.
+# API keys are optional passthroughs — none of them is required to list an agent.
+inherit = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "GROK_WEB_FETCH_PROXY",
+  "AGENT_BRIDGE_HTTP_PROXY",
+  "AGENT_BRIDGE_HTTPS_PROXY",
+  "AGENT_BRIDGE_NO_PROXY",
+  "DSH_HOME",
+  "DEEPSEEK_API_KEY",
+  "OPENCODE_API_KEY",
+  "XAI_API_KEY",
+  "GROK_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GOOGLE_API_KEY",
+  "GEMINI_API_KEY",
+  "CLOUDFLARE_API_TOKEN",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "NODE_EXTRA_CA_CERTS",
+  "PYTHONUTF8",
+  "PYTHONIOENCODING",
+  "LANG",
+  "LC_ALL",
+]
+# Last-resort discovery: PowerShell `grok` wrapper + Windows system proxy.
+discover_proxy = true
+
+[env.set]
+# Explicit values (do not commit secrets). Highest priority after per-agent env.
+# HTTPS_PROXY = "http://127.0.0.1:7897"
+
+[env.proxy]
+# Shorthand applied to HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, GROK_WEB_FETCH_PROXY.
+# url = "http://127.0.0.1:7897"
+# no_proxy = "localhost,127.0.0.1,::1"
+
+[agents.grok]
+protocol = "acp"
+command = ["grok", "--no-auto-update", "agent", "--always-approve", "--no-leader", "stdio"]
+session_meta = { yoloMode = true }
+revivable = true
+idle_unload_sec = 900
+
+[agents.cursor]
+protocol = "acp"
+command = ["cursor-agent", "acp"]
+fallback_commands = [["agent", "acp"]]
+revivable = false
+idle_unload_sec = 0
+
+[agents.dsh]
+protocol = "acp"
+# Product `dsh` has no ACP profile. Bridge discovers a real ACP bin, in order:
+# DSH_ACP_BIN, PATH `dsh-acp-demo`, the user's npm global prefix,
+# $AGENT_BRIDGE_HOME/dsh-acp, then a *built* $DSH_HARNESS checkout.
+# Providers come from that user's $DSH_HOME — do not pin a vendor here.
+command = ["dsh-acp-demo"]
+env = { DSH_PERMISSION_MODE = "danger-full-access" }
+revivable = false
+idle_unload_sec = 0
+
+[agents.antigravity]
+protocol = "agy"
+command = ["agy"]
+print_timeout = "120m"
+revivable = true
+idle_unload_sec = 0

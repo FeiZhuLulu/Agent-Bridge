@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agent_bridge.adapters.fake import FakeAdapter
+from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
+from agent_bridge.paths import state_path
+from agent_bridge.persist import atomic_write_json
+from agent_bridge.registry import Registry
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_model_and_effort(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task(
+            "fake",
+            "tiny",
+            cwd=str(work.resolve()),
+            model="gemini-3.7-flash",
+            effort="LOW",
+        )
+        assert dispatched["model"] == "gemini-3.7-flash"
+        assert dispatched["effort"] == "low"
+        session = registry.sessions[dispatched["session_id"]]
+        assert session.model == "gemini-3.7-flash"
+        assert session.effort == "low"
+        with pytest.raises(ValueError, match="effort"):
+            await registry.dispatch_task("fake", "bad", cwd=str(work.resolve()), effort="turbo")
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_wait_fake(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "build foo", cwd=str(work.resolve()), title="demo")
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert "build foo" in waited["result_text"]
+        sessions = registry.list_sessions()
+        assert sessions[0]["title"] == "demo"
+        transcript = registry.get_transcript(dispatched["session_id"])
+        assert transcript["count"] >= 1
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_busy_session_rejected(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "2")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
+        with pytest.raises(RuntimeError, match="busy"):
+            await registry.dispatch_task(
+                "fake",
+                "again",
+                cwd=str(work.resolve()),
+                session_id=first["session_id"],
+            )
+        await registry.cancel_task(first["task_id"])
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_followup_cwd_must_match(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task("fake", "one", cwd=str(work.resolve()))
+        await registry.wait_task(first["task_id"], timeout_sec=5)
+        with pytest.raises(ValueError, match="same project folder"):
+            await registry.dispatch_task(
+                "fake",
+                "two",
+                cwd=str(other.resolve()),
+                session_id=first["session_id"],
+            )
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_relative_cwd_rejected(bridge_home):
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        with pytest.raises(ValueError, match="absolute"):
+            await registry.dispatch_task("fake", "x", cwd="relative")
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_bridge_restart_marks_running_failed(bridge_home):
+    atomic_write_json(
+        state_path(bridge_home),
+        {
+            "sessions": [
+                Session(
+                    session_id="sess_old",
+                    agent="fake",
+                    cwd=str(Path.cwd()),
+                    proc_state=ProcState.busy,
+                ).model_dump(mode="json")
+            ],
+            "tasks": [
+                Task(
+                    task_id="task_old",
+                    session_id="sess_old",
+                    agent="fake",
+                    message="in flight",
+                    cwd=str(Path.cwd()),
+                    status=TaskStatus.running,
+                ).model_dump(mode="json")
+            ],
+        },
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert registry.tasks["task_old"].status == TaskStatus.failed
+        assert registry.tasks["task_old"].error == "bridge_restarted"
+        assert registry.sessions["sess_old"].proc_state == ProcState.idle_unloaded
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def write_then_ok(self, session, task):
+        (Path(task.cwd) / "smoke.txt").write_text("hello-bridge\n", encoding="utf-8")
+        hidden = Path(task.cwd) / ".sessions"
+        hidden.mkdir()
+        (hidden / "log.jsonl").write_text("{}\n", encoding="utf-8")
+        return TurnResult(text="done", files_changed=[])
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", write_then_ok)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task(
+            "fake",
+            "write smoke",
+            cwd=str(work.resolve()),
+            model="gemini-3.7-flash",
+            effort="low",
+        )
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["files_changed"] == ["smoke.txt"]
+        assert waited["model"] == "gemini-3.7-flash"
+        assert waited["effort"] == "low"
+        assert waited["observed_model"] is None
+        result = registry.get_result(dispatched["task_id"])
+        assert result["model"] == "gemini-3.7-flash"
+        assert "observed_model" in result
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_late_turn_result_does_not_overwrite_cancelled(bridge_home, tmp_path, monkeypatch):
+    """cancel_task's timeout path finalizes the task; the turn ending later must not flip it back."""
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def finalize_then_finish(self, session, task):
+        # Simulate cancel_task's 15s-timeout path having already finalized.
+        task.status = TaskStatus.cancelled
+        task.stop_reason = "cancelled"
+        task.finished_at = iso()
+        return TurnResult(text="late result", stop_reason="end_turn")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", finalize_then_finish)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "cancelled"
+        assert waited["stop_reason"] == "cancelled"
+        assert "late result" in waited["result_text"]
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_old_terminal_tasks_are_pruned(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.TASK_KEEP_PER_SESSION", 2)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task("fake", "t0", cwd=str(work.resolve()))
+        await registry.wait_task(first["task_id"], timeout_sec=5)
+        task_ids = [first["task_id"]]
+        for index in range(3):
+            more = await registry.dispatch_task(
+                "fake",
+                f"t{index + 1}",
+                cwd=str(work.resolve()),
+                session_id=first["session_id"],
+            )
+            await registry.wait_task(more["task_id"], timeout_sec=5)
+            task_ids.append(more["task_id"])
+        assert task_ids[0] not in registry.tasks
+        assert task_ids[-1] in registry.tasks
+        terminal = [t for t in registry.tasks.values() if t.session_id == first["session_id"]]
+        assert len(terminal) <= 3  # 2 kept terminal + possibly the newest
+    finally:
+        await registry.stop()

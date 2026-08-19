@@ -1,0 +1,17 @@
+name: Feature
+description: A new capability or worker
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What do you want
+      description: One short problem statement. Chinese is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Who this helps, and what you do today without it.

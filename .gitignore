@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.env
+logs/
+.sessions/
+.agent-bridge/
+.cursor/
+docs/plan.md
+灵感/

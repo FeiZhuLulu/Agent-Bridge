@@ -1,0 +1,19 @@
+# Copy to %USERPROFILE%\.agent-bridge\agents.toml and uncomment.
+# This file is the machine-local overlay (not the repo default).
+
+[env.proxy]
+url = "http://127.0.0.1:7897"
+no_proxy = "localhost,127.0.0.1,::1"
+
+# Optional. Only if a worker actually reads that variable from the process
+# environment. DSH credentials usually live in ~/.dsh/.credentials.yaml.
+# [env.set]
+# DEEPSEEK_API_KEY = "do-not-commit"
+
+# [agents.grok.env]
+# HTTPS_PROXY = "http://127.0.0.1:7897"
+
+# DSH: do not put a personal checkout path in the repo agents.toml.
+# Optional overrides live here or in the process environment:
+# DSH_ACP_BIN = "C:/path/to/dsh-acp-demo/lib/bin.js"
+# DSH_HARNESS = "C:/src/deepseek-harness"

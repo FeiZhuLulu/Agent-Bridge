@@ -30,7 +30,11 @@ uv run agent-bridge
 
 ## Connect Codex
 
-See [docs/codex-setup.md](docs/codex-setup.md). Short version: register `agent-bridge` in `~/.codex/config.toml`, and copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md`.
+```powershell
+codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
+```
+
+Copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md`. Restart Codex after changing the config.
 
 ## Tools
 

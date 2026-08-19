@@ -30,7 +30,11 @@ uv run agent-bridge
 
 ## 接到 Codex
 
-见 [docs/codex-setup.md](docs/codex-setup.md)。简短做法：在 `~/.codex/config.toml` 注册 `agent-bridge`，并把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`。
+```powershell
+codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
+```
+
+把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`。改完配置后重启 Codex。
 
 ## 工具
 

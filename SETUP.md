@@ -105,7 +105,7 @@ pattern = "mcp__agent-bridge__*"
 
 ## Environment and proxy
 
-This is not an optional extra. Worker CLIs (Grok, Kimi, DSH, agy) read `HTTPS_PROXY` / API keys from **their** process environment. Two things strip that:
+Worker CLIs (Grok, Kimi, DSH, agy) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
 2. Bridge launches `grok.exe` / `kimi` / `agy` directly, so PowerShell functions that wrap those CLIs never run.
@@ -145,6 +145,8 @@ That is why every host entry above says `run --no-sync`. Two launch styles avoid
 - `C:/path/to/Agent-Bridge/.venv/Scripts/python.exe -m agent_bridge` — no `uv` at spawn time at all, so it can never touch the lock; the path is machine-specific.
 
 POSIX hosts can replace a running binary, so this failure is Windows-only.
+
+Instances share the `~/.agent-bridge` state directory but not sessions: every session and task record carries the identity of the Bridge instance that owns it. `list_sessions` shows only the calling instance's records, saves leave a live sibling's records untouched on disk, and records whose owning instance has exited are adopted at the next boot — their in-flight tasks surface as `failed` / `bridge_restarted`. A session started from one host is continued from that host; it does not appear in another host's `list_sessions` while its owner is alive.
 
 ## Server lifecycle
 

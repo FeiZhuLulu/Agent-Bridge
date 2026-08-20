@@ -1,13 +1,16 @@
-# Copy to %USERPROFILE%\.agent-bridge\agents.toml and uncomment.
+# Copy to %USERPROFILE%\.agent-bridge\agents.toml and uncomment what you need.
 # This file is the machine-local overlay (not the repo default).
 
-[env.proxy]
-url = "http://127.0.0.1:7897"
-no_proxy = "localhost,127.0.0.1,::1"
+# Behind a firewall only. A machine on a direct network needs no proxy;
+# a null env.proxy in list_agents is normal there.
+# [env.proxy]
+# url = "http://127.0.0.1:7897"
+# no_proxy = "localhost,127.0.0.1,::1"
 
-[server]
 # Self-exit for abandoned MCP server instances whose host never closed stdin.
-idle_exit_sec = 7200
+# 7200 is already the default; set 0 to disable.
+# [server]
+# idle_exit_sec = 7200
 
 # Optional. Only if a worker actually reads that variable from the process
 # environment. DSH credentials usually live in ~/.dsh/.credentials.yaml.

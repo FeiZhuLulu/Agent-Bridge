@@ -32,7 +32,24 @@ async def lifespan(_server: MCPServer[Registry]) -> AsyncIterator[Registry]:
         await registry.stop()
 
 
-mcp = MCPServer[Registry]("agent-bridge", lifespan=lifespan)
+# Injected into the coordinator's context at the MCP handshake — the one
+# channel that needs no copied rules file and no skill install.
+INSTRUCTIONS = (
+    "Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, "
+    "Antigravity, DeepSeek Harness) and keeps their sessions resumable.\n"
+    "Hard rules: workers are reached only through these tools — never drive the "
+    "worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's "
+    "project folder (absolute), not the Agent Bridge install path. A wait_task "
+    "timeout is not failure; call it again. Verify results with get_result plus "
+    "your own git diff — do not trust a worker's self-report. An empty Kimi "
+    "result with non-empty warnings is a failed turn, not a no-op.\n"
+    "list_agents returns coordinator.mode (manual/auto/eager) and the user's "
+    "routing preferences in coordinator.instructions; read both before "
+    "dispatching, and let the user's preferences override any defaults. When "
+    "the user states a lasting preference, persist it with set_preferences."
+)
+
+mcp = MCPServer[Registry]("agent-bridge", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 
 def _registry(ctx: Context) -> Registry:
@@ -57,11 +74,30 @@ def _error(exc: Exception) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_agents(ctx: Context) -> dict[str, Any]:
-    """List configured workers, plus the reconstructed host/proxy environment the MCP host would otherwise strip."""
+    """List configured workers, the reconstructed host/proxy environment, and the coordinator policy (mode + user routing preferences)."""
     try:
         registry = _registry(ctx)
         agents = await registry.list_agents()
-        return {"ok": True, "agents": agents, "env": registry.env_status()}
+        return {
+            "ok": True,
+            "agents": agents,
+            "env": registry.env_status(),
+            "coordinator": registry.coordinator_status(),
+        }
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+async def set_preferences(
+    ctx: Context,
+    mode: str | None = None,
+    instructions: str | None = None,
+) -> dict[str, Any]:
+    """Persist the coordinator policy when the user states a lasting preference (e.g. "from now on, research goes to antigravity"). mode is manual/auto/eager; instructions is free routing-preference text that REPLACES the stored text — read coordinator.instructions from list_agents first and write the merged result. Applies to this instance immediately and to others at their next start. Do not call for one-off, this-task-only wishes."""
+    try:
+        result = _registry(ctx).set_preferences(mode=mode, instructions=instructions)
+        return {"ok": True, **result}
     except Exception as exc:
         return _error(exc)
 
@@ -76,8 +112,9 @@ async def dispatch_task(
     model: str | None = None,
     effort: str | None = None,
     title: str | None = None,
+    user_requested: bool = False,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; dsh: spawn env, respawn if they change). Pass session_id to continue. Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; dsh: spawn env, respawn if they change). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,
@@ -87,6 +124,7 @@ async def dispatch_task(
             model=model,
             effort=effort,
             title=title,
+            user_requested=user_requested,
         )
         return {"ok": True, **result}
     except Exception as exc:

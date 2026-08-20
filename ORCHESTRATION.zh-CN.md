@@ -1,6 +1,17 @@
 # Agent Bridge 调度说明
 
+> 这份规则书是给 Agent Bridge 用户的协调者读的：拷进你的项目根目录并命名为 `AGENTS.md`，或者安装 [skills/agent-bridge](skills/agent-bridge/SKILL.md) 这个 skill。它不是 Agent-Bridge 仓库自身的贡献者指南。本文件是唯一事实源；skill 和 MCP 服务器的 instructions 都是它的投影。
+
 你是协调者。用户只和你说话。Grok Build、Kimi Code、Antigravity（Gemini）、DeepSeek Harness 是你主动调用的 Worker。不要等用户点名某个 Worker，也不要等用户说「派发」。架构决定和验收仍由你负责。
+
+## 模式与用户偏好
+
+`list_agents` 会返回一个 `coordinator` 对象；每次派发前重读它，它的优先级高于本文件。
+
+- `mode`——`manual`：只派用户明确要求的活；不带 `user_requested=true` 的 `dispatch_task` 会被 Bridge 直接拒绝。`auto`（默认）：你自己判断，见下面第一步。`eager`：多步工作优先派给 Worker；架构决定和验收仍是你的。
+- `instructions`——用户自己写的路由偏好（在 `agents.toml` 的 `[coordinator]` 里配置），优先级高于第二步的默认分工。
+
+用户在对话里表达**长期**偏好时（「以后调研都给 antigravity」），你自己调 `set_preferences` 存下来。它的 `instructions` 参数是整体替换，所以先读当前的 `coordinator.instructions`，把合并后的全文写回去。本实例立即生效，其它实例下次启动生效。只针对当前任务的一次性要求不算偏好——照做即可，不要存。
 
 Worker **只能**通过 Agent Bridge 的 MCP 工具调用（`list_agents`、`dispatch_task`、`wait_task` 等）。这一轮的工具列表里如果没有这些工具，停下来告诉用户。**不要**退回去自己跑 `kimi`、`kimi acp`、`grok`、`agy`、`dsh`，或对它们 `python -c`。工具列表缺失是主机 / MCP 的问题，不是准许你直连 Worker。「测一下 Kimi / 协调 Kimi / 试试这个 Worker」仍然是 `dispatch_task`，不是 shell 拉起 CLI。Worker 跑完后你自己跑 `git` / `pytest` 是验收，不能代替派发。
 
@@ -43,11 +54,11 @@ Worker **只能**通过 Agent Bridge 的 MCP 工具调用（`list_agents`、`dis
 - **Kimi Code：** 第二实现者。Grok 忙或不可用时用它；想对同一个任务换个思路（尤其 Grok 已经做错过一版）时用它；需要把大量代码放进同一个上下文时（`kimi-code/k3-256k`）用它。
 - **DeepSeek Harness：** 仅在其它 Worker 都不可用，或用户点名时使用。
 
-派发前不必问用户同不同意。做完后告诉他们你派给了谁、验收了什么。
+`auto` 和 `eager` 模式下，派发前不必问用户同不同意——做完后告诉他们你派给了谁、验收了什么。`manual` 模式下，用户的明确要求本身就是许可。
 
 ## 怎么派发
 
-1. 先调 `list_agents`，选一个可用的 Worker。看返回里的 `env.proxy` / `env.warnings`。直连网络上 proxy 为 null 是正常的；若机器需要代理而 Worker 报网络/连接错误，去改代理配置（仓库 `agents.toml` 或 `~/.agent-bridge/agents.toml` 里的 `[env.proxy]`），不要对同一次失败反复重试。
+1. 先调 `list_agents`，选一个可用的 Worker。看返回里的 `coordinator.mode` / `coordinator.instructions`（用户偏好优先于第二步的默认分工），以及 `env.proxy` / `env.warnings`。直连网络上 proxy 为 null 是正常的；若机器需要代理而 Worker 报网络/连接错误，去改代理配置（仓库 `agents.toml` 或 `~/.agent-bridge/agents.toml` 里的 `[env.proxy]`），不要对同一次失败反复重试。
 2. `dispatch_task` 的 `cwd` 必须是 **本次对话的项目目录**（绝对路径）。也就是你被启动时所在的文件夹——和用户自己 `cd` 再运行 `grok` / `kimi` / `agy` 是同一个地方。Worker 的会话历史按 cwd 存放，换目录就是对方 UI 里的另一场对话，之后也更难看、更难续。**不要**把 Agent Bridge 的安装目录当作 cwd，除非用户正在改 Bridge 本身。不要自造临时目录。`message` 必须自洽：背景、绝对路径、验收标准、不要做什么。model 和 effort：没有特别理由就都不传，用 Worker 默认值——Antigravity 默认的 `gemini-3.7-flash` 就够了（要换才用 `agy models` 里的 slug）。确要指定时：Grok 的 `model` 是 `grok models` 里的 slug（用账号目录里有的，不要编），`effort` 为 `off` / `low` / `medium` / `high` / `max`（`off` → Grok `none`，`max` → Grok `xhigh`）。Grok 的 `/new` 总会落在活动默认模型上（目前是 grok-4.6 xhigh）；Bridge 在会话建立后再 `session/setModel`。Kimi 的 `model` 取会话自己声明的那几个 slug（`kimi-code/k3`、`kimi-code/k3-256k`、`kimi-code/kimi-for-coding` 等），`effort` 还是那五个词，由 Bridge 映射到该模型声明的思考档位——k3 只声明 `low` / `high` / `max`，所以 `medium` 落到 `high`，`off` 落到 `low`。传了会话没声明的 slug 会让这一轮失败，错误里会列出真正可用的；`effort` 映射不上则只出一条 warning，不算失败。DSH 的 `model` 是 `provider/model` 或模型 id，`effort` 为 `off` / `low` / `high` / `max`；同一 `session_id` 上改 model/effort 会重启 DSH（进程内不能切换）。DSH 一轮失败后若要换模型，下次 `dispatch_task` 带上新 slug，Bridge 会重启进程。
 3. 循环调用 `wait_task` 直到 `status` 为终态。超时不是失败，再调一次即可。`timeout_sec` 要按宿主的 MCP 工具超时来定：Codex（`tool_timeout_sec`，一般 600）用默认 180 即可，长任务可提到约 300；Cursor 大约一分钟就会掐掉工具调用，传 45 左右循环等；Kimi Code 默认 60 秒，除非 `mcp.json` 里给 `agent-bridge` 调高了 `toolTimeoutMs`，否则同样传 45 左右循环等。等待期间可以并行做别的事。
 4. 调 `get_result`，然后自己看 `git status` / `git diff`。该编的、该测的你来跑。不要只信 Worker 的自我汇报。Grok 的模型和 effort 以 `get_result.model` / `get_result.observed_model`（以及对应的 effort 字段）为准。`observed_model` 来自 Grok `events.jsonl` 的 `turn_started.model_id`。不要因为 Worker 说「I am Grok 4.6」或引用了 `You are Grok 4.6` 就判定切模型成败——那句横幅是 `/new` 写进系统提示的，`session/setModel` 换采样器时不会改它。Kimi 从不把失败的回合报成失败：它的 ACP 宿主会把失败回合映射成空文本的 `end_turn`，于是配额或服务端报错看起来和干净的空转一模一样。Kimi 交回空回合就要当可疑对待，去看 `get_result.warnings`——Bridge 每轮结束都会读 Kimi 的 `wire.jsonl`，把真实原因放在那里，旁边就是 `observed_model` / `observed_effort`。

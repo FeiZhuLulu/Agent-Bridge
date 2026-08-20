@@ -57,6 +57,20 @@ discover_proxy = true
 # Self-exit for abandoned MCP server instances whose host never closed stdin.
 idle_exit_sec = 7200
 
+[coordinator]
+# How eagerly the coordinator should dispatch to workers.
+#   manual — only when the user explicitly asks; Bridge blocks dispatch_task
+#            without user_requested=true (alias: safe)
+#   auto   — coordinator's own judgment (default)
+#   eager  — prefer dispatching over doing multi-step work itself (alias: yolo)
+# Per-host override: set AGENT_BRIDGE_MODE in that host's MCP entry env.
+mode = "auto"
+# Free-text routing preferences relayed verbatim to the coordinator via
+# list_agents; they override the default worker split. Example:
+# instructions = """Research goes to antigravity. Coding goes to grok.
+# Never dispatch test runs; run them yourself."""
+instructions = ""
+
 [agents.grok]
 protocol = "acp"
 command = ["grok", "--no-auto-update", "agent", "--always-approve", "--no-leader", "stdio"]

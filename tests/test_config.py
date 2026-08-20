@@ -1,6 +1,9 @@
+import tomllib
 from pathlib import Path
 
-from agent_bridge.config import AppConfig, load_config
+import pytest
+
+from agent_bridge.config import AppConfig, load_config, write_coordinator_overlay
 from agent_bridge.paths import bundled_agents_toml
 
 
@@ -108,3 +111,86 @@ idle_exit_sec = 0
     )
     cfg = load_config(tmp_path)
     assert cfg.server.idle_exit_sec == 0
+
+
+def test_coordinator_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    cfg = load_config(tmp_path)
+    assert cfg.coordinator.mode == "auto"
+    assert cfg.coordinator.instructions == ""
+
+
+def test_coordinator_overlay_and_safe_alias(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    (tmp_path / "agents.toml").write_text(
+        """
+[coordinator]
+mode = "safe"
+instructions = "Research goes to antigravity."
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.coordinator.mode == "manual"
+    assert cfg.coordinator.instructions == "Research goes to antigravity."
+
+
+def test_coordinator_invalid_mode_falls_back_to_auto(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    (tmp_path / "agents.toml").write_text('[coordinator]\nmode = "turbo"\n', encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.coordinator.mode == "auto"
+
+
+def test_coordinator_env_override_wins_with_yolo_alias(tmp_path, monkeypatch):
+    (tmp_path / "agents.toml").write_text('[coordinator]\nmode = "manual"\n', encoding="utf-8")
+    monkeypatch.setenv("AGENT_BRIDGE_MODE", "yolo")
+    cfg = load_config(tmp_path)
+    assert cfg.coordinator.mode == "eager"
+
+
+def test_write_overlay_creates_file(tmp_path):
+    path = write_coordinator_overlay(tmp_path, instructions="Research goes to agy.")
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["coordinator"]["instructions"] == "Research goes to agy."
+    assert "mode" not in data["coordinator"]  # unset keys keep flowing from repo defaults
+
+
+def test_write_overlay_preserves_other_sections_and_merges(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        """# my proxy, do not lose this comment
+[env.proxy]
+url = "http://127.0.0.1:7897"
+
+[coordinator]
+mode = "safe"
+
+[agents.grok]
+idle_unload_sec = 12
+""",
+        encoding="utf-8",
+    )
+    path = write_coordinator_overlay(tmp_path, instructions="Coding goes to grok.")
+    text = path.read_text(encoding="utf-8")
+    assert "do not lose this comment" in text
+    data = tomllib.loads(text)
+    assert data["env"]["proxy"]["url"] == "http://127.0.0.1:7897"
+    assert data["agents"]["grok"]["idle_unload_sec"] == 12
+    # untouched mode survives (canonicalized from the safe alias), new text lands
+    assert data["coordinator"]["mode"] == "manual"
+    assert data["coordinator"]["instructions"] == "Coding goes to grok."
+
+
+def test_write_overlay_multiline_and_backslashes_roundtrip(tmp_path):
+    text = 'Ports go to kimi.\nUse E:\\repos\\big "legacy" tree carefully.'
+    path = write_coordinator_overlay(tmp_path, instructions=text)
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["coordinator"]["instructions"].strip() == text
+
+
+def test_write_overlay_rejects_bad_mode_and_bad_toml(tmp_path):
+    with pytest.raises(ValueError, match="unknown coordinator mode"):
+        write_coordinator_overlay(tmp_path, mode="turbo")
+    (tmp_path / "agents.toml").write_text("[coordinator\nmode=", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid TOML"):
+        write_coordinator_overlay(tmp_path, mode="manual")

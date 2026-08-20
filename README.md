@@ -32,7 +32,7 @@ uv run agent-bridge
 codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
 ```
 
-Copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md` (Chinese: [AGENTS.zh-CN.md](AGENTS.zh-CN.md)). Restart Codex after changing the config. Proxy, env, and a longer drill are in [SETUP.md](SETUP.md).
+Give the coordinator the rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.codex/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into the target repo as `AGENTS.md` (Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)). The Bridge also injects its hard rules at the MCP handshake. Restart Codex after changing the config. Proxy, env, and a longer drill are in [SETUP.md](SETUP.md).
 
 ### Connect Cursor
 
@@ -49,7 +49,7 @@ Add the server to `%USERPROFILE%\.cursor\mcp.json` (all projects) or `<repo>\.cu
 }
 ```
 
-`--no-sync` keeps spawns from re-installing the package at startup (on Windows a running instance locks the launcher exe); run `uv sync` yourself after updating the Bridge. Cursor applies a repo-root `AGENTS.md` automatically, so the same orchestration rules work unchanged. Details in [SETUP.md](SETUP.md).
+`--no-sync` keeps spawns from re-installing the package at startup (on Windows a running instance locks the launcher exe); run `uv sync` yourself after updating the Bridge. Rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.cursor/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into your repo as `AGENTS.md`. Details in [SETUP.md](SETUP.md).
 
 ### Connect Kimi Code
 
@@ -67,13 +67,14 @@ Add the server to `%USERPROFILE%\.kimi-code\mcp.json` (all projects) or `<repo>\
 }
 ```
 
-Kimi Code's default MCP tool timeout is 60 s, which is shorter than a `wait_task` poll; `toolTimeoutMs` raises it. Kimi reads a repo-root `AGENTS.md` too, so the orchestration rules apply unchanged. Details in [SETUP.md](SETUP.md).
+Kimi Code's default MCP tool timeout is 60 s, which is shorter than a `wait_task` poll; `toolTimeoutMs` raises it. Rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.kimi-code/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into your repo as `AGENTS.md`. Details in [SETUP.md](SETUP.md).
 
 ### Tools
 
 | Tool | Role |
 | --- | --- |
-| `list_agents` | Probe workers and report proxy/env |
+| `list_agents` | Probe workers, report proxy/env + coordinator policy |
+| `set_preferences` | Persist coordinator mode / routing preferences |
 | `dispatch_task` | Start or resume a turn in the project `cwd` |
 | `wait_task` | Block up to `timeout_sec` (default 180) |
 | `check_task` | Non-blocking status |
@@ -119,7 +120,7 @@ uv run agent-bridge
 codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
 ```
 
-把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`（中文对照：[AGENTS.zh-CN.md](AGENTS.zh-CN.md)）。改完配置后重启 Codex。代理、环境和更完整的验收步骤见 [SETUP.md](SETUP.md)。
+给协调者装规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.codex/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到目标仓库并命名为 `AGENTS.md`（中文对照：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)）。Bridge 也会在 MCP 握手时自动注入硬规则。改完配置后重启 Codex。代理、环境和更完整的验收步骤见 [SETUP.md](SETUP.md)。
 
 ### 接到 Cursor
 
@@ -136,7 +137,7 @@ codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-
 }
 ```
 
-`--no-sync` 让每次拉起不再重装包（Windows 上运行中的实例会锁住启动 exe）；更新 Bridge 后自己跑一次 `uv sync`。Cursor 会自动应用仓库根目录的 `AGENTS.md`，同一份调度规则无需改动即可生效。细节见 [SETUP.md](SETUP.md)。
+`--no-sync` 让每次拉起不再重装包（Windows 上运行中的实例会锁住启动 exe）；更新 Bridge 后自己跑一次 `uv sync`。规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.cursor/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到你的仓库并命名为 `AGENTS.md`。细节见 [SETUP.md](SETUP.md)。
 
 ### 接到 Kimi Code
 
@@ -154,13 +155,14 @@ codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-
 }
 ```
 
-Kimi Code 默认的 MCP 工具超时是 60 秒，比一次 `wait_task` 轮询还短，用 `toolTimeoutMs` 调高。Kimi 同样会读仓库根目录的 `AGENTS.md`，调度规则无需改动。细节见 [SETUP.md](SETUP.md)。
+Kimi Code 默认的 MCP 工具超时是 60 秒，比一次 `wait_task` 轮询还短，用 `toolTimeoutMs` 调高。规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.kimi-code/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到你的仓库并命名为 `AGENTS.md`。细节见 [SETUP.md](SETUP.md)。
 
 ### 工具
 
 | 工具 | 作用 |
 | --- | --- |
-| `list_agents` | 探测 worker，并报告代理 / 环境 |
+| `list_agents` | 探测 worker，报告代理 / 环境 + 协调者策略 |
+| `set_preferences` | 持久化协调者模式 / 路由偏好 |
 | `dispatch_task` | 在项目 `cwd` 里开始或续上一次回合 |
 | `wait_task` | 最多等待 `timeout_sec`（默认 180） |
 | `check_task` | 非阻塞状态查询 |

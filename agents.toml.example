@@ -12,6 +12,14 @@
 # [server]
 # idle_exit_sec = 7200
 
+# Dispatch policy: mode = manual | auto | eager (default auto).
+# instructions is free text the coordinator reads via list_agents; it
+# overrides the default worker split and persists across sessions.
+# [coordinator]
+# mode = "auto"
+# instructions = """Research goes to antigravity. Coding goes to grok.
+# Long single-file ports go to kimi (k3-256k)."""
+
 # Optional. Only if a worker actually reads that variable from the process
 # environment. DSH credentials usually live in ~/.dsh/.credentials.yaml.
 # [env.set]

@@ -154,14 +154,32 @@ Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200
 
 ## Orchestration rules
 
-Copy [AGENTS.md](AGENTS.md) to:
+The coordinator learns how to drive the Bridge through three channels; [ORCHESTRATION.md](ORCHESTRATION.md) is the source of truth for all of them ([ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md) is the human-readable translation):
 
-- the target repository root (Codex, Cursor, and Kimi Code all auto-apply it there), or
-- `%USERPROFILE%\.codex\AGENTS.md` for a Codex-global default; `%USERPROFILE%\.kimi-code\AGENTS.md` for a Kimi-global default; the Cursor-global equivalent is User Rules in Cursor settings
+1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
+2. **Skill — recommended.** Copy [skills/agent-bridge/](skills/agent-bridge/SKILL.md) into the host's skill directory: `%USERPROFILE%\.cursor\skills\agent-bridge\`, `%USERPROFILE%\.codex\skills\agent-bridge\`, `%USERPROFILE%\.kimi-code\skills\agent-bridge\`, or the cross-agent `%USERPROFILE%\.agents\skills\agent-bridge\`. It loads on demand when the coordinator is about to dispatch.
+3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, and Kimi Code all auto-apply it there), or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the file under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
-Codex reads the English file. [AGENTS.zh-CN.md](AGENTS.zh-CN.md) is a human-readable translation.
+Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.
 
-Keep it under 32 KiB. Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same from the git root down and warns past 32 KiB.
+## Coordinator mode and routing preferences
+
+`[coordinator]` in `agents.toml` (repo or `%USERPROFILE%\.agent-bridge\agents.toml`) sets how eagerly the coordinator dispatches and carries your persistent routing preferences:
+
+```toml
+[coordinator]
+mode = "auto"   # manual | auto | eager  (aliases: safe -> manual, yolo -> eager)
+instructions = """Research goes to antigravity. Coding goes to grok.
+Never dispatch test runs; run them yourself."""
+```
+
+- `manual` — the Bridge rejects `dispatch_task` unless the coordinator passes `user_requested=true`, which it may only do when you explicitly asked for a worker. Enforced server-side, not just prompted.
+- `auto` (default) — the coordinator weighs dispatch overhead against doing the work itself.
+- `eager` — the coordinator is told to prefer dispatching multi-step work; advisory, not enforced.
+
+`instructions` is free text relayed verbatim through `list_agents`; the rulebook tells the coordinator these preferences override its default worker split. Per-host override: set `AGENT_BRIDGE_MODE=manual|auto|eager` in that host's MCP entry `env` block to give, say, Codex a different mode than Cursor.
+
+You don't have to edit the file yourself: tell the coordinator in chat ("以后调研都给 antigravity" / "from now on, research goes to antigravity") and it calls the `set_preferences` tool. The Bridge rewrites only the `[coordinator]` section of `%USERPROFILE%\.agent-bridge\agents.toml` (the rest of the file, including comments, is preserved), applies the change to the running instance immediately, and other Bridge instances pick it up at their next start. A config file edited by hand is picked up at the next start too — `AGENT_BRIDGE_MODE` still outranks the file where it is set.
 
 ## End-to-end drill
 

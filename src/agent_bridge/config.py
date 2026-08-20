@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agent_bridge.paths import bridge_home, bundled_agents_toml
+from agent_bridge.persist import atomic_write_text
 
 DEFAULT_INHERIT_KEYS = (
     "HTTP_PROXY",
@@ -75,10 +78,57 @@ class ServerConfig(BaseModel):
     idle_exit_sec: int = 7200
 
 
+COORDINATOR_MODES = ("manual", "auto", "eager")
+# The notes that inspired this used safe/yolo; yolo already means
+# "auto-approve tool calls" for Kimi and Grok, so the canonical names differ.
+_MODE_ALIASES = {"safe": "manual", "yolo": "eager"}
+
+# Sent back on every list_agents call so the coordinator re-reads the policy
+# at the moment it matters, instead of relying on rules it saw turns ago.
+COORDINATOR_MODE_HINTS = {
+    "manual": (
+        "dispatch only when the user explicitly asked for a worker; "
+        "dispatch_task is blocked unless user_requested=true"
+    ),
+    "auto": "dispatch at your own judgment; weigh dispatch overhead against doing it yourself",
+    "eager": (
+        "prefer dispatching workers over doing multi-step work yourself; "
+        "you keep architecture decisions and acceptance"
+    ),
+}
+
+
+def normalize_coordinator_mode(raw: str | None, *, strict: bool = False) -> str:
+    text = (raw or "").strip().lower()
+    text = _MODE_ALIASES.get(text, text)
+    if text in COORDINATOR_MODES:
+        return text
+    if strict:
+        raise ValueError(
+            f"unknown coordinator mode {raw!r}; use one of "
+            f"{', '.join(COORDINATOR_MODES)} (aliases: safe, yolo)"
+        )
+    return "auto"
+
+
+class CoordinatorConfig(BaseModel):
+    """How eagerly the coordinator should dispatch, plus user routing preferences.
+
+    Bridge does not interpret ``instructions``; it relays the text through
+    ``list_agents`` for the coordinator LLM to read. ``mode`` is the only key
+    Bridge acts on itself: ``manual`` hard-blocks dispatch_task without
+    ``user_requested=true``.
+    """
+
+    mode: str = "auto"
+    instructions: str = ""
+
+
 class AppConfig(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     env: EnvConfig = Field(default_factory=EnvConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
 
     def get(self, name: str) -> AgentConfig:
         if name not in self.agents:
@@ -157,6 +207,70 @@ def _coerce_server(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _coerce_coordinator(raw: dict[str, Any]) -> dict[str, Any]:
+    block = raw.get("coordinator")
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if block.get("mode") is not None:
+        out["mode"] = str(block["mode"])
+    if block.get("instructions") is not None:
+        out["instructions"] = str(block["instructions"]).strip()
+    return out
+
+
+def _toml_string(value: str) -> str:
+    if not value:
+        return '""'
+    if "\n" not in value and '"' not in value and "\\" not in value:
+        return f'"{value}"'
+    # Literal multiline: no escape processing, so Windows paths survive.
+    if "'''" not in value and not value.endswith("'"):
+        return f"'''\n{value}\n'''"
+    return json.dumps(value, ensure_ascii=False)
+
+
+_COORDINATOR_BLOCK = re.compile(r"(?ms)^\[coordinator\][^\n]*\n?.*?(?=^\[|\Z)")
+
+
+def write_coordinator_overlay(
+    home: Path,
+    *,
+    mode: str | None = None,
+    instructions: str | None = None,
+) -> Path:
+    """Rewrite only the [coordinator] section of the user overlay, keeping the rest.
+
+    Values not passed here keep whatever the overlay already pins (or stay
+    unset so repo defaults keep flowing). Raises on a malformed overlay instead
+    of clobbering a file the user hand-edited.
+    """
+    path = home / "agents.toml"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    try:
+        existing = tomllib.loads(text).get("coordinator", {})
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"{path} is not valid TOML ({exc}); fix it by hand first") from exc
+
+    new_mode = mode if mode is not None else existing.get("mode")
+    new_instructions = instructions if instructions is not None else existing.get("instructions")
+
+    lines = ["[coordinator]"]
+    if new_mode is not None:
+        lines.append(f'mode = "{normalize_coordinator_mode(str(new_mode), strict=True)}"')
+    if new_instructions is not None:
+        lines.append(f"instructions = {_toml_string(str(new_instructions))}")
+    block = "\n".join(lines) + "\n"
+
+    match = _COORDINATOR_BLOCK.search(text)
+    if match:
+        text = text[: match.start()] + block + text[match.end() :]
+    else:
+        text = block if not text.strip() else text.rstrip() + "\n\n" + block
+    atomic_write_text(path, text)
+    return path
+
+
 def _merge_server(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     out.update(overlay)
@@ -188,4 +302,12 @@ def load_config(home: Path | None = None) -> AppConfig:
     server = ServerConfig.model_validate(
         _merge_server(_coerce_server(bundled_raw), _coerce_server(overlay_raw))
     )
-    return AppConfig(agents=agents, env=env, server=server)
+    coord_raw = {**_coerce_coordinator(bundled_raw), **_coerce_coordinator(overlay_raw)}
+    # Per-host override: each MCP host entry can set its own mode via env
+    # (e.g. Codex manual, Cursor eager) without a second config file.
+    env_mode = os.environ.get("AGENT_BRIDGE_MODE")
+    if env_mode:
+        coord_raw["mode"] = env_mode
+    coord_raw["mode"] = normalize_coordinator_mode(coord_raw.get("mode"))
+    coordinator = CoordinatorConfig.model_validate(coord_raw)
+    return AppConfig(agents=agents, env=env, server=server, coordinator=coordinator)

@@ -1,7 +1,7 @@
-from agent_bridge.server import mcp
+from agent_bridge.server import INSTRUCTIONS, mcp
 
 
-def test_nine_tools_registered():
+def test_ten_tools_registered():
     names = sorted(mcp._tool_manager._tools)
     assert names == [
         "cancel_task",
@@ -12,5 +12,12 @@ def test_nine_tools_registered():
         "get_transcript",
         "list_agents",
         "list_sessions",
+        "set_preferences",
         "wait_task",
     ]
+
+
+def test_handshake_instructions_carry_hard_rules():
+    assert mcp.instructions == INSTRUCTIONS
+    for phrase in ("dispatch_task.cwd", "wait_task", "coordinator.mode"):
+        assert phrase in INSTRUCTIONS

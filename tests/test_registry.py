@@ -469,3 +469,80 @@ async def test_idle_exit_due_predicate(bridge_home, tmp_path):
         assert registry.idle_exit_due() is False
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_status_default_auto_never_blocks(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        status = registry.coordinator_status()
+        assert status["mode"] == "auto"
+        assert status["instructions"] is None
+        assert status["hint"]
+        dispatched = await registry.dispatch_task("fake", "hi", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_preferences_applies_now_and_persists(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        result = registry.set_preferences(mode="safe", instructions="Coding goes to grok.")
+        assert result["coordinator"]["mode"] == "manual"
+        assert result["coordinator"]["instructions"] == "Coding goes to grok."
+        assert result["notes"]
+        # immediate effect in the running instance: manual gate is live
+        with pytest.raises(RuntimeError, match="manual"):
+            await registry.dispatch_task("fake", "hi", cwd=str(work.resolve()))
+        with pytest.raises(ValueError, match="unknown coordinator mode"):
+            registry.set_preferences(mode="turbo")
+    finally:
+        await registry.stop()
+
+    # a fresh instance over the same home reads the persisted overlay
+    fresh = Registry.create(bridge_home)
+    assert fresh.coordinator_status()["mode"] == "manual"
+    assert fresh.coordinator_status()["instructions"] == "Coding goes to grok."
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_blocks_dispatch_without_user_request(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    (bridge_home / "agents.toml").write_text(
+        """
+[coordinator]
+mode = "manual"
+instructions = "Coding goes to grok."
+""",
+        encoding="utf-8",
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        status = registry.coordinator_status()
+        assert status["mode"] == "manual"
+        assert "user_requested" in status["hint"]
+        assert status["instructions"] == "Coding goes to grok."
+        with pytest.raises(RuntimeError, match="manual"):
+            await registry.dispatch_task("fake", "hi", cwd=str(work.resolve()))
+        dispatched = await registry.dispatch_task(
+            "fake", "hi", cwd=str(work.resolve()), user_requested=True
+        )
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+    finally:
+        await registry.stop()

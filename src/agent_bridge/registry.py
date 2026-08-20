@@ -10,7 +10,13 @@ from pathlib import Path
 
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
-from agent_bridge.config import AppConfig, load_config
+from agent_bridge.config import (
+    COORDINATOR_MODE_HINTS,
+    AppConfig,
+    load_config,
+    normalize_coordinator_mode,
+    write_coordinator_overlay,
+)
 from agent_bridge.grok_observe import observe_grok_session
 from agent_bridge.kimi_observe import observe_kimi_session
 from agent_bridge.models import (
@@ -274,6 +280,41 @@ class Registry:
             )
         return status
 
+    def coordinator_status(self) -> dict:
+        cfg = self.config.coordinator
+        return {
+            "mode": cfg.mode,
+            "hint": COORDINATOR_MODE_HINTS.get(cfg.mode, COORDINATOR_MODE_HINTS["auto"]),
+            "instructions": cfg.instructions or None,
+        }
+
+    def set_preferences(
+        self,
+        *,
+        mode: str | None = None,
+        instructions: str | None = None,
+    ) -> dict:
+        if mode is None and instructions is None:
+            raise ValueError("provide mode and/or instructions")
+        if mode is not None:
+            mode = normalize_coordinator_mode(mode, strict=True)
+        path = write_coordinator_overlay(self.home, mode=mode, instructions=instructions)
+        # The running instance applies the change immediately; the file makes
+        # it stick for every Bridge instance started after this.
+        if mode is not None:
+            self.config.coordinator.mode = mode
+        if instructions is not None:
+            self.config.coordinator.instructions = instructions.strip()
+        notes = [
+            "active in this Bridge instance now; other running instances pick it up at their next start"
+        ]
+        if mode is not None and os.environ.get("AGENT_BRIDGE_MODE"):
+            notes.append(
+                "this host pins mode via AGENT_BRIDGE_MODE, which outranks the file "
+                "after a restart; the saved mode applies to hosts without that pin"
+            )
+        return {"coordinator": self.coordinator_status(), "path": str(path), "notes": notes}
+
     async def dispatch_task(
         self,
         agent: str,
@@ -283,7 +324,14 @@ class Registry:
         model: str | None = None,
         effort: str | None = None,
         title: str | None = None,
+        user_requested: bool = False,
     ) -> dict:
+        if self.config.coordinator.mode == "manual" and not user_requested:
+            raise RuntimeError(
+                "coordinator mode is manual: dispatch only when the user explicitly "
+                "asked for a worker on this task. If they did, retry with "
+                "user_requested=true; otherwise do the work yourself."
+            )
         cwd_path = Path(cwd)
         if not cwd_path.is_absolute():
             raise ValueError("cwd must be an absolute path")

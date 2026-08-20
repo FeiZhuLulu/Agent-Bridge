@@ -17,57 +17,52 @@ It does not drive GUIs. The user talks only to the coordinator.
 
 ### Install
 
-Python 3.11+ and [uv](https://docs.astral.sh/uv/):
+Need [uv](https://docs.astral.sh/uv/). Then:
 
 ```powershell
-git clone https://github.com/FeiZhuLulu/Agent-Bridge.git
-cd Agent-Bridge
-uv sync --extra dev
-uv run agent-bridge
+uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 ```
 
 ### Connect Codex
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
+codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 ```
 
-Give the coordinator the rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.codex/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into the target repo as `AGENTS.md` (Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)). The Bridge also injects its hard rules at the MCP handshake. Restart Codex after changing the config. Proxy, env, and a longer drill are in [SETUP.md](SETUP.md).
+Restart Codex. The coordinator skill is written the first time the server starts. More hosts and proxy notes: [SETUP.md](SETUP.md).
 
 ### Connect Cursor
 
-Add the server to `%USERPROFILE%\.cursor\mcp.json` (all projects) or `<repo>\.cursor\mcp.json` (one project):
+`%USERPROFILE%\.cursor\mcp.json` (all projects) or `<repo>\.cursor\mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"]
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe"
     }
   }
 }
 ```
 
-`--no-sync` keeps spawns from re-installing the package at startup (on Windows a running instance locks the launcher exe); run `uv sync` yourself after updating the Bridge. Rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.cursor/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into your repo as `AGENTS.md`. Details in [SETUP.md](SETUP.md).
-
 ### Connect Kimi Code
 
-Add the server to `%USERPROFILE%\.kimi-code\mcp.json` (all projects) or `<repo>\.kimi-code\mcp.json` (one project):
+`%USERPROFILE%\.kimi-code\mcp.json` (all projects) or `<repo>\.kimi-code\mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"],
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe",
       "toolTimeoutMs": 600000
     }
   }
 }
 ```
 
-Kimi Code's default MCP tool timeout is 60 s, which is shorter than a `wait_task` poll; `toolTimeoutMs` raises it. Rules: install the [agent-bridge skill](skills/agent-bridge/SKILL.md) into `~/.kimi-code/skills/agent-bridge/`, or copy [ORCHESTRATION.md](ORCHESTRATION.md) into your repo as `AGENTS.md`. Details in [SETUP.md](SETUP.md).
+### Update
+
+Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then restart them.
 
 ### Tools
 
@@ -105,57 +100,52 @@ Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——
 
 ### 安装
 
-需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)：
+先装 [uv](https://docs.astral.sh/uv/)，然后：
 
 ```powershell
-git clone https://github.com/FeiZhuLulu/Agent-Bridge.git
-cd Agent-Bridge
-uv sync --extra dev
-uv run agent-bridge
+uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 ```
 
 ### 接到 Codex
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
+codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 ```
 
-给协调者装规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.codex/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到目标仓库并命名为 `AGENTS.md`（中文对照：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)）。Bridge 也会在 MCP 握手时自动注入硬规则。改完配置后重启 Codex。代理、环境和更完整的验收步骤见 [SETUP.md](SETUP.md)。
+重启 Codex。协调者 skill 会在服务器第一次启动时自动写入。其它宿主和代理见 [SETUP.md](SETUP.md)。
 
 ### 接到 Cursor
 
-把服务器写进 `%USERPROFILE%\.cursor\mcp.json`（对所有项目生效）或 `<仓库>\.cursor\mcp.json`（只对单个项目）：
+`%USERPROFILE%\.cursor\mcp.json`（所有项目）或 `<仓库>\.cursor\mcp.json`：
 
 ```json
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"]
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe"
     }
   }
 }
 ```
 
-`--no-sync` 让每次拉起不再重装包（Windows 上运行中的实例会锁住启动 exe）；更新 Bridge 后自己跑一次 `uv sync`。规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.cursor/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到你的仓库并命名为 `AGENTS.md`。细节见 [SETUP.md](SETUP.md)。
-
 ### 接到 Kimi Code
 
-把服务器写进 `%USERPROFILE%\.kimi-code\mcp.json`（对所有项目生效）或 `<仓库>\.kimi-code\mcp.json`（只对单个项目）：
+`%USERPROFILE%\.kimi-code\mcp.json`（所有项目）或 `<仓库>\.kimi-code\mcp.json`：
 
 ```json
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"],
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe",
       "toolTimeoutMs": 600000
     }
   }
 }
 ```
 
-Kimi Code 默认的 MCP 工具超时是 60 秒，比一次 `wait_task` 轮询还短，用 `toolTimeoutMs` 调高。规则：把 [agent-bridge skill](skills/agent-bridge/SKILL.md) 装进 `~/.kimi-code/skills/agent-bridge/`，或把 [ORCHESTRATION.md](ORCHESTRATION.md) 拷到你的仓库并命名为 `AGENTS.md`。细节见 [SETUP.md](SETUP.md)。
+### 更新
+
+先关掉正连着 Bridge 的协调者，执行 `agent-bridge upgrade`，再重启。
 
 ### 工具
 

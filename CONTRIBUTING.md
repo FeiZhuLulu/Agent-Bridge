@@ -4,6 +4,8 @@
 
 ## Setup
 
+This is the source checkout. End users install with `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git` and do not need this repo.
+
 ```powershell
 uv sync --extra dev
 uv run pytest

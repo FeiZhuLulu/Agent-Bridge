@@ -4,6 +4,8 @@
 
 ## 环境
 
+这是源码检出。最终用户用 `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git` 安装，不需要这份仓库。
+
 ```powershell
 uv sync --extra dev
 uv run pytest

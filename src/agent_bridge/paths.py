@@ -48,6 +48,17 @@ def bundled_agents_toml() -> Path:
     return here.parents[2] / "agents.toml"
 
 
+def bundled_skill() -> Path:
+    here = Path(__file__).resolve()
+    for candidate in (
+        here.parent / "share" / "skills" / "agent-bridge" / "SKILL.md",
+        here.parents[2] / "skills" / "agent-bridge" / "SKILL.md",
+    ):
+        if candidate.is_file():
+            return candidate
+    return here.parent / "share" / "skills" / "agent-bridge" / "SKILL.md"
+
+
 def bundled_dsh_cordis() -> Path:
     here = Path(__file__).resolve()
     for candidate in (

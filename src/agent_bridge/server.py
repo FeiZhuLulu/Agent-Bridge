@@ -206,18 +206,9 @@ async def end_session(ctx: Context, session_id: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    import json
-    import sys
+    from agent_bridge.cli import main as cli_main
 
-    from agent_bridge.config import load_config
-    from agent_bridge.worker_env import describe_env
-
-    if len(sys.argv) > 1 and sys.argv[1] in {"--env", "env", "--print-env"}:
-        status = describe_env(load_config().env)
-        print(json.dumps(status, indent=2, ensure_ascii=False))
-        return
-    setup_logging(ensure_home())
-    mcp.run(transport="stdio")
+    cli_main()
 
 
 if __name__ == "__main__":

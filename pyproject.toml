@@ -36,6 +36,9 @@ packages = ["src/agent_bridge"]
 [tool.hatch.build.targets.wheel.force-include]
 "agents.toml" = "agent_bridge/agents.toml"
 "src/agent_bridge/share/dsh-acp.cordis.yml" = "agent_bridge/share/dsh-acp.cordis.yml"
+"skills/agent-bridge/SKILL.md" = "agent_bridge/share/skills/agent-bridge/SKILL.md"
+"ORCHESTRATION.md" = "agent_bridge/share/ORCHESTRATION.md"
+"ORCHESTRATION.zh-CN.md" = "agent_bridge/share/ORCHESTRATION.zh-CN.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

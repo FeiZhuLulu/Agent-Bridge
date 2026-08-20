@@ -1,21 +1,30 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, and Kimi Code can all act as the coordinator. Register the same stdio server in whichever host you use; the orchestration rules file is shared.
+Codex, Cursor, and Kimi Code can all act as the coordinator. Register the same stdio server in whichever host you use.
+
+## Install
+
+```powershell
+uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
+```
+
+That is the whole install. Then register the MCP server in the coordinator. The first time Codex (or Cursor / Kimi) starts Bridge, the coordinator skill is written automatically. Need [uv](https://docs.astral.sh/uv/) first.
+
+A clone is only for people changing Bridge itself. Pointing MCP at `uv --directory … run --no-sync agent-bridge` still works; `--no-sync` is required on Windows because a live instance locks `.venv\Scripts\agent-bridge.exe`.
 
 ## Register the MCP server (Codex)
 
 From a trusted project, or edit `%USERPROFILE%\.codex\config.toml`:
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
+codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 ```
 
-Then add the tuning keys. Codex **clears** the MCP child environment, so list every variable workers need:
+Use the full path so Codex does not have to inherit `PATH`. Then add the tuning keys. Codex **clears** the MCP child environment, so list every variable workers need:
 
 ```toml
 [mcp_servers.agent_bridge]
-command = "uv"
-args = ["--directory", "C:\\path\\to\\Agent-Bridge", "run", "--no-sync", "agent-bridge"]
+command = "C:\\Users\\YOU\\.local\\bin\\agent-bridge.exe"
 startup_timeout_sec = 30
 tool_timeout_sec = 600
 supports_parallel_tool_calls = true
@@ -31,7 +40,7 @@ env_vars = [
 ]
 ```
 
-`uv` must be on the PATH Codex uses (`%USERPROFILE%\.local\bin` after the standalone installer). If Codex cannot find `uv`, set `command` to the full `uv.exe` path.
+The `command` above is the `uv tool` shim. If `uv tool dir --bin` is not `%USERPROFILE%\.local\bin`, use that directory instead.
 
 DSH does **not** require `DEEPSEEK_API_KEY`. It uses whatever provider the user already configured in DSH (`%USERPROFILE%\.dsh\settings.yaml` and `.credentials.yaml`). Add extra key names to `env_vars` / `[env.inherit]` only if that user's DSH `apiKeyEnv` points at a process environment variable instead of the credentials file.
 
@@ -50,7 +59,7 @@ Restart Codex after editing `config.toml`.
 Inspect what Bridge reconstructed:
 
 ```powershell
-uv --directory "C:\path\to\Agent-Bridge" run agent-bridge --env
+agent-bridge --env
 ```
 
 ## Register the MCP server (Cursor)
@@ -61,14 +70,13 @@ uv --directory "C:\path\to\Agent-Bridge" run agent-bridge --env
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"]
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe"
     }
   }
 }
 ```
 
-- Keep `--no-sync`. A plain `uv run` re-syncs the project on every spawn; if any other Bridge instance is alive (for example one held by a Codex session), Windows cannot replace the locked `agent-bridge.exe` and the spawn dies before the MCP handshake. Source edits are live anyway (editable install); run `uv sync --extra dev` yourself after changing dependencies or `pyproject.toml`.
+- Use the same full path `uv tool` installed. If you still launch from a checkout, keep `--no-sync` (see Install).
 - Cursor usually picks up `mcp.json` edits without a restart, though the docs still recommend restarting after changes. If the server gets stuck in an error state after a failed spawn, rename the server key — a new identity forces a fresh connection; a full Cursor restart also works.
 - Cursor forwards more of the desktop environment than Codex, but Bridge rebuilds proxy/env itself either way; `agents.toml [env]` still applies.
 - Cursor's MCP tool timeout is around one minute (not configurable like Codex `tool_timeout_sec`). From Cursor, call `wait_task` with `timeout_sec` ≈ 45 and loop; the default 180 gets killed by the host first.
@@ -81,8 +89,7 @@ uv --directory "C:\path\to\Agent-Bridge" run agent-bridge --env
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/Agent-Bridge", "run", "--no-sync", "agent-bridge"],
+      "command": "C:/Users/YOU/.local/bin/agent-bridge.exe",
       "toolTimeoutMs": 600000,
       "startupTimeoutMs": 60000
     }
@@ -90,7 +97,6 @@ uv --directory "C:\path\to\Agent-Bridge" run agent-bridge --env
 }
 ```
 
-- Keep `--no-sync`, for the same reason as Cursor.
 - Kimi Code's default single-tool-call timeout is 60 s, so a default `wait_task(timeout_sec=180)` gets killed by the host. `toolTimeoutMs` is the per-server override; `[mcp] tool_timeout_ms` in `config.toml` or `KIMI_MCP_TOOL_TIMEOUT_MS` moves the global default. With the value above, `wait_task` behaves like it does under Codex; without it, pass ≈ 45 and loop.
 - Kimi asks for approval per MCP tool call unless the run is in YOLO mode. To pre-approve Bridge only, add to `%USERPROFILE%\.kimi-code\config.toml`:
 
@@ -131,20 +137,35 @@ no_proxy = "localhost,127.0.0.1,::1"
 
 `list_agents` returns an `env` object (`proxy`, `proxy_source`, `present`, `missing`, `warnings`). A null `env.proxy` is normal on a direct network. Behind a firewall, configure `[env.proxy]`; Grok talking to `cli-chat-proxy.grok.com` is usually the first casualty.
 
-## Multiple coordinators on one checkout
+## Update
 
-Running Codex, Cursor, and Kimi Code coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts the siblings. What must not run twice is the **installer**. A plain `uv run` syncs the project before executing, and that sync rewrites `.venv\Scripts\agent-bridge.exe` — on Windows a file every running instance holds open. The second host's spawn then dies before the MCP handshake with:
+One command, after you close every coordinator that is holding a Bridge instance (Windows will lock the tool exe while one is running):
+
+```powershell
+agent-bridge upgrade
+```
+
+- `uv tool` install → `uv tool upgrade agent-bridge`, then refresh skill copies that already exist.
+- git checkout → `git pull` and `uv sync --extra dev` in that checkout, then the same skill refresh.
+- Anything else → the command tells you to `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git`.
+
+Restart Codex / Cursor / Kimi Code so they reconnect and pick up new tools and the MCP handshake instructions.
+
+What you do **not** redo: `codex mcp add` / `mcp.json`, `%USERPROFILE%\.agent-bridge\agents.toml` (proxy, `[coordinator]`, `set_preferences`), or worker CLIs and their logins. If you copied `ORCHESTRATION.md` into another repo as `AGENTS.md`, that copy is still yours to refresh.
+
+Already on a clone and want the tool install instead: `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git`, point each host `command` at `agent-bridge`, then delete the clone. The overlay in `~/.agent-bridge` stays.
+
+## Multiple coordinators on one machine
+
+Running Codex, Cursor, and Kimi Code coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts the siblings. A `uv tool` install is shared and does not sync on spawn.
+
+What must not run twice is the **installer** of a git checkout. A plain `uv run` syncs the project before executing, and that sync rewrites `.venv\Scripts\agent-bridge.exe` — on Windows a file every running instance holds open. The second host's spawn then dies before the MCP handshake with:
 
 ```text
 error: failed to remove file `...\.venv\Lib\site-packages\../../Scripts/agent-bridge.exe` (os error 32)
 ```
 
-That is why every host entry above says `run --no-sync`. Two launch styles avoid the lock:
-
-- `uv --directory C:/path/to/Agent-Bridge run --no-sync agent-bridge` — portable path, but remember to run `uv sync --extra dev` yourself after cloning or changing dependencies, while no instance is running.
-- `C:/path/to/Agent-Bridge/.venv/Scripts/python.exe -m agent_bridge` — no `uv` at spawn time at all, so it can never touch the lock; the path is machine-specific.
-
-POSIX hosts can replace a running binary, so this failure is Windows-only.
+If you still launch from a checkout, use `uv --directory … run --no-sync agent-bridge` or `.venv/Scripts/python.exe -m agent_bridge`. POSIX hosts can replace a running binary, so this failure is Windows-only. `agent-bridge upgrade` / `uv tool upgrade` also need the coordinators closed first — same lock.
 
 Instances share the `~/.agent-bridge` state directory but not sessions: every session and task record carries the identity of the Bridge instance that owns it. `list_sessions` shows only the calling instance's records, saves leave a live sibling's records untouched on disk, and records whose owning instance has exited are adopted at the next boot — their in-flight tasks surface as `failed` / `bridge_restarted`. A session started from one host is continued from that host; it does not appear in another host's `list_sessions` while its owner is alive.
 
@@ -157,7 +178,7 @@ Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200
 The coordinator learns how to drive the Bridge through three channels; [ORCHESTRATION.md](ORCHESTRATION.md) is the source of truth for all of them ([ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md) is the human-readable translation):
 
 1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
-2. **Skill — recommended.** Copy [skills/agent-bridge/](skills/agent-bridge/SKILL.md) into the host's skill directory: `%USERPROFILE%\.cursor\skills\agent-bridge\`, `%USERPROFILE%\.codex\skills\agent-bridge\`, `%USERPROFILE%\.kimi-code\skills\agent-bridge\`, or the cross-agent `%USERPROFILE%\.agents\skills\agent-bridge\`. It loads on demand when the coordinator is about to dispatch.
+2. **Skill — automatic.** The first MCP start (and `agent-bridge upgrade`) writes [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
 3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, and Kimi Code all auto-apply it there), or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the file under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
 Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.

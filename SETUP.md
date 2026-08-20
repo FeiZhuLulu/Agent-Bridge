@@ -7,7 +7,7 @@ Codex, Cursor, and Kimi Code can all act as the coordinator. Register the same s
 From a trusted project, or edit `%USERPROFILE%\.codex\config.toml`:
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
+codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
 ```
 
 Then add the tuning keys. Codex **clears** the MCP child environment, so list every variable workers need:
@@ -15,7 +15,7 @@ Then add the tuning keys. Codex **clears** the MCP child environment, so list ev
 ```toml
 [mcp_servers.agent_bridge]
 command = "uv"
-args = ["--directory", "C:\\path\\to\\Agent-Bridge", "run", "agent-bridge"]
+args = ["--directory", "C:\\path\\to\\Agent-Bridge", "run", "--no-sync", "agent-bridge"]
 startup_timeout_sec = 30
 tool_timeout_sec = 600
 supports_parallel_tool_calls = true
@@ -130,6 +130,21 @@ no_proxy = "localhost,127.0.0.1,::1"
 ```
 
 `list_agents` returns an `env` object (`proxy`, `proxy_source`, `present`, `missing`, `warnings`). If `env.proxy` is null, Grok will likely fail talking to `cli-chat-proxy.grok.com`.
+
+## Multiple coordinators on one checkout
+
+Running Codex, Cursor, and Kimi Code coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts the siblings. What must not run twice is the **installer**. A plain `uv run` syncs the project before executing, and that sync rewrites `.venv\Scripts\agent-bridge.exe` — on Windows a file every running instance holds open. The second host's spawn then dies before the MCP handshake with:
+
+```text
+error: failed to remove file `...\.venv\Lib\site-packages\../../Scripts/agent-bridge.exe` (os error 32)
+```
+
+That is why every host entry above says `run --no-sync`. Two launch styles avoid the lock:
+
+- `uv --directory C:/path/to/Agent-Bridge run --no-sync agent-bridge` — portable path, but remember to run `uv sync --extra dev` yourself after cloning or changing dependencies, while no instance is running.
+- `C:/path/to/Agent-Bridge/.venv/Scripts/python.exe -m agent_bridge` — no `uv` at spawn time at all, so it can never touch the lock; the path is machine-specific.
+
+POSIX hosts can replace a running binary, so this failure is Windows-only.
 
 ## Server lifecycle
 

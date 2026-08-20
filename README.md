@@ -29,7 +29,7 @@ uv run agent-bridge
 ### Connect Codex
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
+codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
 ```
 
 Copy [AGENTS.md](AGENTS.md) into the target repo or `~/.codex/AGENTS.md` (Chinese: [AGENTS.zh-CN.md](AGENTS.zh-CN.md)). Restart Codex after changing the config. Proxy, env, and a longer drill are in [SETUP.md](SETUP.md).
@@ -116,7 +116,7 @@ uv run agent-bridge
 ### 接到 Codex
 
 ```powershell
-codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run agent-bridge
+codex mcp add agent_bridge -- uv --directory "C:\path\to\Agent-Bridge" run --no-sync agent-bridge
 ```
 
 把 [AGENTS.md](AGENTS.md) 拷到目标仓库或 `~/.codex/AGENTS.md`（中文对照：[AGENTS.zh-CN.md](AGENTS.zh-CN.md)）。改完配置后重启 Codex。代理、环境和更完整的验收步骤见 [SETUP.md](SETUP.md)。

@@ -26,7 +26,7 @@ from agent_bridge.models import (
 from agent_bridge.paths import ensure_home, state_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.probes import probe_agent
-from agent_bridge.processes import count_sibling_servers, reap_orphans
+from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
 from agent_bridge.worker_env import describe_env, install_host_env
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
@@ -54,7 +54,14 @@ def _tail(text: str, limit: int = RESULT_TAIL) -> str:
 
 
 class Registry:
-    def __init__(self, home: Path, config: AppConfig) -> None:
+    def __init__(
+        self,
+        home: Path,
+        config: AppConfig,
+        *,
+        owner_pid: int | None = None,
+        owner_create_time: float | None = None,
+    ) -> None:
         self.home = home
         self.config = config
         self.sessions: dict[str, Session] = {}
@@ -66,18 +73,84 @@ class Registry:
         self._lock = asyncio.Lock()
         self._last_activity = time.monotonic()
         self._watchdog: asyncio.Task[None] | None = None
+        self._owner_pid = os.getpid() if owner_pid is None else owner_pid
+        self._owner_create_time = (
+            process_create_time(os.getpid()) if owner_create_time is None else owner_create_time
+        )
 
     @classmethod
-    def create(cls, home: Path | None = None, config: AppConfig | None = None) -> Registry:
+    def create(
+        cls,
+        home: Path | None = None,
+        config: AppConfig | None = None,
+        *,
+        owner_pid: int | None = None,
+        owner_create_time: float | None = None,
+    ) -> Registry:
         resolved = ensure_home(home)
-        return cls(resolved, config or load_config(resolved))
+        return cls(
+            resolved,
+            config or load_config(resolved),
+            owner_pid=owner_pid,
+            owner_create_time=owner_create_time,
+        )
+
+    def _stamp_owner(self, record: Session | Task) -> None:
+        record.owner_pid = self._owner_pid
+        record.owner_create_time = self._owner_create_time
+
+    def _is_mine(self, owner_pid: int | None, owner_create_time: float | None) -> bool:
+        return owner_pid == self._owner_pid and owner_create_time == self._owner_create_time
+
+    def _foreign_live(self, owner_pid: int | None, owner_create_time: float | None) -> bool:
+        if owner_pid is None and owner_create_time is None:
+            return False
+        if self._is_mine(owner_pid, owner_create_time):
+            return False
+        return owner_alive(owner_pid, owner_create_time)
+
+    def _merge_owned(
+        self,
+        disk_rows: list,
+        mine: dict[str, dict],
+        id_key: str,
+    ) -> list[dict]:
+        merged: dict[str, dict] = {}
+        for raw in disk_rows:
+            if not isinstance(raw, dict):
+                continue
+            key = raw.get(id_key)
+            if not isinstance(key, str):
+                continue
+            owner_pid = raw.get("owner_pid")
+            owner_create_time = raw.get("owner_create_time")
+            if self._is_mine(owner_pid, owner_create_time):
+                continue
+            if self._foreign_live(owner_pid, owner_create_time) or key not in mine:
+                merged[key] = raw
+        merged.update(mine)
+        return list(merged.values())
 
     def save(self) -> None:
+        # Live siblings may interleave a read-merge-write; each instance only
+        # rewrites its own records, so the next save converges.
+        path = state_path(self.home)
+        disk = read_json(path, {})
+        if not isinstance(disk, dict):
+            disk = {}
         atomic_write_json(
-            state_path(self.home),
+            path,
             {
-                "sessions": [session.model_dump(mode="json") for session in self.sessions.values()],
-                "tasks": [task.model_dump(mode="json") for task in self.tasks.values()],
+                "sessions": self._merge_owned(
+                    disk.get("sessions") or [],
+                    {session.session_id: session.model_dump(mode="json") for session in self.sessions.values()},
+                    "session_id",
+                ),
+                "tasks": self._merge_owned(
+                    disk.get("tasks") or [],
+                    {task.task_id: task.model_dump(mode="json") for task in self.tasks.values()},
+                    "task_id",
+                ),
             },
         )
 
@@ -122,12 +195,18 @@ class Registry:
         payload = read_json(state_path(self.home), {})
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
+            if self._foreign_live(session.owner_pid, session.owner_create_time):
+                continue
+            self._stamp_owner(session)
             if session.proc_state in {ProcState.busy, ProcState.spawning, ProcState.ready}:
                 session.proc_state = ProcState.idle_unloaded
             session.pid = None
             self.sessions[session.session_id] = session
         for raw in payload.get("tasks") or []:
             task = Task.model_validate(raw)
+            if self._foreign_live(task.owner_pid, task.owner_create_time):
+                continue
+            self._stamp_owner(task)
             if task.status in {TaskStatus.queued, TaskStatus.running}:
                 task.status = TaskStatus.failed
                 task.error = "bridge_restarted"
@@ -237,6 +316,7 @@ class Registry:
                     title=title,
                     proc_state=ProcState.spawning,
                 )
+                self._stamp_owner(session)
                 self.sessions[session.session_id] = session
             if model:
                 session.model = model
@@ -257,6 +337,7 @@ class Registry:
                 effort=effort or session.effort,
                 status=TaskStatus.queued,
             )
+            self._stamp_owner(task)
             self.tasks[task.task_id] = task
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)

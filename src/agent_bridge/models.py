@@ -98,6 +98,8 @@ class Session(BaseModel):
     pid: int | None = None
     pid_create_time: float | None = None
     image_name: str | None = None
+    owner_pid: int | None = None
+    owner_create_time: float | None = None
 
 
 class Task(BaseModel):
@@ -120,6 +122,8 @@ class Task(BaseModel):
     created_at: str = Field(default_factory=iso)
     started_at: str | None = None
     finished_at: str | None = None
+    owner_pid: int | None = None
+    owner_create_time: float | None = None
 
 
 class TranscriptEvent(BaseModel):

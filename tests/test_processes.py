@@ -10,6 +10,7 @@ from agent_bridge.paths import pids_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.processes import (
     count_sibling_servers,
+    drop_pid,
     process_create_time,
     process_image_name,
     reap_orphans,
@@ -189,3 +190,15 @@ def test_count_sibling_servers_with_injected_processes(monkeypatch):
         raise RuntimeError("boom")
 
     assert count_sibling_servers(boom) == 0
+
+
+def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
+    record_pid(tmp_path, "sess_keep", os.getpid(), 1.0, "python.exe")
+    assert "sess_keep" in read_json(pids_path(tmp_path), {})
+
+    def boom(*_args, **_kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("agent_bridge.processes.atomic_write_json", boom)
+    record_pid(tmp_path, "sess_new", os.getpid(), 1.0, "python.exe")
+    drop_pid(tmp_path, "sess_keep")

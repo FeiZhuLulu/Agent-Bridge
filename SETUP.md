@@ -129,7 +129,7 @@ url = "http://127.0.0.1:7897"
 no_proxy = "localhost,127.0.0.1,::1"
 ```
 
-`list_agents` returns an `env` object (`proxy`, `proxy_source`, `present`, `missing`, `warnings`). If `env.proxy` is null, Grok will likely fail talking to `cli-chat-proxy.grok.com`.
+`list_agents` returns an `env` object (`proxy`, `proxy_source`, `present`, `missing`, `warnings`). A null `env.proxy` is normal on a direct network. Behind a firewall, configure `[env.proxy]`; Grok talking to `cli-chat-proxy.grok.com` is usually the first casualty.
 
 ## Multiple coordinators on one checkout
 

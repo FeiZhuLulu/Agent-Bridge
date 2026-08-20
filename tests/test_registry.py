@@ -8,7 +8,7 @@ import pytest
 from agent_bridge.adapters.fake import FakeAdapter
 from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
 from agent_bridge.paths import state_path
-from agent_bridge.persist import atomic_write_json
+from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.registry import Registry
 
 
@@ -141,6 +141,145 @@ async def test_bridge_restart_marks_running_failed(bridge_home):
         assert registry.tasks["task_old"].status == TaskStatus.failed
         assert registry.tasks["task_old"].error == "bridge_restarted"
         assert registry.sessions["sess_old"].proc_state == ProcState.idle_unloaded
+        assert registry.sessions["sess_old"].owner_pid == registry._owner_pid
+        assert registry.sessions["sess_old"].owner_create_time == registry._owner_create_time
+        assert registry.tasks["task_old"].owner_pid == registry._owner_pid
+        assert registry.tasks["task_old"].owner_create_time == registry._owner_create_time
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_sibling_instances_do_not_clobber_state(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    work = tmp_path / "work"
+    work.mkdir()
+    cwd = str(work.resolve())
+    a = Registry.create(bridge_home, owner_pid=1001, owner_create_time=11.0)
+    b = Registry.create(bridge_home, owner_pid=2002, owner_create_time=22.0)
+    await a.start()
+    try:
+        dispatched = await a.dispatch_task("fake", "tiny", cwd=cwd)
+        waited = await a.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        sess_a = dispatched["session_id"]
+        task_a = dispatched["task_id"]
+        assert a.sessions[sess_a].owner_pid == 1001
+        assert a.tasks[task_a].owner_pid == 1001
+
+        await b.start()
+        try:
+            assert sess_a not in b.sessions
+            assert task_a not in b.tasks
+            b.save()
+            payload = read_json(state_path(bridge_home), {})
+            assert any(row["session_id"] == sess_a for row in payload["sessions"])
+            assert any(row["task_id"] == task_a for row in payload["tasks"])
+
+            other = await b.dispatch_task("fake", "other", cwd=cwd)
+            payload = read_json(state_path(bridge_home), {})
+            session_ids = {row["session_id"] for row in payload["sessions"]}
+            assert {sess_a, other["session_id"]} <= session_ids
+            assert any(row["task_id"] == task_a for row in payload["tasks"])
+
+            a.save()
+            payload = read_json(state_path(bridge_home), {})
+            session_ids = {row["session_id"] for row in payload["sessions"]}
+            assert {sess_a, other["session_id"]} <= session_ids
+            assert any(row["task_id"] == task_a for row in payload["tasks"])
+            assert any(row["task_id"] == other["task_id"] for row in payload["tasks"])
+        finally:
+            await b.stop()
+    finally:
+        await a.stop()
+
+
+@pytest.mark.asyncio
+async def test_dead_owner_records_are_adopted(bridge_home, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: False)
+    cwd = str(Path.cwd())
+    atomic_write_json(
+        state_path(bridge_home),
+        {
+            "sessions": [
+                Session(
+                    session_id="sess_dead",
+                    agent="fake",
+                    cwd=cwd,
+                    proc_state=ProcState.busy,
+                    owner_pid=9999,
+                    owner_create_time=1.0,
+                ).model_dump(mode="json")
+            ],
+            "tasks": [
+                Task(
+                    task_id="task_dead",
+                    session_id="sess_dead",
+                    agent="fake",
+                    message="in flight",
+                    cwd=cwd,
+                    status=TaskStatus.running,
+                    owner_pid=9999,
+                    owner_create_time=1.0,
+                ).model_dump(mode="json")
+            ],
+        },
+    )
+    registry = Registry.create(bridge_home, owner_pid=2002, owner_create_time=22.0)
+    await registry.start()
+    try:
+        task = registry.tasks["task_dead"]
+        assert task.status == TaskStatus.failed
+        assert task.error == "bridge_restarted"
+        assert task.finished_at is not None
+        assert task.owner_pid == 2002
+        assert task.owner_create_time == 22.0
+        session = registry.sessions["sess_dead"]
+        assert session.proc_state == ProcState.idle_unloaded
+        assert session.owner_pid == 2002
+        assert session.owner_create_time == 22.0
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_legacy_records_without_owner_fields_are_adopted(bridge_home):
+    cwd = str(Path.cwd())
+    atomic_write_json(
+        state_path(bridge_home),
+        {
+            "sessions": [
+                {
+                    "session_id": "sess_legacy",
+                    "agent": "fake",
+                    "cwd": cwd,
+                    "proc_state": "busy",
+                }
+            ],
+            "tasks": [
+                {
+                    "task_id": "task_legacy",
+                    "session_id": "sess_legacy",
+                    "agent": "fake",
+                    "message": "in flight",
+                    "cwd": cwd,
+                    "status": "running",
+                }
+            ],
+        },
+    )
+    registry = Registry.create(bridge_home, owner_pid=3003, owner_create_time=33.0)
+    await registry.start()
+    try:
+        task = registry.tasks["task_legacy"]
+        assert task.status == TaskStatus.failed
+        assert task.error == "bridge_restarted"
+        assert task.owner_pid == 3003
+        assert task.owner_create_time == 33.0
+        session = registry.sessions["sess_legacy"]
+        assert session.proc_state == ProcState.idle_unloaded
+        assert session.owner_pid == 3003
+        assert session.owner_create_time == 33.0
     finally:
         await registry.stop()
 

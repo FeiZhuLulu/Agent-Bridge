@@ -110,6 +110,16 @@ def test_process_proxy_beats_inherit_when_unpinned():
     assert origin["HTTPS_PROXY"] == "process"
 
 
+def test_describe_env_direct_network_has_empty_warnings():
+    status = describe_env(
+        EnvConfig(discover_proxy=False, inherit=[]),
+        env={},
+        origin={},
+    )
+    assert status["proxy"] is None
+    assert status["warnings"] == []
+
+
 def test_describe_env_omits_secret_values():
     status = describe_env(
         EnvConfig(discover_proxy=False, inherit=["HTTPS_PROXY", "DEEPSEEK_API_KEY"]),

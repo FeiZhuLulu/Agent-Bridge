@@ -95,27 +95,47 @@ def kill_tree(pid: int, timeout: float = 5.0) -> None:
 
 def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
     path = pids_path(home)
-    table = read_json(path, {})
-    if not isinstance(table, dict):
-        table = {}
-    table[session_id] = {
-        "pid": pid,
-        "create_time": create_time,
-        "image_name": image_name,
-        # Owner identity lets a concurrently booting Bridge instance tell a
-        # live sibling's worker apart from a true orphan (see reap_orphans).
-        "owner_pid": os.getpid(),
-        "owner_create_time": process_create_time(os.getpid()),
-    }
-    atomic_write_json(path, table)
+    try:
+        table = read_json(path, {})
+        if not isinstance(table, dict):
+            table = {}
+        table[session_id] = {
+            "pid": pid,
+            "create_time": create_time,
+            "image_name": image_name,
+            # Owner identity lets a concurrently booting Bridge instance tell a
+            # live sibling's worker apart from a true orphan (see reap_orphans).
+            "owner_pid": os.getpid(),
+            "owner_create_time": process_create_time(os.getpid()),
+        }
+        atomic_write_json(path, table)
+    except OSError:
+        log.warning("could not record pid for session %s", session_id, exc_info=True)
 
 
 def drop_pid(home, session_id: str) -> None:
     path = pids_path(home)
-    table = read_json(path, {})
-    if isinstance(table, dict) and session_id in table:
-        table.pop(session_id, None)
-        atomic_write_json(path, table)
+    try:
+        table = read_json(path, {})
+        if isinstance(table, dict) and session_id in table:
+            table.pop(session_id, None)
+            atomic_write_json(path, table)
+    except OSError:
+        log.warning("could not drop pid for session %s", session_id, exc_info=True)
+
+
+def owner_alive(pid: int | None, create_time: float | None) -> bool:
+    if not isinstance(pid, int):
+        return False
+    try:
+        proc = psutil.Process(pid)
+        if not proc.is_running():
+            return False
+        if create_time is not None and abs(proc.create_time() - float(create_time)) >= 1.0:
+            return False
+    except (psutil.Error, TypeError, ValueError):
+        return False
+    return True
 
 
 def _owner_alive(info: dict[str, Any]) -> bool:
@@ -123,16 +143,7 @@ def _owner_alive(info: dict[str, Any]) -> bool:
     owner_pid = info.get("owner_pid")
     if not isinstance(owner_pid, int):
         return False
-    try:
-        proc = psutil.Process(owner_pid)
-        if not proc.is_running():
-            return False
-        owner_create = info.get("owner_create_time")
-        if owner_create is not None and abs(proc.create_time() - float(owner_create)) >= 1.0:
-            return False
-    except (psutil.Error, TypeError, ValueError):
-        return False
-    return True
+    return owner_alive(owner_pid, info.get("owner_create_time"))
 
 
 def reap_orphans(home) -> list[int]:

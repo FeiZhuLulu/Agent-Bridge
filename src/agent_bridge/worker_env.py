@@ -443,8 +443,6 @@ def describe_env(
         if _present(env, key) and key not in present:
             present.append(key)
     warnings: list[str] = []
-    if not proxy:
-        warnings.append("no HTTP(S)_PROXY; worker API calls may fail behind a firewall")
     return {
         "proxy": redact_proxy_url(proxy) if proxy else None,
         "proxy_source": proxy_source,

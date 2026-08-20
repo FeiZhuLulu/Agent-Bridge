@@ -46,6 +46,43 @@ agent-default-model:
     assert "dsh-model=acme-gateway/acme-large" in row["detail"]
 
 
+async def _probe_kimi(monkeypatch, env):
+    monkeypatch.setattr("agent_bridge.probes.resolve_command", _fake_resolve)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: env)
+    return await probe_agent(
+        AgentConfig(name="kimi", protocol="acp", command=["kimi", "acp"]),
+        EnvConfig(discover_proxy=False, inherit=[]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_kimi_probe_reports_oauth_login(tmp_path: Path, monkeypatch):
+    creds = tmp_path / "credentials"
+    creds.mkdir()
+    (creds / "kimi-code.json").write_text("{}", encoding="utf-8")
+    row = await _probe_kimi(monkeypatch, {"KIMI_CODE_HOME": str(tmp_path)})
+    assert row["available"] is True
+    assert "auth=oauth" in row["detail"]
+    assert f"kimi-home={tmp_path}" in row["detail"]
+    assert "mode forced to yolo" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_probe_flags_a_missing_login_without_hiding_the_agent(tmp_path: Path, monkeypatch):
+    """session/new answers auth_required, but that is a warning, not unavailability."""
+    row = await _probe_kimi(monkeypatch, {"KIMI_CODE_HOME": str(tmp_path)})
+    assert row["available"] is True
+    assert "auth=missing (run `kimi login`)" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_kimi_probe_accepts_an_api_key_instead(tmp_path: Path, monkeypatch):
+    row = await _probe_kimi(
+        monkeypatch, {"KIMI_CODE_HOME": str(tmp_path), "MOONSHOT_API_KEY": "sk-x"}
+    )
+    assert "auth=api-key" in row["detail"]
+
+
 @pytest.mark.asyncio
 async def test_dsh_probe_unavailable_when_launcher_cannot_start(monkeypatch):
     def _boom(command, fallbacks=None):

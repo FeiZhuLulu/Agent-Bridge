@@ -32,6 +32,7 @@ from agent_bridge.processes import (
 )
 from agent_bridge.transcript import append_event
 from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
+from agent_bridge.kimi_meta import KIMI_MODE_YOLO, config_option_values, resolve_kimi_thinking
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
 
@@ -311,6 +312,11 @@ class _Live:
         self.prompt_task: asyncio.Task[Any] | None = None
         self.applied_model: str | None = None
         self.applied_effort: str | None = None
+        self.applied_mode: str | None = None
+        # Latest `configOptions` snapshot from a Kimi lifecycle or
+        # set_config_option response: the only place the model's advertised
+        # thinking levels are published.
+        self.config_options: list[Any] = []
         # Warnings raised outside a turn (e.g. during ensure_session);
         # drained into the next TurnResult.
         self.pending_warnings: list[str] = []
@@ -429,6 +435,16 @@ class AcpAdapter(Adapter):
         return await conn.new_session(cwd=cwd, mcp_servers=[], **extra)
 
     async def _call_load_session(self, conn: Any, cwd: str, native_id: str) -> Any:
+        if self.agent.name == "kimi":
+            # Kimi replays the entire persisted history as session/update
+            # notifications before session/load answers, which is pure noise
+            # for a headless turn and can outlast RPC_TIMEOUT_SEC on a long
+            # session. session/resume is advertised and skips the replay.
+            return await conn.resume_session(
+                session_id=native_id,
+                cwd=cwd,
+                mcp_servers=[],
+            )
         return await conn.load_session(
             cwd=cwd,
             session_id=native_id,
@@ -488,6 +504,113 @@ class AcpAdapter(Adapter):
         live.applied_model = model
         live.applied_effort = effort
 
+    def _remember_config_options(self, live: _Live, response: Any) -> None:
+        """Cache the `configOptions` snapshot a Kimi response carries."""
+        if self.agent.name != "kimi":
+            return
+        options = getattr(response, "config_options", None)
+        if isinstance(options, (list, tuple)):
+            live.config_options = list(options)
+
+    async def _set_kimi_option(
+        self,
+        live: _Live,
+        session: Session,
+        config_id: str,
+        value: str,
+    ) -> None:
+        assert live.conn is not None
+        response = await self._rpc(
+            live.conn.set_config_option(
+                config_id=config_id,
+                session_id=session.native_session_id,
+                value=value,
+            ),
+            f"session/set_config_option {config_id}",
+            session,
+        )
+        self._remember_config_options(live, response)
+
+    async def _sync_kimi_selection(self, live: _Live, session: Session) -> None:
+        """Force yolo mode, then apply model and thinking for a Kimi session.
+
+        Kimi accepts no ``session/new`` hints: a fresh session lands in
+        ``default`` mode (approval per tool call) on the configured default
+        model. Mode, model and thinking are all set afterwards through the
+        typed ACP config surface, whose responses carry the refreshed option
+        snapshot — that snapshot is how the next turn knows it has nothing to
+        change.
+        """
+        if self.agent.name != "kimi" or live.conn is None or not session.native_session_id:
+            return
+        if live.applied_mode != KIMI_MODE_YOLO:
+            await self._rpc(
+                live.conn.set_session_mode(
+                    session_id=session.native_session_id,
+                    mode_id=KIMI_MODE_YOLO,
+                ),
+                "session/set_mode",
+                session,
+            )
+            live.applied_mode = KIMI_MODE_YOLO
+        if session.model and session.model != live.applied_model:
+            current_model, _ = config_option_values(live.config_options, "model")
+            if session.model == current_model:
+                # Already the session's model (commonly the default a
+                # coordinator names explicitly); switching thinking below is
+                # the only thing left to do.
+                live.applied_model = session.model
+            else:
+                try:
+                    await self._set_kimi_option(live, session, "model", session.model)
+                except RpcTimeoutError:
+                    raise
+                except Exception as exc:
+                    # A model the coordinator named explicitly and that this
+                    # session does not offer must fail the turn, not silently
+                    # run on the default. Name the real options in the error.
+                    _, offered = config_option_values(live.config_options, "model")
+                    raise RuntimeError(
+                        f"kimi rejected model {session.model!r}; "
+                        f"session advertises {offered or 'no models'}"
+                    ) from exc
+                live.applied_model = session.model
+        # Order matters: thinking vocabularies are per model, and the set above
+        # refreshed the snapshot this reads.
+        await self._sync_kimi_thinking(live, session)
+
+    async def _sync_kimi_thinking(self, live: _Live, session: Session) -> None:
+        if not session.effort:
+            return
+        current, offered = config_option_values(live.config_options, "thinking")
+        level = resolve_kimi_thinking(session.effort, offered)
+        if level is None:
+            message = (
+                f"kimi effort={session.effort} has no counterpart on "
+                f"{live.applied_model or 'the current model'}; "
+                f"session advertises thinking {offered or '(none)'}"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        if level == current:
+            live.applied_effort = level
+            return
+        if live.applied_effort == level:
+            return
+        try:
+            await self._set_kimi_option(live, session, "thinking", level)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            # Bridge chose this level by mapping, so a rejection is Bridge's
+            # problem to report; the turn still runs on the model's default.
+            message = f"kimi rejected thinking={level} for effort={session.effort}: {exc}"
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_effort = level
+
     async def ensure_session(self, session: Session) -> None:
         live = self._live.get(session.session_id)
         if (
@@ -514,12 +637,13 @@ class AcpAdapter(Adapter):
                 await self.shutdown(session)
             else:
                 await self._sync_grok_model(live, session)
+                await self._sync_kimi_selection(live, session)
                 return
         live = await self._spawn(session)
         native = session.native_session_id
         if native and self.can_revive():
             try:
-                await self._rpc(
+                revived = await self._rpc(
                     self._call_load_session(live.conn, session.cwd, native),
                     "session/load",
                     session,
@@ -531,7 +655,9 @@ class AcpAdapter(Adapter):
             except Exception:
                 log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
             else:
+                self._remember_config_options(live, revived)
                 await self._sync_grok_model(live, session)
+                await self._sync_kimi_selection(live, session)
                 return
         created = await self._rpc(
             self._call_new_session(live.conn, session.cwd, self._new_session_meta(session)),
@@ -539,6 +665,7 @@ class AcpAdapter(Adapter):
             session,
         )
         session.native_session_id = created.session_id
+        self._remember_config_options(live, created)
         if self.agent.name == "grok":
             # Grok /new applies the _meta reasoningEffort but always lands on
             # the campaign default model. Record the effort as applied so an
@@ -546,6 +673,7 @@ class AcpAdapter(Adapter):
             # _sync_grok_model switch the model via session/setModel.
             live.applied_effort = grok_effort(session.effort)
         await self._sync_grok_model(live, session)
+        await self._sync_kimi_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         await self.ensure_session(session)
@@ -554,7 +682,7 @@ class AcpAdapter(Adapter):
         live.client.reset_turn()
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
-        if self.agent.name not in {"grok", "dsh"} and (task.model or task.effort):
+        if self.agent.name not in {"grok", "dsh", "kimi"} and (task.model or task.effort):
             warnings.append(
                 f"{self.agent.name} has no model/effort selection; "
                 f"model={task.model!r} effort={task.effort!r} were ignored"

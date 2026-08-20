@@ -5,6 +5,10 @@
 url = "http://127.0.0.1:7897"
 no_proxy = "localhost,127.0.0.1,::1"
 
+[server]
+# Self-exit for abandoned MCP server instances whose host never closed stdin.
+idle_exit_sec = 7200
+
 # Optional. Only if a worker actually reads that variable from the process
 # environment. DSH credentials usually live in ~/.dsh/.credentials.yaml.
 # [env.set]
@@ -12,6 +16,12 @@ no_proxy = "localhost,127.0.0.1,::1"
 
 # [agents.grok.env]
 # HTTPS_PROXY = "http://127.0.0.1:7897"
+
+# Kimi: auth lives in ~/.kimi-code (run `kimi login` once), not in an env var.
+# Only pin these when the defaults are wrong for this machine:
+# [agents.kimi.env]
+# KIMI_CODE_HOME = "D:/kimi-code"
+# KIMI_SHELL_PATH = "C:/Program Files/Git/bin/bash.exe"
 
 # DSH: do not put a personal checkout path in the repo agents.toml.
 # Optional overrides live here or in the process environment:

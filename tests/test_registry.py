@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,69 @@ async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_kimi_silent_failure_becomes_a_warning(bridge_home, tmp_path, monkeypatch):
+    """Kimi answers end_turn on a failed turn; wire.jsonl is the only witness."""
+    work = tmp_path / "work"
+    work.mkdir()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    # Run the real kimi branch in the registry against a fake transport.
+    (bridge_home / "agents.toml").write_text(
+        '[agents.kimi]\nprotocol = "fake"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "agent_bridge.registry.observe_kimi_session",
+        lambda native_id: {
+            "model": "kimi-code/k3-256k",
+            "effort": "high",
+            "failure": "failed: provider.api_error: 402 membership",
+        },
+    )
+
+    async def empty_turn(self, session, task):
+        return TurnResult(text="", stop_reason="end_turn")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", empty_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("kimi", "do it", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["stop_reason"] == "end_turn"
+        assert waited["observed_model"] == "kimi-code/k3-256k"
+        assert waited["observed_effort"] == "high"
+        assert any("402 membership" in w for w in waited["warnings"])
+        result = registry.get_result(dispatched["task_id"])
+        assert "end_turn with empty text" in result["hint"]
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_kimi_clean_turn_adds_no_warning(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    (bridge_home / "agents.toml").write_text(
+        '[agents.kimi]\nprotocol = "fake"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "agent_bridge.registry.observe_kimi_session",
+        lambda native_id: {"model": "kimi-code/k3", "effort": "low", "failure": None},
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("kimi", "do it", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["warnings"] == []
+        assert waited["observed_model"] == "kimi-code/k3"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_late_turn_result_does_not_overwrite_cancelled(bridge_home, tmp_path, monkeypatch):
     """cancel_task's timeout path finalizes the task; the turn ending later must not flip it back."""
     work = tmp_path / "work"
@@ -230,5 +294,39 @@ async def test_old_terminal_tasks_are_pruned(bridge_home, tmp_path, monkeypatch)
         assert task_ids[-1] in registry.tasks
         terminal = [t for t in registry.tasks.values() if t.session_id == first["session_id"]]
         assert len(terminal) <= 3  # 2 kept terminal + possibly the newest
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_exit_due_predicate(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert registry.idle_exit_due() is False
+
+        registry._last_activity = time.monotonic() - registry.config.server.idle_exit_sec - 1
+        assert registry.idle_exit_due() is True
+
+        registry.tasks["task_busy"] = Task(
+            task_id="task_busy",
+            session_id="sess_busy",
+            agent="fake",
+            message="hold",
+            cwd=str(work.resolve()),
+            status=TaskStatus.running,
+        )
+        assert registry.idle_exit_due() is False
+
+        registry.tasks["task_busy"].status = TaskStatus.queued
+        assert registry.idle_exit_due() is False
+
+        registry.tasks["task_busy"].status = TaskStatus.completed
+        assert registry.idle_exit_due() is True
+
+        registry.config.server.idle_exit_sec = 0
+        assert registry.idle_exit_due() is False
     finally:
         await registry.stop()

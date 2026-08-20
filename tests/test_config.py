@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agent_bridge.config import load_config
+from agent_bridge.config import AppConfig, load_config
 from agent_bridge.paths import bundled_agents_toml
 
 
@@ -16,6 +16,13 @@ def test_loads_bundled_agents():
     assert "DEEPSEEK_API_KEY" in cfg.env.inherit
     assert "DSH_HOME" in cfg.env.inherit
     assert "OPENCODE_API_KEY" in cfg.env.inherit
+    assert cfg.agents["kimi"].protocol == "acp"
+    assert cfg.agents["kimi"].command == ["kimi", "acp"]
+    assert cfg.agents["kimi"].revivable is True
+    # An explicit [env] inherit in agents.toml replaces DEFAULT_INHERIT_KEYS
+    # wholesale, so Kimi's keys have to be listed there too.
+    assert "KIMI_CODE_HOME" in cfg.env.inherit
+    assert "KIMI_SHELL_PATH" in cfg.env.inherit
     assert cfg.agents["dsh"].command[0] == "dsh-acp-demo"
     assert cfg.agents["dsh"].fallback_commands == []
     assert cfg.agents["dsh"].cwd is None
@@ -71,3 +78,33 @@ def test_fake_agent_opt_in(tmp_path, monkeypatch):
     cfg = load_config(tmp_path)
     assert "fake" in cfg.agents
     assert cfg.agents["fake"].protocol == "fake"
+
+
+def test_server_idle_exit_defaults(tmp_path):
+    assert AppConfig().server.idle_exit_sec == 7200
+    cfg = load_config(tmp_path)
+    assert cfg.server.idle_exit_sec == 7200
+
+
+def test_server_idle_exit_overlay(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        """
+[server]
+idle_exit_sec = 30
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.server.idle_exit_sec == 30
+
+
+def test_server_idle_exit_disabled(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        """
+[server]
+idle_exit_sec = 0
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.server.idle_exit_sec == 0

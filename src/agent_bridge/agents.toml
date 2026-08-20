@@ -16,6 +16,12 @@ inherit = [
   "AGENT_BRIDGE_HTTPS_PROXY",
   "AGENT_BRIDGE_NO_PROXY",
   "DSH_HOME",
+  "KIMI_CODE_HOME",
+  "KIMI_SHELL_PATH",
+  "KIMI_API_KEY",
+  "KIMI_BASE_URL",
+  "KIMI_CODE_BASE_URL",
+  "MOONSHOT_API_KEY",
   "DEEPSEEK_API_KEY",
   "OPENCODE_API_KEY",
   "XAI_API_KEY",
@@ -47,10 +53,24 @@ discover_proxy = true
 # url = "http://127.0.0.1:7897"
 # no_proxy = "localhost,127.0.0.1,::1"
 
+[server]
+# Self-exit for abandoned MCP server instances whose host never closed stdin.
+idle_exit_sec = 7200
+
 [agents.grok]
 protocol = "acp"
 command = ["grok", "--no-auto-update", "agent", "--always-approve", "--no-leader", "stdio"]
 session_meta = { yoloMode = true }
+revivable = true
+idle_unload_sec = 900
+
+[agents.kimi]
+protocol = "acp"
+command = ["kimi", "acp"]
+# Kimi ignores _meta on session/new: a fresh session starts in `default` mode,
+# which asks for approval per tool call. Bridge switches it to yolo, and sets
+# model/thinking, through session/set_mode and session/set_config_option once
+# the session exists. Auth is `kimi login` on disk, not an env var.
 revivable = true
 idle_unload_sec = 900
 

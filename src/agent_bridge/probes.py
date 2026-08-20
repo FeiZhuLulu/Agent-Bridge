@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
+from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import kill_tree, resolve_command
 from agent_bridge.worker_env import build_worker_env
 
@@ -35,6 +36,30 @@ async def _version_string(executable: str) -> str:
         if text:
             return text.splitlines()[0][:200]
     return ""
+
+
+def _kimi_home(env: dict[str, str]) -> Path:
+    raw = env.get("KIMI_CODE_HOME")
+    return kimi_home(Path(raw) if raw else None)
+
+
+def _kimi_auth(env: dict[str, str]) -> str:
+    """Describe Kimi's login state without deciding availability.
+
+    Kimi keeps managed-provider OAuth at ``credentials/<name>.json``; without
+    one, ``session/new`` answers ``auth_required``. An API key in the
+    environment is the other accepted path, so a missing credential file is a
+    warning to surface, not grounds for calling the agent unavailable.
+    """
+    try:
+        signed_in = any((_kimi_home(env) / "credentials").glob("*.json"))
+    except OSError:
+        signed_in = False
+    if signed_in:
+        return "oauth"
+    if env.get("KIMI_API_KEY") or env.get("MOONSHOT_API_KEY"):
+        return "api-key"
+    return "missing (run `kimi login`)"
 
 
 async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> dict:
@@ -91,6 +116,14 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             "model=grok models slugs via session/setModel after /new; "
             "effort=off|low|medium|high|max (off->none, max->xhigh)"
         )
+
+    if cfg.name == "kimi":
+        details.append(
+            "model=slugs the session advertises e.g. kimi-code/k3, kimi-code/k3-256k; "
+            "effort mapped onto that model's thinking levels; mode forced to yolo"
+        )
+        details.append(f"kimi-home={_kimi_home(resolved)}")
+        details.append(f"auth={_kimi_auth(resolved)}")
 
     proxy = resolved.get("HTTPS_PROXY") or resolved.get("HTTP_PROXY")
     if proxy:

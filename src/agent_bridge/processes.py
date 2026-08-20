@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -100,6 +102,10 @@ def record_pid(home, session_id: str, pid: int, create_time: float | None, image
         "pid": pid,
         "create_time": create_time,
         "image_name": image_name,
+        # Owner identity lets a concurrently booting Bridge instance tell a
+        # live sibling's worker apart from a true orphan (see reap_orphans).
+        "owner_pid": os.getpid(),
+        "owner_create_time": process_create_time(os.getpid()),
     }
     atomic_write_json(path, table)
 
@@ -112,24 +118,46 @@ def drop_pid(home, session_id: str) -> None:
         atomic_write_json(path, table)
 
 
-def reap_orphans(home) -> list[int]:
-    """Kill workers left over from a previous Bridge instance.
+def _owner_alive(info: dict[str, Any]) -> bool:
+    """True if the Bridge instance that recorded this worker is still running."""
+    owner_pid = info.get("owner_pid")
+    if not isinstance(owner_pid, int):
+        return False
+    try:
+        proc = psutil.Process(owner_pid)
+        if not proc.is_running():
+            return False
+        owner_create = info.get("owner_create_time")
+        if owner_create is not None and abs(proc.create_time() - float(owner_create)) >= 1.0:
+            return False
+    except (psutil.Error, TypeError, ValueError):
+        return False
+    return True
 
-    Runs at startup, before any new session spawns, so every recorded pid is
-    either ours (identity verified via create_time/image name, then killed)
-    or stale (the process exited, or the OS recycled the pid for an unrelated
-    process). pid + create_time uniquely identify a process, so a mismatch
-    proves the original worker is gone and the record can never trigger a
-    kill again. Either way the record has served its purpose: the table is
-    always cleared instead of re-checking dead entries on every startup.
+
+def reap_orphans(home) -> list[int]:
+    """Kill workers whose owning Bridge instance is gone.
+
+    Runs at startup, before any new session spawns. Several Bridge instances
+    can coexist (Codex and Cursor spawn their own), so a recorded worker is an
+    orphan only when the instance that recorded it (owner_pid +
+    owner_create_time) is no longer running; records with a live owner are
+    kept untouched. For orphaned records, pid + create_time / image name
+    verify the worker's identity before killing, so a recycled pid can never
+    trigger a kill. Processed records are dropped either way; only live-owner
+    records survive the rewrite.
     """
     path = pids_path(home)
     table = read_json(path, {})
     if not isinstance(table, dict):
         table = {}
     killed: list[int] = []
+    kept: dict[str, Any] = {}
     for session_id, info in table.items():
         if not isinstance(info, dict):
+            continue
+        if _owner_alive(info):
+            kept[session_id] = info
             continue
         pid = info.get("pid")
         create_time = info.get("create_time")
@@ -164,10 +192,128 @@ def reap_orphans(home) -> list[int]:
                 pid,
                 session_id,
             )
-    if table:
-        atomic_write_json(path, {})
+    if table != kept:
+        try:
+            atomic_write_json(path, kept)
+        except OSError:
+            # A transient Windows file lock (antivirus, racing sibling boot)
+            # must not abort server startup; the next boot retries.
+            log.warning("could not rewrite pid table %s", path, exc_info=True)
     return killed
 
 
 def python_executable() -> str:
     return sys.executable
+
+
+def _proc_pid(proc: Any) -> int | None:
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int):
+        return pid
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict) and isinstance(info.get("pid"), int):
+        return info["pid"]
+    return None
+
+
+def _proc_ppid(proc: Any) -> int | None:
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict) and isinstance(info.get("ppid"), int):
+        return info["ppid"]
+    ppid = getattr(proc, "ppid", None)
+    if isinstance(ppid, int):
+        return ppid
+    if callable(ppid):
+        try:
+            value = ppid()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return None
+        return value if isinstance(value, int) else None
+    return None
+
+
+def _proc_name(proc: Any) -> str:
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict) and info.get("name") is not None:
+        return str(info["name"])
+    name = getattr(proc, "name", None)
+    if callable(name):
+        try:
+            return str(name() or "")
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return ""
+    return str(name or "")
+
+
+def _proc_cmdline(proc: Any) -> list[str]:
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict) and "cmdline" in info:
+        raw = info.get("cmdline") or []
+        return [str(part) for part in raw]
+    cmdline = getattr(proc, "cmdline", None)
+    if callable(cmdline):
+        try:
+            raw = cmdline() or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return []
+        return [str(part) for part in raw]
+    if isinstance(cmdline, (list, tuple)):
+        return [str(part) for part in cmdline]
+    return []
+
+
+def _looks_like_agent_bridge(proc: Any) -> bool:
+    name = _proc_name(proc).lower()
+    if name.startswith("agent-bridge"):
+        return True
+    cmdline = _proc_cmdline(proc)
+    if not cmdline:
+        return False
+    for part in cmdline:
+        token = str(part).replace("\\", "/").lower()
+        base = Path(token).name
+        if base.startswith("agent-bridge"):
+            return True
+        if "agent_bridge" in token:
+            return True
+    return False
+
+
+def count_sibling_servers(
+    processes: Iterable[Any] | Callable[..., Iterable[Any]] | None = None,
+) -> int:
+    """Count other running Agent Bridge server instances on this machine.
+
+    Excludes the current process and its ancestor chain (launcher / uv wrapper).
+    One instance is a whole process tree (uv -> agent-bridge.exe -> python), so
+    only tree roots among the matches are counted, not every process in a chain.
+    Fail-open: returns 0 on unexpected errors.
+    """
+    try:
+        me = psutil.Process()
+        exclude = {me.pid}
+        try:
+            exclude.update(parent.pid for parent in me.parents())
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+        if processes is None:
+            proc_iter: Iterable[Any] = psutil.process_iter(["pid", "ppid", "name", "cmdline"])
+        elif callable(processes):
+            proc_iter = processes(["pid", "ppid", "name", "cmdline"])
+        else:
+            proc_iter = processes
+
+        matched: dict[int, int | None] = {}
+        for proc in proc_iter:
+            try:
+                pid = _proc_pid(proc)
+                if pid is None or pid in exclude:
+                    continue
+                if _looks_like_agent_bridge(proc):
+                    matched[pid] = _proc_ppid(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return sum(1 for ppid in matched.values() if ppid not in matched)
+    except Exception:
+        return 0

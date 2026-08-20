@@ -19,6 +19,12 @@ DEFAULT_INHERIT_KEYS = (
     "AGENT_BRIDGE_HTTPS_PROXY",
     "AGENT_BRIDGE_NO_PROXY",
     "DSH_HOME",
+    "KIMI_CODE_HOME",
+    "KIMI_SHELL_PATH",
+    "KIMI_API_KEY",
+    "KIMI_BASE_URL",
+    "KIMI_CODE_BASE_URL",
+    "MOONSHOT_API_KEY",
     "DEEPSEEK_API_KEY",
     "OPENCODE_API_KEY",
     "XAI_API_KEY",
@@ -63,9 +69,16 @@ class EnvConfig(BaseModel):
     no_proxy: str | None = None
 
 
+class ServerConfig(BaseModel):
+    """Process-level server behavior (idle self-exit for abandoned MCP instances)."""
+
+    idle_exit_sec: int = 7200
+
+
 class AppConfig(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     env: EnvConfig = Field(default_factory=EnvConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
 
     def get(self, name: str) -> AgentConfig:
         if name not in self.agents:
@@ -134,6 +147,22 @@ def _merge_env(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _coerce_server(raw: dict[str, Any]) -> dict[str, Any]:
+    block = raw.get("server")
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if "idle_exit_sec" in block and block["idle_exit_sec"] is not None:
+        out["idle_exit_sec"] = int(block["idle_exit_sec"])
+    return out
+
+
+def _merge_server(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    out.update(overlay)
+    return out
+
+
 def load_config(home: Path | None = None) -> AppConfig:
     bundled_raw = _load_toml(bundled_agents_toml())
     user_home = home or bridge_home()
@@ -156,4 +185,7 @@ def load_config(home: Path | None = None) -> AppConfig:
             idle_unload_sec=0,
         )
     env = EnvConfig.model_validate(_merge_env(_coerce_env(bundled_raw), _coerce_env(overlay_raw)))
-    return AppConfig(agents=agents, env=env)
+    server = ServerConfig.model_validate(
+        _merge_server(_coerce_server(bundled_raw), _coerce_server(overlay_raw))
+    )
+    return AppConfig(agents=agents, env=env, server=server)

@@ -38,11 +38,15 @@ mcp = MCPServer[Registry]("agent-bridge", lifespan=lifespan)
 def _registry(ctx: Context) -> Registry:
     lifespan_ctx = ctx.request_context.lifespan_context
     if isinstance(lifespan_ctx, Registry):
+        lifespan_ctx.touch_activity()
         return lifespan_ctx
     if isinstance(lifespan_ctx, dict) and "registry" in lifespan_ctx:
-        return lifespan_ctx["registry"]
+        registry = lifespan_ctx["registry"]
+        registry.touch_activity()
+        return registry
     registry = getattr(lifespan_ctx, "registry", None)
     if isinstance(registry, Registry):
+        registry.touch_activity()
         return registry
     raise RuntimeError("Agent Bridge registry is not available")
 
@@ -53,7 +57,7 @@ def _error(exc: Exception) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_agents(ctx: Context) -> dict[str, Any]:
-    """List configured workers, plus the reconstructed host/proxy environment Codex would otherwise strip."""
+    """List configured workers, plus the reconstructed host/proxy environment the MCP host would otherwise strip."""
     try:
         registry = _registry(ctx)
         agents = await registry.list_agents()
@@ -73,7 +77,7 @@ async def dispatch_task(
     effort: str | None = None,
     title: str | None = None,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this Codex conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; dsh: spawn env, respawn if they change). Pass session_id to continue. Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; dsh: spawn env, respawn if they change). Pass session_id to continue. Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,

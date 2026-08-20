@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +12,7 @@ from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
 from agent_bridge.config import AppConfig, load_config
 from agent_bridge.grok_observe import observe_grok_session
+from agent_bridge.kimi_observe import observe_kimi_session
 from agent_bridge.models import (
     DEFAULT_WAIT_SEC,
     TERMINAL_STATUSES,
@@ -23,7 +26,7 @@ from agent_bridge.models import (
 from agent_bridge.paths import ensure_home, state_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.probes import probe_agent
-from agent_bridge.processes import reap_orphans
+from agent_bridge.processes import count_sibling_servers, reap_orphans
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
 from agent_bridge.worker_env import describe_env, install_host_env
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
@@ -61,6 +64,8 @@ class Registry:
         self._idle: dict[str, asyncio.Task[None]] = {}
         self._bg: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
+        self._last_activity = time.monotonic()
+        self._watchdog: asyncio.Task[None] | None = None
 
     @classmethod
     def create(cls, home: Path | None = None, config: AppConfig | None = None) -> Registry:
@@ -75,6 +80,41 @@ class Registry:
                 "tasks": [task.model_dump(mode="json") for task in self.tasks.values()],
             },
         )
+
+    def touch_activity(self) -> None:
+        self._last_activity = time.monotonic()
+
+    def idle_exit_due(self) -> bool:
+        idle_sec = self.config.server.idle_exit_sec
+        if idle_sec <= 0:
+            return False
+        if time.monotonic() - self._last_activity < idle_sec:
+            return False
+        for task in self.tasks.values():
+            if task.status in {TaskStatus.queued, TaskStatus.running}:
+                return False
+        return True
+
+    async def _idle_exit_watchdog(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                if not self.idle_exit_due():
+                    continue
+                idle_sec = self.config.server.idle_exit_sec
+                log.info(
+                    "no MCP activity for %s seconds and no queued/running tasks; self-exiting",
+                    idle_sec,
+                )
+                # Clear before stop() so a CancelledError from stop cancelling
+                # this task cannot skip os._exit once the exit decision is made.
+                self._watchdog = None
+                try:
+                    await self.stop()
+                finally:
+                    os._exit(0)
+        except asyncio.CancelledError:
+            raise
 
     async def start(self) -> None:
         install_host_env(self.config.env)
@@ -97,8 +137,18 @@ class Registry:
             done.set()
             self._done[task.task_id] = done
         self.save()
+        self.touch_activity()
+        if self.config.server.idle_exit_sec > 0:
+            self._watchdog = asyncio.create_task(
+                self._idle_exit_watchdog(),
+                name="idle-exit-watchdog",
+            )
 
     async def stop(self) -> None:
+        watchdog = self._watchdog
+        self._watchdog = None
+        if watchdog is not None:
+            watchdog.cancel()
         for idle in list(self._idle.values()):
             idle.cancel()
         for bg in list(self._bg.values()):
@@ -134,7 +184,16 @@ class Registry:
         return list(await asyncio.gather(*probes))
 
     def env_status(self) -> dict:
-        return describe_env(self.config.env)
+        status = describe_env(self.config.env)
+        siblings = count_sibling_servers()
+        if siblings > 0:
+            warnings = status.setdefault("warnings", [])
+            warnings.append(
+                f"{siblings} other agent-bridge server instance(s) running on this machine "
+                "(each coordinator host holds its own; abandoned ones self-exit after "
+                "server.idle_exit_sec)"
+            )
+        return status
 
     async def dispatch_task(
         self,
@@ -234,6 +293,16 @@ class Registry:
                 observed = observe_grok_session(session.cwd, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
+            elif session.agent == "kimi":
+                observed = observe_kimi_session(session.native_session_id)
+                task.observed_model = observed["model"]
+                task.observed_effort = observed["effort"]
+                if observed["failure"]:
+                    # Kimi answered end_turn, so nothing above this line knows
+                    # the turn failed. Say so where the coordinator looks.
+                    task.warnings.append(
+                        f"kimi reported end_turn but the turn failed: {observed['failure']}"
+                    )
             # cancel_task's timeout path may already have finalized this task
             # as cancelled; a late turn result must not overwrite that.
             if task.status not in TERMINAL_STATUSES:
@@ -354,6 +423,11 @@ class Registry:
                 payload["hint"] += (
                     " Grok system-prompt identity is not the selected model; "
                     "use observed_model from this payload."
+                )
+            if task.agent == "kimi":
+                payload["hint"] += (
+                    " Kimi reports a failed turn as end_turn with empty text; "
+                    "an empty result is only clean if warnings is empty."
                 )
         return payload
 

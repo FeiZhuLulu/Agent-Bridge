@@ -125,6 +125,19 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         details.append(f"kimi-home={_kimi_home(resolved)}")
         details.append(f"auth={_kimi_auth(resolved)}")
 
+    if cfg.name == "opencode":
+        details.append(
+            "model=provider/model slugs the session advertises e.g. opencode/..., "
+            "xai/...; effort mapped onto that model's variants"
+        )
+        details.append(
+            "auth=provider API keys via `opencode auth` "
+            "(official OpenCode Zen / Go, or any connected provider); "
+            "no product login"
+        )
+        if resolved.get("OPENCODE_API_KEY"):
+            details.append("OPENCODE_API_KEY=set")
+
     proxy = resolved.get("HTTPS_PROXY") or resolved.get("HTTP_PROXY")
     if proxy:
         details.append("proxy=set")

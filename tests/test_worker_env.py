@@ -32,6 +32,22 @@ def test_parse_powershell_grok_proxy():
     assert parsed["HTTPS_PROXY"] == "http://127.0.0.1:7897"
 
 
+OPENCODE_PROFILE = """
+function opencode {
+    $env:HTTP_PROXY = "http://127.0.0.1:7897"
+    $env:HTTPS_PROXY = "http://127.0.0.1:7897"
+    $env:ALL_PROXY = "http://127.0.0.1:7897"
+    E:\\npm-global\\node_modules\\opencode-ai\\bin\\opencode.exe @args
+}
+"""
+
+
+def test_parse_powershell_opencode_proxy():
+    parsed = parse_powershell_grok_proxy(OPENCODE_PROFILE)
+    assert parsed["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert parsed["ALL_PROXY"] == "http://127.0.0.1:7897"
+
+
 def test_parse_win_inet_proxy_server_simple():
     parsed = parse_win_inet_proxy_server("127.0.0.1:7897")
     assert parsed["HTTPS_PROXY"] == "http://127.0.0.1:7897"

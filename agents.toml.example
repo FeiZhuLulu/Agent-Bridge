@@ -28,6 +28,11 @@
 # [agents.grok.env]
 # HTTPS_PROXY = "http://127.0.0.1:7897"
 
+# OpenCode: no product login. Connect providers with `opencode auth`
+# (official Zen / Go, or any API-key provider). Optional passthrough:
+# [env.set]
+# OPENCODE_API_KEY = "do-not-commit"
+
 # Kimi: auth lives in ~/.kimi-code (run `kimi login` once), not in an env var.
 # Only pin these when the defaults are wrong for this machine:
 # [agents.kimi.env]

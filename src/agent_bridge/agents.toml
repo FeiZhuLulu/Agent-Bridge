@@ -92,6 +92,16 @@ env = { DSH_PERMISSION_MODE = "danger-full-access" }
 revivable = false
 idle_unload_sec = 0
 
+[agents.opencode]
+protocol = "acp"
+command = ["opencode", "acp"]
+# OpenCode has no product login. Providers (official Zen / Go, or any other
+# API-key connection added with `opencode auth`) are selected after
+# session/new through session/set_config_option. Revive via session/resume:
+# session/load replays the whole history and can outlast the handshake timeout.
+revivable = true
+idle_unload_sec = 900
+
 [agents.antigravity]
 protocol = "agy"
 command = ["agy"]

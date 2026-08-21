@@ -13,6 +13,7 @@ from acp.schema import (
     NewSessionResponse,
     PromptCapabilities,
     PromptResponse,
+    Usage,
 )
 
 
@@ -60,7 +61,10 @@ class EchoAgent:
                     session_id,
                     update_agent_message_text(f"echo:{text}"),
                 )
-        return PromptResponse(stop_reason="end_turn")
+        return PromptResponse(
+            stop_reason="end_turn",
+            usage=Usage(total_tokens=3, input_tokens=1, output_tokens=2),
+        )
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         return None

@@ -4,13 +4,14 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, or Kimi Code — directs Antigravity CLI, Grok Build, Kimi Code, and DeepSeek Harness. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, or Kimi Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode. More agents will follow.
 
 ```text
 User → Coordinator (Codex / Cursor / Kimi Code) → Agent Bridge (MCP) → Antigravity CLI
                                                                      → Grok Build
                                                                      → Kimi Code
                                                                      → DeepSeek Harness
+                                                                     → OpenCode
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -87,13 +88,14 @@ uv run pytest
 
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor 或 Kimi Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness 进行工作。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor 或 Kimi Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode 进行工作。后续将推出更多 Agent 支持。
 
 ```text
 用户 → 协调者（Codex / Cursor / Kimi Code）→ Agent Bridge (MCP) → Antigravity CLI
                                                               → Grok Build
                                                               → Kimi Code
                                                               → DeepSeek Harness
+                                                              → OpenCode
 ```
 
 它不操作图形界面。用户只和协调者对话。

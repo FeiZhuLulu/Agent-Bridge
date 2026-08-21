@@ -32,13 +32,20 @@ from agent_bridge.processes import (
 )
 from agent_bridge.transcript import append_event
 from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
-from agent_bridge.kimi_meta import KIMI_MODE_YOLO, config_option_values, resolve_kimi_thinking
+from agent_bridge.acp_config import config_option_values
+from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
+from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
 
 log = logging.getLogger(__name__)
 
 GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
+# These workers' session/load replays persisted history as session/update
+# notifications. session/resume is advertised and skips that replay.
+_RESUME_AGENTS = frozenset({"kimi", "opencode"})
+_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode"})
+_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode"})
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
@@ -435,8 +442,8 @@ class AcpAdapter(Adapter):
         return await conn.new_session(cwd=cwd, mcp_servers=[], **extra)
 
     async def _call_load_session(self, conn: Any, cwd: str, native_id: str) -> Any:
-        if self.agent.name == "kimi":
-            # Kimi replays the entire persisted history as session/update
+        if self.agent.name in _RESUME_AGENTS:
+            # Kimi and OpenCode replay persisted history as session/update
             # notifications before session/load answers, which is pure noise
             # for a headless turn and can outlast RPC_TIMEOUT_SEC on a long
             # session. session/resume is advertised and skips the replay.
@@ -505,14 +512,14 @@ class AcpAdapter(Adapter):
         live.applied_effort = effort
 
     def _remember_config_options(self, live: _Live, response: Any) -> None:
-        """Cache the `configOptions` snapshot a Kimi response carries."""
-        if self.agent.name != "kimi":
+        """Cache the `configOptions` snapshot a lifecycle response carries."""
+        if self.agent.name not in _CONFIG_OPTION_AGENTS:
             return
         options = getattr(response, "config_options", None)
         if isinstance(options, (list, tuple)):
             live.config_options = list(options)
 
-    async def _set_kimi_option(
+    async def _set_config_option(
         self,
         live: _Live,
         session: Session,
@@ -530,6 +537,15 @@ class AcpAdapter(Adapter):
             session,
         )
         self._remember_config_options(live, response)
+
+    async def _set_kimi_option(
+        self,
+        live: _Live,
+        session: Session,
+        config_id: str,
+        value: str,
+    ) -> None:
+        await self._set_config_option(live, session, config_id, value)
 
     async def _sync_kimi_selection(self, live: _Live, session: Session) -> None:
         """Force yolo mode, then apply model and thinking for a Kimi session.
@@ -611,6 +627,64 @@ class AcpAdapter(Adapter):
             return
         live.applied_effort = level
 
+    async def _sync_opencode_selection(self, live: _Live, session: Session) -> None:
+        """Apply model and variant for an OpenCode ACP session.
+
+        OpenCode has no product login and no yolo mode on the ACP path.
+        Permissions go through requestPermission (Bridge auto-picks
+        allow-always). Model is ``provider/model``; effort is the current
+        model's variants and may be absent entirely.
+        """
+        if self.agent.name != "opencode" or live.conn is None or not session.native_session_id:
+            return
+        if session.model and session.model != live.applied_model:
+            current_model, _ = config_option_values(live.config_options, "model")
+            if session.model == current_model:
+                live.applied_model = session.model
+            else:
+                try:
+                    await self._set_config_option(live, session, "model", session.model)
+                except RpcTimeoutError:
+                    raise
+                except Exception as exc:
+                    _, offered = config_option_values(live.config_options, "model")
+                    raise RuntimeError(
+                        f"opencode rejected model {session.model!r}; "
+                        f"session advertises {offered or 'no models'}"
+                    ) from exc
+                live.applied_model = session.model
+        await self._sync_opencode_effort(live, session)
+
+    async def _sync_opencode_effort(self, live: _Live, session: Session) -> None:
+        if not session.effort:
+            return
+        current, offered = config_option_values(live.config_options, "effort")
+        level = resolve_opencode_effort(session.effort, offered)
+        if level is None:
+            message = (
+                f"opencode effort={session.effort} has no counterpart on "
+                f"{live.applied_model or 'the current model'}; "
+                f"session advertises effort {offered or '(none)'}"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        if level == current:
+            live.applied_effort = level
+            return
+        if live.applied_effort == level:
+            return
+        try:
+            await self._set_config_option(live, session, "effort", level)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            message = f"opencode rejected effort={level} for effort={session.effort}: {exc}"
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_effort = level
+
     async def ensure_session(self, session: Session) -> None:
         live = self._live.get(session.session_id)
         if (
@@ -638,6 +712,7 @@ class AcpAdapter(Adapter):
             else:
                 await self._sync_grok_model(live, session)
                 await self._sync_kimi_selection(live, session)
+                await self._sync_opencode_selection(live, session)
                 return
         live = await self._spawn(session)
         native = session.native_session_id
@@ -658,6 +733,7 @@ class AcpAdapter(Adapter):
                 self._remember_config_options(live, revived)
                 await self._sync_grok_model(live, session)
                 await self._sync_kimi_selection(live, session)
+                await self._sync_opencode_selection(live, session)
                 return
         created = await self._rpc(
             self._call_new_session(live.conn, session.cwd, self._new_session_meta(session)),
@@ -674,6 +750,7 @@ class AcpAdapter(Adapter):
             live.applied_effort = grok_effort(session.effort)
         await self._sync_grok_model(live, session)
         await self._sync_kimi_selection(live, session)
+        await self._sync_opencode_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         await self.ensure_session(session)
@@ -682,7 +759,7 @@ class AcpAdapter(Adapter):
         live.client.reset_turn()
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
-        if self.agent.name not in {"grok", "dsh", "kimi"} and (task.model or task.effort):
+        if self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
             warnings.append(
                 f"{self.agent.name} has no model/effort selection; "
                 f"model={task.model!r} effort={task.effort!r} were ignored"
@@ -709,12 +786,17 @@ class AcpAdapter(Adapter):
         if hasattr(stop, "value"):
             stop = stop.value
         stop = str(stop)
+        usage = live.client.usage
+        if not usage:
+            dumped_usage = _dump(getattr(response, "usage", None))
+            if isinstance(dumped_usage, dict):
+                usage = dumped_usage
         append_event(session.session_id, "turn_end", {"stop_reason": stop}, self.home)
         return TurnResult(
             text="".join(live.client.text_parts),
             files_changed=sorted(live.client.files),
             stop_reason=stop,
-            usage=live.client.usage,
+            usage=usage,
             native_session_id=session.native_session_id,
             warnings=warnings,
         )

@@ -114,13 +114,13 @@ pattern = "mcp__agent-bridge__*"
 Worker CLIs (Grok, Kimi, DSH, agy) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
-2. Bridge launches `grok.exe` / `kimi` / `agy` directly, so PowerShell functions that wrap those CLIs never run.
+2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` directly, so PowerShell functions that wrap those CLIs never run.
 
 Bridge rebuilds the environment **once at startup** (and again for each worker spawn) in this order, later wins:
 
 | Layer | Source |
 | --- | --- |
-| Discovery | PowerShell `grok` wrapper, Windows system proxy (`discover_proxy`) |
+| Discovery | PowerShell `grok` / `opencode` wrappers, Windows system proxy (`discover_proxy`) |
 | Inherit | Windows user then machine env, keys in `[env.inherit]` |
 | Process | Whatever Codex still forwarded |
 | `[env.proxy]` | `url` / `no_proxy` in `agents.toml` |
@@ -218,7 +218,7 @@ The coordinator can pin a worker model and thinking intensity on `dispatch_task`
 dispatch_task(agent="antigravity", model="gemini-3.7-flash", effort="low", ...)
 ```
 
-`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process.
+`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process.
 
 ## Worker: Kimi Code
 
@@ -237,6 +237,21 @@ Two behaviors worth knowing before you read a Kimi result:
 - **A failed Kimi turn does not look failed.** Its ACP host maps a failed turn to `stopReason: end_turn` with empty text, so a quota or provider error is indistinguishable on the wire from a clean no-op. Bridge reads Kimi's `wire.jsonl` after every turn and puts the real reason in `get_result.warnings`, alongside `observed_model` / `observed_effort`. Never read an empty Kimi turn as success without checking there.
 
 Bridge also forces the session into Kimi's `yolo` mode after creating it (Kimi starts in manual-approval `default` mode), and revives sessions with `session/resume` rather than `session/load`, because `load` replays the entire persisted history before it answers.
+
+## Worker: OpenCode
+
+`opencode acp` is a first-class ACP server:
+
+```powershell
+npm i -g opencode-ai@latest
+opencode auth
+```
+
+OpenCode has **no product login**. You connect providers by storing API keys (or that provider's own oauth) with `opencode auth`. Official routes are OpenCode Zen and OpenCode Go; anything else is just another connected provider. `list_agents` reports the CLI as available when `opencode` is on PATH — a missing provider key only shows up when a turn actually talks to the model.
+
+`dispatch_task.model` is a `provider/model` slug the live session advertises (`opencode/...`, `xai/...`, …). `effort` maps onto that model's variants (`default|low|medium|high` is common; Bridge `max` usually becomes `high`). An unknown slug fails the turn and lists the real options; a model with no variants, or an effort that will not map, comes back as a warning. Bridge revives with `session/resume` rather than `session/load`. Permissions are ACP `requestPermission`; Bridge auto-picks `allow-always`.
+
+If OpenCode's configured default model is disabled, the first prompt fails with `Model is disabled`. Pass a slug from `opencode models` for a provider that still has a working key.
 
 ## Permissions
 

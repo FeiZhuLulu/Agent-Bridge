@@ -1,11 +1,11 @@
 ---
 name: agent-bridge
-description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
+description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness, OpenCode) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
 ---
 
 # Dispatching workers through Agent Bridge
 
-You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, or `dsh` CLIs directly, and never drive their GUIs.
+You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, or `opencode` CLIs directly, and never drive their GUIs.
 
 ## Before anything: read the policy
 
@@ -30,6 +30,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 - **Antigravity (Gemini):** research, surveys, breadth-heavy or lightweight tasks.
 - **Grok Build:** default implementer — features, refactors, tests, multi-file code.
 - **Kimi Code:** second implementer — Grok busy or wrong, independent second take, or big single-context jobs.
+- **OpenCode:** optional third implementer — user asked for it, wants a connected provider/model, or Grok and Kimi are busy.
 - **DeepSeek Harness:** only when others are unavailable or the user asks.
 
 ## The dispatch loop

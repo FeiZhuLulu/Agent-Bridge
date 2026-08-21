@@ -36,7 +36,7 @@ async def lifespan(_server: MCPServer[Registry]) -> AsyncIterator[Registry]:
 # channel that needs no copied rules file and no skill install.
 INSTRUCTIONS = (
     "Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, "
-    "Antigravity, DeepSeek Harness) and keeps their sessions resumable.\n"
+    "Antigravity, DeepSeek Harness, OpenCode) and keeps their sessions resumable.\n"
     "Hard rules: workers are reached only through these tools — never drive the "
     "worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's "
     "project folder (absolute), not the Agent Bridge install path. A wait_task "
@@ -114,7 +114,7 @@ async def dispatch_task(
     title: str | None = None,
     user_requested: bool = False,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; dsh: spawn env, respawn if they change). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode: session/set_config_option after new/resume; dsh: spawn env, respawn if they change). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,

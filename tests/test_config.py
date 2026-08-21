@@ -22,6 +22,9 @@ def test_loads_bundled_agents():
     assert cfg.agents["kimi"].protocol == "acp"
     assert cfg.agents["kimi"].command == ["kimi", "acp"]
     assert cfg.agents["kimi"].revivable is True
+    assert cfg.agents["opencode"].protocol == "acp"
+    assert cfg.agents["opencode"].command == ["opencode", "acp"]
+    assert cfg.agents["opencode"].revivable is True
     # An explicit [env] inherit in agents.toml replaces DEFAULT_INHERIT_KEYS
     # wholesale, so Kimi's keys have to be listed there too.
     assert "KIMI_CODE_HOME" in cfg.env.inherit

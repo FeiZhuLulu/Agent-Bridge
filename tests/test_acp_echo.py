@@ -35,6 +35,8 @@ async def test_acp_echo_roundtrip(bridge_home, tmp_path):
         result = await adapter.run_turn(session, task)
         assert result.stop_reason == "end_turn"
         assert "echo:hello-bridge" in result.text
+        assert result.usage.get("inputTokens") == 1 or result.usage.get("input_tokens") == 1
+        assert result.usage.get("outputTokens") == 2 or result.usage.get("output_tokens") == 2
         assert session.native_session_id
         follow = Task(
             task_id="task_echo2",

@@ -137,14 +137,29 @@ def extract_powershell_function(text: str, name: str) -> str | None:
     return None
 
 
-def parse_powershell_grok_proxy(text: str) -> dict[str, str]:
-    body = extract_powershell_function(text, "grok") or ""
-    source = body or text
+def _proxy_assigns(text: str) -> dict[str, str]:
     found: dict[str, str] = {}
-    for match in _PS_PROXY_ASSIGN.finditer(source):
+    for match in _PS_PROXY_ASSIGN.finditer(text):
         canonical = _PROXY_KEY_ALIASES[match.group("key").lower()]
         found.setdefault(canonical, match.group("val").strip())
-    return normalize_proxy_map(found)
+    return found
+
+
+def parse_powershell_grok_proxy(text: str) -> dict[str, str]:
+    """Read proxy assignments from PowerShell worker wrappers.
+
+    Interactive wrappers (``function grok { ... }``, ``function opencode``)
+    never run when Bridge spawn the raw executable. Scan those function
+    bodies first so a machine that only set the proxy there still works.
+    """
+    for name in ("grok", "opencode", "kimi", "agy"):
+        body = extract_powershell_function(text, name)
+        if not body:
+            continue
+        found = _proxy_assigns(body)
+        if found:
+            return normalize_proxy_map(found)
+    return normalize_proxy_map(_proxy_assigns(text))
 
 
 def _documents_dirs() -> list[Path]:

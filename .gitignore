@@ -15,3 +15,5 @@ logs/
 docs/
 灵感
 灵感/
+# Local collaboration rules for this checkout only. Product orchestration lives in ORCHESTRATION.md.
+AGENTS.md

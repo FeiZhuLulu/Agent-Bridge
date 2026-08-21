@@ -538,6 +538,17 @@ class AcpAdapter(Adapter):
         )
         self._remember_config_options(live, response)
 
+    def _remember_applied_model(self, live: _Live, model: str) -> None:
+        """Record the live model and drop a stale per-model effort.
+
+        OpenCode (and Kimi thinking) reset the variant when the model
+        changes. Keeping ``applied_effort`` from the previous model makes the
+        next sync skip the RPC and leave the new model's default in place.
+        """
+        if live.applied_model != model:
+            live.applied_effort = None
+        live.applied_model = model
+
     async def _set_kimi_option(
         self,
         live: _Live,
@@ -575,7 +586,7 @@ class AcpAdapter(Adapter):
                 # Already the session's model (commonly the default a
                 # coordinator names explicitly); switching thinking below is
                 # the only thing left to do.
-                live.applied_model = session.model
+                self._remember_applied_model(live, session.model)
             else:
                 try:
                     await self._set_kimi_option(live, session, "model", session.model)
@@ -590,7 +601,7 @@ class AcpAdapter(Adapter):
                         f"kimi rejected model {session.model!r}; "
                         f"session advertises {offered or 'no models'}"
                     ) from exc
-                live.applied_model = session.model
+                self._remember_applied_model(live, session.model)
         # Order matters: thinking vocabularies are per model, and the set above
         # refreshed the snapshot this reads.
         await self._sync_kimi_thinking(live, session)
@@ -611,8 +622,6 @@ class AcpAdapter(Adapter):
             return
         if level == current:
             live.applied_effort = level
-            return
-        if live.applied_effort == level:
             return
         try:
             await self._set_kimi_option(live, session, "thinking", level)
@@ -640,7 +649,7 @@ class AcpAdapter(Adapter):
         if session.model and session.model != live.applied_model:
             current_model, _ = config_option_values(live.config_options, "model")
             if session.model == current_model:
-                live.applied_model = session.model
+                self._remember_applied_model(live, session.model)
             else:
                 try:
                     await self._set_config_option(live, session, "model", session.model)
@@ -652,7 +661,7 @@ class AcpAdapter(Adapter):
                         f"opencode rejected model {session.model!r}; "
                         f"session advertises {offered or 'no models'}"
                     ) from exc
-                live.applied_model = session.model
+                self._remember_applied_model(live, session.model)
         await self._sync_opencode_effort(live, session)
 
     async def _sync_opencode_effort(self, live: _Live, session: Session) -> None:
@@ -671,8 +680,6 @@ class AcpAdapter(Adapter):
             return
         if level == current:
             live.applied_effort = level
-            return
-        if live.applied_effort == level:
             return
         try:
             await self._set_config_option(live, session, "effort", level)
@@ -720,7 +727,7 @@ class AcpAdapter(Adapter):
             try:
                 revived = await self._rpc(
                     self._call_load_session(live.conn, session.cwd, native),
-                    "session/load",
+                    "session/resume" if self.agent.name in _RESUME_AGENTS else "session/load",
                     session,
                 )
             except RpcTimeoutError:
@@ -779,6 +786,8 @@ class AcpAdapter(Adapter):
                 files_changed=sorted(live.client.files),
                 stop_reason="cancelled",
                 warnings=warnings,
+                observed_model=live.applied_model,
+                observed_effort=live.applied_effort,
             )
         finally:
             live.prompt_task = None
@@ -799,6 +808,8 @@ class AcpAdapter(Adapter):
             usage=usage,
             native_session_id=session.native_session_id,
             warnings=warnings,
+            observed_model=live.applied_model,
+            observed_effort=live.applied_effort,
         )
 
     async def cancel(self, session: Session) -> None:

@@ -36,13 +36,14 @@ class FakeResponse:
 
 
 class FakeConn:
-    def __init__(self, config_options=None, reject_ids=()):
+    def __init__(self, config_options=None, reject_ids=(), after_model_options=None):
         self.calls: list[tuple] = []
         self.config_options = config_options if config_options is not None else [
             MODEL_OPTION,
             EFFORT_OPTION,
         ]
         self.reject_ids = set(reject_ids)
+        self.after_model_options = after_model_options
 
     async def set_session_mode(self, session_id, mode_id):
         self.calls.append(("set_mode", mode_id))
@@ -52,6 +53,8 @@ class FakeConn:
         self.calls.append((config_id, value))
         if config_id in self.reject_ids:
             raise RuntimeError(f"{config_id} rejected")
+        if config_id == "model" and self.after_model_options is not None:
+            self.config_options = self.after_model_options
         return FakeResponse(config_options=self.config_options)
 
     async def resume_session(self, session_id, cwd, mcp_servers=None):
@@ -142,6 +145,39 @@ async def test_a_rejected_model_fails_the_turn_and_names_the_real_options():
     live.config_options = [MODEL_OPTION, EFFORT_OPTION]
     with pytest.raises(RuntimeError, match="opencode/gpt-5"):
         await adapter._sync_opencode_selection(live, session)
+
+
+@pytest.mark.asyncio
+async def test_model_switch_reapplies_effort_after_variant_reset():
+    """OpenCode resets effort to the new model's default on session/set_config_option model.
+
+    A live session that already applied ``high`` must still send effort again
+    after the switch, or the turn silently keeps the new default.
+    """
+    after = [
+        {**MODEL_OPTION, "currentValue": "xai/grok-4"},
+        {
+            "id": "effort",
+            "currentValue": "low",
+            "options": [
+                {"value": "default"},
+                {"value": "low"},
+                {"value": "medium"},
+                {"value": "high"},
+            ],
+        },
+    ]
+    conn = FakeConn(after_model_options=after)
+    adapter, live, session = build(
+        conn=conn, session_kwargs={"model": "xai/grok-4", "effort": "max"}
+    )
+    live.applied_model = "opencode/gpt-5"
+    live.applied_effort = "high"
+    live.config_options = [MODEL_OPTION, EFFORT_OPTION]
+    await adapter._sync_opencode_selection(live, session)
+    assert ("model", "xai/grok-4") in live.conn.calls
+    assert ("effort", "high") in live.conn.calls
+    assert live.applied_effort == "high"
 
 
 @pytest.mark.asyncio

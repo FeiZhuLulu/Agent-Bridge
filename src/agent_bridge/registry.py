@@ -432,6 +432,11 @@ class Registry:
                     task.warnings.append(
                         f"kimi reported end_turn but the turn failed: {observed['failure']}"
                     )
+            else:
+                # OpenCode (and any later ACP worker) has no on-disk sampler
+                # log. Report the last model/effort the adapter applied.
+                task.observed_model = result.observed_model
+                task.observed_effort = result.observed_effort
             # cancel_task's timeout path may already have finalized this task
             # as cancelled; a late turn result must not overwrite that.
             if task.status not in TERMINAL_STATUSES:
@@ -557,6 +562,11 @@ class Registry:
                 payload["hint"] += (
                     " Kimi reports a failed turn as end_turn with empty text; "
                     "an empty result is only clean if warnings is empty."
+                )
+            if task.agent == "opencode":
+                payload["hint"] += (
+                    " OpenCode observed_model/effort are the last values Bridge "
+                    "successfully set on the session after mapping, not a live sampler."
                 )
         return payload
 

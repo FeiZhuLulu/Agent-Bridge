@@ -29,13 +29,14 @@ class FakeResponse:
 class FakeConn:
     """Records the config surface calls the adapter makes."""
 
-    def __init__(self, config_options=None, reject_ids=()):
+    def __init__(self, config_options=None, reject_ids=(), after_model_options=None):
         self.calls: list[tuple] = []
         self.config_options = config_options if config_options is not None else [
             MODEL_OPTION,
             THINKING_OPTION,
         ]
         self.reject_ids = set(reject_ids)
+        self.after_model_options = after_model_options
 
     async def set_session_mode(self, session_id, mode_id):
         self.calls.append(("set_mode", mode_id))
@@ -45,6 +46,8 @@ class FakeConn:
         self.calls.append((config_id, value))
         if config_id in self.reject_ids:
             raise RuntimeError(f"{config_id} rejected")
+        if config_id == "model" and self.after_model_options is not None:
+            self.config_options = self.after_model_options
         return FakeResponse(config_options=self.config_options)
 
     async def resume_session(self, session_id, cwd, mcp_servers=None):
@@ -147,6 +150,30 @@ async def test_a_rejected_model_fails_the_turn_and_names_the_real_options():
     live.config_options = [MODEL_OPTION, THINKING_OPTION]
     with pytest.raises(RuntimeError, match="kimi-code/k3-256k"):
         await adapter._sync_kimi_selection(live, session)
+
+
+@pytest.mark.asyncio
+async def test_model_switch_reapplies_thinking_after_vocab_reset():
+    after = [
+        {**MODEL_OPTION, "currentValue": "kimi-code/k3"},
+        {
+            "id": "thinking",
+            "currentValue": "low",
+            "options": [{"value": "low"}, {"value": "high"}, {"value": "max"}],
+        },
+    ]
+    conn = FakeConn(after_model_options=after)
+    adapter, live, session = build(
+        conn=conn, session_kwargs={"model": "kimi-code/k3", "effort": "max"}
+    )
+    live.applied_model = "kimi-code/k3-256k"
+    live.applied_effort = "max"
+    live.applied_mode = "yolo"
+    live.config_options = [MODEL_OPTION, THINKING_OPTION]
+    await adapter._sync_kimi_selection(live, session)
+    assert ("model", "kimi-code/k3") in live.conn.calls
+    assert ("thinking", "max") in live.conn.calls
+    assert live.applied_effort == "max"
 
 
 @pytest.mark.asyncio

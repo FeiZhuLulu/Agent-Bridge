@@ -140,3 +140,7 @@ class TurnResult(BaseModel):
     native_session_id: str | None = None
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    # Last model/effort the adapter successfully applied this turn. Grok and
+    # Kimi observers in Registry overwrite these with on-disk sampler truth.
+    observed_model: str | None = None
+    observed_effort: str | None = None

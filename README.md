@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ab-wordmark.svg" alt="Agent Bridge" width="420">
+  <img src="logo.svg" alt="Agent Bridge" width="420">
 </p>
 
 <p align="center">

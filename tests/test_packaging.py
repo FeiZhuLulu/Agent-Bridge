@@ -37,7 +37,7 @@ def test_wheel_ships_coordinator_defaults(tmp_path: Path):
     assert wheels
     with zipfile.ZipFile(wheels[-1]) as archive:
         names = [name for name in archive.namelist() if name.endswith("agent_bridge/agents.toml")]
-        assert names
+        assert names == ["agent_bridge/agents.toml"]
         text = archive.read(names[0]).decode("utf-8")
     assert "[coordinator]" in text
     assert 'mode = "auto"' in text

@@ -395,7 +395,12 @@ class AgyAdapter(Adapter):
                 kill_tree(proc.pid)
             raise
         finally:
-            stderr_task.cancel()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
             self._procs.pop(session.session_id, None)
             self._cancelled.discard(session.session_id)
             drop_pid(self.home, session.session_id)

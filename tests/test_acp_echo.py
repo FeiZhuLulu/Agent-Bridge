@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_bridge.config import AgentConfig
 from agent_bridge.adapters.acp import AcpAdapter
+from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task
+from agent_bridge.paths import pids_path
+from agent_bridge.persist import read_json
 
 
 @pytest.mark.asyncio
@@ -48,4 +50,15 @@ async def test_acp_echo_roundtrip(bridge_home, tmp_path):
         result2 = await adapter.run_turn(session, follow)
         assert "echo:second" in result2.text
     finally:
+        live = adapter._live.get(session.session_id)
+        proc = live.proc if live else None
+        stderr_task = live.stderr_task if live else None
         await adapter.shutdown(session)
+        assert session.session_id not in adapter._live
+        assert session.pid is None
+        if stderr_task is not None:
+            assert stderr_task.done()
+        if proc is not None:
+            assert proc.returncode is not None
+        table = read_json(pids_path(bridge_home), {})
+        assert session.session_id not in table

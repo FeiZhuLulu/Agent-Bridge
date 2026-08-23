@@ -838,18 +838,24 @@ class AcpAdapter(Adapter):
             drop_pid(self.home, session.session_id)
             session.pid = None
             return
-        if live.stderr_task:
-            live.stderr_task.cancel()
         if live.conn is not None:
             try:
                 await asyncio.wait_for(live.conn.close(), timeout=2)
             except Exception:
                 pass
-        if live.proc and live.proc.returncode is None and live.proc.pid:
-            kill_tree(live.proc.pid)
+        if live.proc is not None:
+            if live.proc.returncode is None and live.proc.pid:
+                kill_tree(live.proc.pid)
             try:
                 await asyncio.wait_for(live.proc.wait(), timeout=5)
             except TimeoutError:
+                pass
+        if live.stderr_task is not None:
+            if not live.stderr_task.done():
+                live.stderr_task.cancel()
+            try:
+                await live.stderr_task
+            except asyncio.CancelledError:
                 pass
         drop_pid(self.home, session.session_id)
         session.pid = None

@@ -37,10 +37,19 @@ def test_detect_checkout():
     assert (checkout_root() / "pyproject.toml").is_file()
 
 
+def test_skill_destinations_include_zcode(tmp_path):
+    dests = skill_destinations(tmp_path)
+    assert any(part == ".zcode" for dest in dests for part in dest.parts)
+    assert dests[-1] == tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md"
+
+
 def test_install_skill_writes_host_dirs(tmp_path):
     written = install_skill(home=tmp_path)
     expected = skill_destinations(tmp_path)
     assert written == expected
+    assert any(path.parts[-4:-3] == (".zcode",) or ".zcode" in path.parts for path in written)
+    zcode = tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md"
+    assert zcode.is_file()
     for dest in expected:
         assert dest.is_file()
         assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
@@ -100,3 +109,16 @@ def test_ensure_coordinator_skill_skips_under_pytest(tmp_path, monkeypatch):
     written = ensure_coordinator_skill(home=tmp_path)
     assert written
     assert all(path.is_file() for path in written)
+
+
+def test_ensure_coordinator_skill_skips_worker_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_PARENT_CONTEXT", "worker")
+    assert ensure_coordinator_skill(home=tmp_path) == []
+    assert not any(path.exists() for path in skill_destinations(tmp_path))
+
+
+def test_install_skill_works_in_worker_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_PARENT_CONTEXT", "worker")
+    written = install_skill(home=tmp_path)
+    assert written
+    assert (tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md").is_file()

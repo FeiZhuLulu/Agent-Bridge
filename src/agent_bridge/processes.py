@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -290,21 +290,64 @@ def _looks_like_agent_bridge(proc: Any) -> bool:
     return False
 
 
+def _has_matched_bridge_ancestor(
+    pid: int,
+    matched: set[int],
+    ppid_by_pid: Mapping[int, int | None],
+) -> bool:
+    """True if any ancestor of ``pid`` is also a counted Bridge process."""
+    seen: set[int] = set()
+    current = ppid_by_pid.get(pid)
+    while current is not None and current not in seen:
+        if current in matched:
+            return True
+        seen.add(current)
+        current = ppid_by_pid.get(current)
+    return False
+
+
+def _descendant_pids(root: int, ppid_by_pid: Mapping[int, int | None]) -> set[int]:
+    """Return every pid reachable from ``root`` by following child→parent links."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in ppid_by_pid.items():
+        if ppid is None:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    stack = list(children.get(root, []))
+    while stack:
+        pid = stack.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        stack.extend(children.get(pid, []))
+    return found
+
+
 def count_sibling_servers(
     processes: Iterable[Any] | Callable[..., Iterable[Any]] | None = None,
 ) -> int:
-    """Count other running Agent Bridge server instances on this machine.
+    """Count independent Agent Bridge server instances on this machine.
 
-    Excludes the current process and its ancestor chain (launcher / uv wrapper).
-    One instance is a whole process tree (uv -> agent-bridge.exe -> python), so
-    only tree roots among the matches are counted, not every process in a chain.
+    An independent instance is another Coordinator (or an abandoned spawn),
+    not a nested Bridge that this process started by launching a worker.
+    Excludes the current process, its ancestor chain (launcher / uv wrapper),
+    and every descendant — including a worker CLI that then inherited MCP
+    and started a nested Bridge.
+
+    One instance is a whole process tree (uv -> agent-bridge.exe -> python),
+    so only tree roots among the remaining matches are counted.
     Fail-open: returns 0 on unexpected errors.
+
+    An ``agent-bridge upgrade`` process is not an ancestor of a live top-level
+    or nested Bridge, so those instances still count and still block upgrade.
     """
     try:
         me = psutil.Process()
-        exclude = {me.pid}
+        my_pid = me.pid
+        ancestors: set[int] = set()
         try:
-            exclude.update(parent.pid for parent in me.parents())
+            ancestors.update(parent.pid for parent in me.parents())
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
@@ -315,16 +358,26 @@ def count_sibling_servers(
         else:
             proc_iter = processes
 
-        matched: dict[int, int | None] = {}
+        ppid_by_pid: dict[int, int | None] = {}
+        bridge_ppid: dict[int, int | None] = {}
         for proc in proc_iter:
             try:
                 pid = _proc_pid(proc)
-                if pid is None or pid in exclude:
+                if pid is None:
                     continue
+                ppid = _proc_ppid(proc)
+                ppid_by_pid[pid] = ppid
                 if _looks_like_agent_bridge(proc):
-                    matched[pid] = _proc_ppid(proc)
+                    bridge_ppid[pid] = ppid
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        return sum(1 for ppid in matched.values() if ppid not in matched)
+
+        exclude = {my_pid} | ancestors | _descendant_pids(my_pid, ppid_by_pid)
+        matched = {pid for pid in bridge_ppid if pid not in exclude}
+        return sum(
+            1
+            for pid in matched
+            if not _has_matched_bridge_ancestor(pid, matched, ppid_by_pid)
+        )
     except Exception:
         return 0

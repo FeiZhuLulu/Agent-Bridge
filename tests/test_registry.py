@@ -9,7 +9,13 @@ from agent_bridge.adapters.fake import FakeAdapter
 from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
 from agent_bridge.paths import state_path
 from agent_bridge.persist import atomic_write_json, read_json
-from agent_bridge.registry import Registry
+from agent_bridge.registry import (
+    NESTED_CANCEL_ERROR,
+    NESTED_DISPATCH_ERROR,
+    NESTED_END_SESSION_ERROR,
+    NESTED_PREFERENCES_ERROR,
+    Registry,
+)
 
 
 @pytest.mark.asyncio
@@ -523,6 +529,8 @@ async def test_coordinator_status_default_auto_never_blocks(bridge_home, tmp_pat
         assert status["mode"] == "auto"
         assert status["instructions"] is None
         assert status["hint"]
+        assert status["runtime_context"] == "coordinator"
+        assert status["dispatch_enabled"] is True
         dispatched = await registry.dispatch_task("fake", "hi", cwd=str(work.resolve()))
         waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
         assert waited["status"] == "completed"
@@ -586,3 +594,73 @@ instructions = "Coding goes to grok."
         assert waited["status"] == "completed"
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_status_disables_dispatch(bridge_home):
+    registry = Registry.create(bridge_home, runtime_context="worker")
+    status = registry.coordinator_status()
+    assert status["runtime_context"] == "worker"
+    assert status["dispatch_enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["manual", "auto", "eager"])
+@pytest.mark.parametrize("user_requested", [False, True])
+async def test_worker_context_blocks_dispatch_before_validation(
+    bridge_home, monkeypatch, mode, user_requested
+):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    (bridge_home / "agents.toml").write_text(
+        f'[coordinator]\nmode = "{mode}"\n',
+        encoding="utf-8",
+    )
+    registry = Registry.create(bridge_home, runtime_context="worker")
+    with pytest.raises(RuntimeError, match="nested dispatch is disabled") as exc:
+        await registry.dispatch_task(
+            "not-an-agent",
+            "x",
+            cwd="relative",
+            user_requested=user_requested,
+        )
+    assert NESTED_DISPATCH_ERROR in str(exc.value)
+
+
+def test_worker_context_set_preferences_does_not_write(bridge_home):
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    path = bridge_home / "agents.toml"
+    original = "[coordinator]\nmode = \"auto\"\ninstructions = \"keep\"\n"
+    path.write_text(original, encoding="utf-8")
+    mtime = path.stat().st_mtime
+    registry = Registry.create(bridge_home, runtime_context="worker")
+    with pytest.raises(RuntimeError, match="preference updates are disabled") as exc:
+        registry.set_preferences(mode="eager", instructions="changed")
+    assert NESTED_PREFERENCES_ERROR in str(exc.value)
+    assert path.read_text(encoding="utf-8") == original
+    assert path.stat().st_mtime == mtime
+
+
+def test_registry_detects_worker_context_from_env(bridge_home, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_PARENT_CONTEXT", "worker")
+    registry = Registry.create(bridge_home)
+    assert registry.runtime_context == "worker"
+    assert registry.dispatch_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_worker_context_blocks_cancel_and_end_before_lookup(bridge_home):
+    registry = Registry.create(bridge_home, runtime_context="worker")
+    with pytest.raises(RuntimeError, match="task cancellation is disabled") as cancel_exc:
+        await registry.cancel_task("task_missing")
+    assert NESTED_CANCEL_ERROR in str(cancel_exc.value)
+    with pytest.raises(RuntimeError, match="session shutdown is disabled") as end_exc:
+        await registry.end_session("sess_missing")
+    assert NESTED_END_SESSION_ERROR in str(end_exc.value)
+
+
+def test_registry_injection_overrides_env(bridge_home, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_PARENT_CONTEXT", "worker")
+    registry = Registry.create(bridge_home, runtime_context="coordinator")
+    assert registry.runtime_context == "coordinator"
+    assert registry.dispatch_enabled is True

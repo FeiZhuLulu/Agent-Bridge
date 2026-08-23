@@ -13,14 +13,15 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, or Kimi Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, or Grok Build — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
 ```text
-User → Coordinator (Codex / Cursor / Kimi Code) → Agent Bridge (MCP) → Antigravity CLI
-                                                                     → Grok Build
-                                                                     → Kimi Code
-                                                                     → DeepSeek Harness
-                                                                     → OpenCode
+User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build)
+     → Agent Bridge (MCP) → Antigravity CLI
+                          → Grok Build
+                          → Kimi Code
+                          → DeepSeek Harness
+                          → OpenCode
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -70,6 +71,10 @@ Restart Codex. The coordinator skill is written the first time the server starts
 }
 ```
 
+### Connect ZCode or Grok Build
+
+Resolve the real executable first (`Get-Command agent-bridge | Select-Object -ExpandProperty Source`). ZCode UI paste JSON, ZCode native `config.json`, and Grok `config.toml` are three different shapes — do not mix them. Copy-paste blocks: [SETUP.md](SETUP.md).
+
 ### Connect another agent
 
 A plain ACP CLI needs no code. Add a block to `~/.agent-bridge/agents.toml`:
@@ -108,16 +113,19 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 uv run pytest
 ```
 
+`tests/` is pytest only. Live coordinator drills use a local `lab/` folder from `scripts/setup_lab.py` — that directory is not in git.
+
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor 或 Kimi Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode 进行工作。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode 或 Grok Build——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
 
 ```text
-用户 → 协调者（Codex / Cursor / Kimi Code）→ Agent Bridge (MCP) → Antigravity CLI
-                                                              → Grok Build
-                                                              → Kimi Code
-                                                              → DeepSeek Harness
-                                                              → OpenCode
+用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build）
+     → Agent Bridge (MCP) → Antigravity CLI
+                          → Grok Build
+                          → Kimi Code
+                          → DeepSeek Harness
+                          → OpenCode
 ```
 
 它不操作图形界面。用户只和协调者对话。
@@ -167,6 +175,10 @@ codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 }
 ```
 
+### 接到 ZCode 或 Grok Build
+
+先解析真实可执行文件（`Get-Command agent-bridge | Select-Object -ExpandProperty Source`）。ZCode 弹窗 JSON、ZCode 原生 `config.json`、Grok 的 `config.toml` 是三种不同结构，不能混用。完整示例见 [SETUP.md](SETUP.md)。
+
 ### 接入其它 Agent
 
 普通 ACP CLI 不用改代码，在 `~/.agent-bridge/agents.toml` 加一段：
@@ -204,6 +216,8 @@ revivable = true
 ```powershell
 uv run pytest
 ```
+
+`tests/` 只跑 pytest。真实协调者联调用本机 `lab/`（`scripts/setup_lab.py` 生成），这个目录不进 git。
 
 ## License
 

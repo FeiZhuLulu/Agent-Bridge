@@ -4,6 +4,7 @@ import pytest
 
 from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.probes import probe_agent
+from agent_bridge.worker_env import WORKER_CONTEXT_ENV, WORKER_CONTEXT_VALUE
 
 
 def _fake_resolve(command, fallbacks=None):
@@ -95,3 +96,31 @@ async def test_dsh_probe_unavailable_when_launcher_cannot_start(monkeypatch):
     )
     assert row["available"] is False
     assert "tsx" in (row["detail"] or "")
+
+
+@pytest.mark.asyncio
+async def test_probe_does_not_inject_worker_context(monkeypatch):
+    captured: dict = {}
+
+    def spy(*args, **kwargs):
+        from agent_bridge.worker_env import build_worker_env
+
+        captured["kwargs"] = kwargs
+        env = build_worker_env(*args, **kwargs)
+        captured["env"] = env
+        return env
+
+    monkeypatch.delenv(WORKER_CONTEXT_ENV, raising=False)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", spy)
+    monkeypatch.setattr("agent_bridge.probes.resolve_command", _fake_resolve)
+    async def fake_version(_exe):
+        return "probe"
+
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    row = await probe_agent(
+        AgentConfig(name="grok", protocol="acp", command=["grok"]),
+        EnvConfig(discover_proxy=False, inherit=[]),
+    )
+    assert row["available"] is True
+    assert captured["kwargs"].get("worker_context") in (None, False)
+    assert captured["env"].get(WORKER_CONTEXT_ENV) != WORKER_CONTEXT_VALUE

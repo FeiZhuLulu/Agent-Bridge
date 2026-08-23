@@ -9,8 +9,20 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from agent_bridge.config import DEFAULT_INHERIT_KEYS, EnvConfig
+from agent_bridge.paths import (
+    WORKER_CONTEXT_ENV,
+    WORKER_CONTEXT_VALUE,
+    bridge_home,
+    nested_bridge_home,
+    parent_context_is_worker,
+)
 
 log = logging.getLogger(__name__)
+
+
+def is_worker_context(env: Mapping[str, str] | None = None) -> bool:
+    """True only when AGENT_BRIDGE_PARENT_CONTEXT is exactly ``worker``."""
+    return parent_context_is_worker(env)
 
 PROXY_KEYS = (
     "HTTP_PROXY",
@@ -505,6 +517,7 @@ def build_worker_env(
     user_env: Mapping[str, str] | None = None,
     machine_env: Mapping[str, str] | None = None,
     log_fill: bool = True,
+    worker_context: bool = False,
 ) -> dict[str, str]:
     env, origin = resolve_env(
         config,
@@ -515,6 +528,17 @@ def build_worker_env(
         user_env=user_env,
         machine_env=machine_env,
     )
+    # After every merge so agents.toml / inherited env cannot clear the mark.
+    # Also pin a nested data dir: if the worker inherits this MCP server, the
+    # nested Bridge must not share the coordinator's state.json. A host MCP
+    # config may overwrite AGENT_BRIDGE_HOME; bridge_home() still appends
+    # /nested when the parent-context mark is present. A host that env-clears
+    # the MCP child drops both — that residual is documented in SETUP.md.
+    if worker_context:
+        env[WORKER_CONTEXT_ENV] = WORKER_CONTEXT_VALUE
+        origin[WORKER_CONTEXT_ENV] = "worker-context"
+        env["AGENT_BRIDGE_HOME"] = str(nested_bridge_home(bridge_home()))
+        origin["AGENT_BRIDGE_HOME"] = "worker-context"
     if log_fill:
         status = describe_env(config, env=env, origin=origin)
         log.info("worker environment: %s", format_env_status(status))

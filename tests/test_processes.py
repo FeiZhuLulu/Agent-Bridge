@@ -192,6 +192,101 @@ def test_count_sibling_servers_with_injected_processes(monkeypatch):
     assert count_sibling_servers(boom) == 0
 
 
+def test_count_sibling_servers_excludes_nested_bridge_in_worker_tree(monkeypatch):
+    me = os.getpid()
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.Process",
+        lambda: SimpleNamespace(pid=me, parents=lambda: []),
+    )
+    procs = [
+        SimpleNamespace(
+            pid=me,
+            info={"pid": me, "ppid": 1, "name": "agent-bridge.exe", "cmdline": []},
+        ),
+        SimpleNamespace(
+            pid=me + 5,
+            info={"pid": me + 5, "ppid": me, "name": "grok.exe", "cmdline": ["grok"]},
+        ),
+        SimpleNamespace(
+            pid=me + 6,
+            info={
+                "pid": me + 6,
+                "ppid": me + 5,
+                "name": "python.exe",
+                "cmdline": ["python", "-m", "agent_bridge"],
+            },
+        ),
+    ]
+    assert count_sibling_servers(procs) == 0
+
+
+def test_count_sibling_servers_from_unrelated_upgrade_process(monkeypatch):
+    me = os.getpid()
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.Process",
+        lambda: SimpleNamespace(pid=me, parents=lambda: []),
+    )
+    procs = [
+        SimpleNamespace(
+            pid=me,
+            info={"pid": me, "ppid": 1, "name": "python.exe", "cmdline": ["python", "-m", "pytest"]},
+        ),
+        SimpleNamespace(
+            pid=me + 20,
+            info={"pid": me + 20, "ppid": 1, "name": "agent-bridge.exe", "cmdline": []},
+        ),
+        SimpleNamespace(
+            pid=me + 21,
+            info={"pid": me + 21, "ppid": me + 20, "name": "grok.exe", "cmdline": ["grok"]},
+        ),
+        SimpleNamespace(
+            pid=me + 22,
+            info={
+                "pid": me + 22,
+                "ppid": me + 21,
+                "name": "python.exe",
+                "cmdline": ["python", "-m", "agent_bridge"],
+            },
+        ),
+    ]
+    assert count_sibling_servers(procs) == 1
+
+
+def test_count_sibling_servers_other_host_nested_bridge_counts_once(monkeypatch):
+    me = os.getpid()
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.Process",
+        lambda: SimpleNamespace(pid=me, parents=lambda: []),
+    )
+    other_bridge = me + 30
+    worker = me + 31
+    nested = me + 32
+    procs = [
+        SimpleNamespace(
+            pid=me,
+            info={"pid": me, "ppid": 1, "name": "python.exe", "cmdline": ["python", "-m", "pytest"]},
+        ),
+        SimpleNamespace(
+            pid=other_bridge,
+            info={"pid": other_bridge, "ppid": 1, "name": "agent-bridge.exe", "cmdline": []},
+        ),
+        SimpleNamespace(
+            pid=worker,
+            info={"pid": worker, "ppid": other_bridge, "name": "grok.exe", "cmdline": ["grok"]},
+        ),
+        SimpleNamespace(
+            pid=nested,
+            info={
+                "pid": nested,
+                "ppid": worker,
+                "name": "python.exe",
+                "cmdline": ["python", "-m", "agent_bridge"],
+            },
+        ),
+    ]
+    assert count_sibling_servers(procs) == 1
+
+
 def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
     record_pid(tmp_path, "sess_keep", os.getpid(), 1.0, "python.exe")
     assert "sess_keep" in read_json(pids_path(tmp_path), {})

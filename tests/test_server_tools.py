@@ -19,5 +19,13 @@ def test_ten_tools_registered():
 
 def test_handshake_instructions_carry_hard_rules():
     assert mcp.instructions == INSTRUCTIONS
-    for phrase in ("dispatch_task.cwd", "wait_task", "coordinator.mode"):
+    for phrase in (
+        "dispatch_task.cwd",
+        "wait_task",
+        "coordinator.mode",
+        "dispatch_enabled",
+        "runtime_context",
+        "cancel_task",
+        "end_session",
+    ):
         assert phrase in INSTRUCTIONS

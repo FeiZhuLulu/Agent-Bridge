@@ -1,15 +1,37 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+
+# Forced into every real worker process so a nested Agent Bridge MCP
+# (inherited from the user's host config) can refuse writes and use a
+# separate data directory.
+WORKER_CONTEXT_ENV = "AGENT_BRIDGE_PARENT_CONTEXT"
+WORKER_CONTEXT_VALUE = "worker"
+NESTED_HOME_NAME = "nested"
+
+
+def parent_context_is_worker(env: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if env is None else env
+    return source.get(WORKER_CONTEXT_ENV) == WORKER_CONTEXT_VALUE
+
+
+def nested_bridge_home(base: Path) -> Path:
+    """Return ``base/nested``, or ``base`` if it is already that leaf."""
+    resolved = base.expanduser().resolve()
+    if resolved.name == NESTED_HOME_NAME:
+        return resolved
+    return (resolved / NESTED_HOME_NAME).resolve()
 
 
 def bridge_home() -> Path:
     override = os.environ.get("AGENT_BRIDGE_HOME")
-    if override:
-        return Path(override).expanduser().resolve()
-    return Path.home() / ".agent-bridge"
+    base = Path(override).expanduser().resolve() if override else Path.home() / ".agent-bridge"
+    if parent_context_is_worker():
+        return nested_bridge_home(base)
+    return base
 
 
 def ensure_home(home: Path | None = None) -> Path:

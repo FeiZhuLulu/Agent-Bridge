@@ -13,6 +13,7 @@ from typing import Any
 
 from agent_bridge.paths import bundled_skill, ensure_home
 from agent_bridge.processes import count_sibling_servers
+from agent_bridge.worker_env import is_worker_context
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ SKILL_RELATIVE = (
     Path(".cursor") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".codex") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".kimi-code") / "skills" / "agent-bridge" / "SKILL.md",
+    Path(".zcode") / "skills" / "agent-bridge" / "SKILL.md",
 )
 
 HELP = f"""Agent Bridge — connect local coding agents.
@@ -39,8 +41,9 @@ Usage:
 Install:
   uv tool install {GIT_SOURCE}
 
-Then register the MCP server in Codex / Cursor / Kimi. Skill files are
-written automatically the first time the server starts.
+Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, or Grok
+Build. Skill files are written automatically the first time a top-level
+coordinator starts the server.
 
 Update:
   agent-bridge upgrade
@@ -101,7 +104,13 @@ def checkout_root(start: Path | None = None) -> Path | None:
 
 
 def ensure_coordinator_skill(*, home: Path | None = None) -> list[Path]:
-    """Drop the skill into host skill dirs. Fail-open; skip under pytest."""
+    """Drop the skill into host skill dirs. Fail-open; skip under pytest.
+
+    Nested Bridge processes inherited by a worker must not overwrite host
+    skills. ``agent-bridge install-skill`` still writes them on purpose.
+    """
+    if is_worker_context():
+        return []
     if home is None and os.environ.get("PYTEST_CURRENT_TEST"):
         return []
     if os.environ.get("AGENT_BRIDGE_SKIP_SKILL") == "1":

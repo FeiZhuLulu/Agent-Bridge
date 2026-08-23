@@ -1,6 +1,6 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, and Kimi Code can all act as the coordinator. Register the same stdio server in whichever host you use.
+Codex, Cursor, Kimi Code, ZCode, and Grok Build can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build is both); those are different processes and different session roles.
 
 ## Install
 
@@ -8,7 +8,17 @@ Codex, Cursor, and Kimi Code can all act as the coordinator. Register the same s
 uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 ```
 
-That is the whole install. Then register the MCP server in the coordinator. The first time Codex (or Cursor / Kimi) starts Bridge, the coordinator skill is written automatically. Need [uv](https://docs.astral.sh/uv/) first.
+That is the whole install. Then register the MCP server in the coordinator. The first time a top-level host starts Bridge, the coordinator skill is written automatically (skipped if Bridge was inherited inside a worker). Need [uv](https://docs.astral.sh/uv/) first.
+
+## Resolve the Agent Bridge executable
+
+Hosts must launch a real executable. A PowerShell function named `agent-bridge` is not resolved by ZCode or Grok child processes.
+
+```powershell
+Get-Command agent-bridge | Select-Object -ExpandProperty Source
+```
+
+If that prints nothing, install first (see above). Paste the printed path into the host config. Do not invent a home-directory path.
 
 A clone is only for people changing Bridge itself. Pointing MCP at `uv --directory … run --no-sync agent-bridge` still works; `--no-sync` is required on Windows because a live instance locks `.venv\Scripts\agent-bridge.exe`.
 
@@ -109,6 +119,101 @@ pattern = "mcp__agent-bridge__*"
 - A project-level `.kimi-code/mcp.json` only activates after you trust the folder at the workspace trust prompt.
 - Servers added mid-session do not join open sessions. Restart `kimi` after editing `mcp.json`.
 
+## Register the MCP server (ZCode)
+
+ZCode has **three** JSON shapes. Do not mix them.
+
+1. Settings → MCP → 新建 → **完整配置** accepts a bare server map:
+
+```json
+{
+  "agent_bridge": {
+    "type": "stdio",
+    "command": "C:\\ABSOLUTE\\PATH\\agent-bridge.exe",
+    "args": [],
+    "timeoutMs": 600000
+  }
+}
+```
+
+2. The same dialog also accepts an `mcpServers` wrapper:
+
+```json
+{
+  "mcpServers": {
+    "agent_bridge": {
+      "type": "stdio",
+      "command": "C:\\ABSOLUTE\\PATH\\agent-bridge.exe",
+      "args": [],
+      "timeoutMs": 600000
+    }
+  }
+}
+```
+
+3. The on-disk native file is a different object. Do **not** paste the dialog JSON into this file unchanged:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "agent_bridge": {
+        "type": "stdio",
+        "command": "C:\\ABSOLUTE\\PATH\\agent-bridge.exe",
+        "args": [],
+        "timeoutMs": 600000
+      }
+    }
+  }
+}
+```
+
+- User file: `%USERPROFILE%\.zcode\cli\config.json` (`mcp.servers`).
+- Workspace file: `<project>\.zcode\config.json` (`mcp.servers`).
+- `timeoutMs` is milliseconds. 600000 leaves room for `wait_task` default 180 s. Without it, poll about 15–20 s.
+- If a `.zcode` file in the **same scope** already lists any MCP server, ZCode skips that scope's `.agents/mcp.json` entirely. The two sources are not merged.
+- After saving, confirm the server is enabled under **Settings → MCP 服务器** (configured-MCP group). Agent Bridge is a hand-added stdio server, not a marketplace plugin — it will not appear under 设置 → 插件 / 插件市场. Official: [MCP](https://zcode.z.ai/cn/docs/mcp-services), [Plugin](https://zcode.z.ai/cn/docs/plugin), [Skill](https://zcode.z.ai/en/docs/skill).
+- Native user skills live in `%USERPROFILE%\.zcode\skills`. Bridge writes `agent-bridge` there on first top-level start.
+
+## Register the MCP server (Grok Build)
+
+Project file `<project>\.grok\config.toml` or user file `%USERPROFILE%\.grok\config.toml`:
+
+```toml
+[mcp_servers.agent_bridge]
+command = 'C:\ABSOLUTE\PATH\agent-bridge.exe'
+args = []
+enabled = true
+startup_timeout_sec = 30
+tool_timeout_sec = 600
+
+[[permission.rules]]
+action = "allow"
+tool = "mcp"
+pattern = "agent_bridge__*"
+```
+
+- `startup_timeout_sec` / `tool_timeout_sec` are seconds. Official Grok default for tools is 6000; 600 is the Agent Bridge recommendation so `wait_task` default 180 s has headroom. If the host still kills the call, poll about 30–45 s.
+- Permission rules use the official verbose `[[permission.rules]]` form. MCP tools are named `{server}__{tool}` (for example `agent_bridge__dispatch_task`).
+- Project files may contain MCP servers and permission rules. `[ui] permission_mode` is a user-level setting — do not put it in a project example.
+- Grok also discovers the coordinator skill from `%USERPROFILE%\.agents\skills` (already installed). It reads `~/.grok/skills` too; Bridge does not need a second copy. Official: [MCP](https://docs.x.ai/build/features/mcp-servers), [permissions](https://docs.x.ai/build/features/permissions), [skills](https://docs.x.ai/build/features/skills-plugins-marketplaces).
+- Grok also merges `~/.cursor/mcp.json` and project `.cursor/mcp.json` below `config.toml` ([compat](https://docs.x.ai/build/features/mcp-servers)). That second server is usually named `agent-bridge` (hyphen). To test the native `[mcp_servers.agent_bridge]` block only, set `[compat.cursor] mcps = false` (and `[compat.claude] mcps = false` if needed). `grok inspect` shows each server's origin.
+- Grok as a **worker** is a different process. If that worker inherits this MCP config, the nested Bridge has dispatch, preference updates, cancel, and session shutdown disabled: `dispatch_enabled=false`, and nested `dispatch_task` / `set_preferences` / `cancel_task` / `end_session` are rejected. It also uses a `nested/` subdirectory of `AGENT_BRIDGE_HOME` so it cannot share the coordinator's `state.json`. A host that env-clears the MCP child drops both the worker-context mark and that home override; Grok's stdio MCP does not env-clear.
+
+CLI checks:
+
+```powershell
+grok mcp list
+grok mcp doctor agent_bridge
+grok inspect
+```
+
+CLI add (still use the resolved absolute exe):
+
+```powershell
+grok mcp add agent_bridge -- "C:\ABSOLUTE\PATH\agent-bridge.exe"
+```
+
 ## Environment and proxy
 
 Worker CLIs (Grok, Kimi, DSH, agy) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
@@ -149,7 +254,7 @@ agent-bridge upgrade
 - git checkout → `git pull` and `uv sync --extra dev` in that checkout, then the same skill refresh.
 - Anything else → the command tells you to `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git`.
 
-Restart Codex / Cursor / Kimi Code so they reconnect and pick up new tools and the MCP handshake instructions.
+Restart Codex / Cursor / Kimi Code / ZCode / Grok Build so they reconnect and pick up new tools and the MCP handshake instructions.
 
 What you do **not** redo: `codex mcp add` / `mcp.json`, `%USERPROFILE%\.agent-bridge\agents.toml` (proxy, `[coordinator]`, `set_preferences`), or worker CLIs and their logins. If you copied `ORCHESTRATION.md` into another repo as `AGENTS.md`, that copy is still yours to refresh.
 
@@ -157,7 +262,7 @@ Already on a clone and want the tool install instead: `uv tool install git+https
 
 ## Multiple coordinators on one machine
 
-Running Codex, Cursor, and Kimi Code coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts the siblings. A `uv tool` install is shared and does not sync on spawn.
+Running Codex, Cursor, Kimi Code, ZCode, and Grok Build coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts independent siblings (not a nested Bridge inside a worker this instance started). A `uv tool` install is shared and does not sync on spawn.
 
 What must not run twice is the **installer** of a git checkout. A plain `uv run` syncs the project before executing, and that sync rewrites `.venv\Scripts\agent-bridge.exe` — on Windows a file every running instance holds open. The second host's spawn then dies before the MCP handshake with:
 
@@ -179,7 +284,7 @@ The coordinator learns how to drive the Bridge through three channels; [ORCHESTR
 
 1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
 2. **Skill — automatic.** The first MCP start (and `agent-bridge upgrade`) writes [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
-3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, and Kimi Code all auto-apply it there), or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the file under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
+3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, Kimi Code, ZCode, and Grok Build all read it there), or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the English file under 9500 characters (Grok may copy it as `AGENTS.md`) and under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
 Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.
 
@@ -204,8 +309,14 @@ You don't have to edit the file yourself: tell the coordinator in chat ("以后�
 
 ## End-to-end drill
 
-1. Open the coordinator (Codex, Cursor, or Kimi Code) in a throwaway git checkout.
-2. From **that same folder**, ask: `用 grok 在当前目录写一个 smoke.txt，内容 hello-bridge，做完后你自己 git diff 验收。` The coordinator must pass its current project as `dispatch_task.cwd` (not the Agent Bridge install path).
+The live workspace is a local `lab/` folder created by `scripts/setup_lab.py`. It is not in git, not `tests/` (pytest), and not a Temp folder.
+
+```powershell
+uv run --no-sync python scripts/setup_lab.py
+```
+
+1. Open the coordinator (Codex, Cursor, Kimi Code, ZCode, or Grok Build) on the `lab/` folder — not the Agent Bridge repo root.
+2. Ask: `用 grok 在当前目录写一个 smoke.txt，内容 hello-bridge，做完后你自己 git diff 验收。` The coordinator must pass that folder as `dispatch_task.cwd` (not the Agent Bridge install path).
 3. Confirm it calls `dispatch_task` → loops `wait_task` → `get_result` → inspects the diff. `wait_task` defaults to 180 seconds; a timeout is not failure.
 4. Ask it to find a nit and send a follow-up on the same `session_id`.
 5. Confirm the second turn does not start a new Grok session.

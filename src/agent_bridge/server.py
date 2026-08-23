@@ -43,10 +43,14 @@ INSTRUCTIONS = (
     "timeout is not failure; call it again. Verify results with get_result plus "
     "your own git diff — do not trust a worker's self-report. An empty Kimi "
     "result with non-empty warnings is a failed turn, not a no-op.\n"
-    "list_agents returns coordinator.mode (manual/auto/eager) and the user's "
-    "routing preferences in coordinator.instructions; read both before "
-    "dispatching, and let the user's preferences override any defaults. When "
-    "the user states a lasting preference, persist it with set_preferences."
+    "Call list_agents first. Read coordinator.mode, coordinator.instructions, "
+    "coordinator.runtime_context, and coordinator.dispatch_enabled. User "
+    "preferences in instructions override default worker routing. If "
+    "dispatch_enabled is false, this Bridge was inherited inside a worker "
+    "process — do not call dispatch_task, set_preferences, cancel_task, "
+    "or end_session. When "
+    "dispatch_enabled is true and the user states a lasting preference, "
+    "persist it with set_preferences."
 )
 
 mcp = MCPServer[Registry]("agent-bridge", instructions=INSTRUCTIONS, lifespan=lifespan)
@@ -74,7 +78,7 @@ def _error(exc: Exception) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_agents(ctx: Context) -> dict[str, Any]:
-    """List configured workers, the reconstructed host/proxy environment, and the coordinator policy (mode + user routing preferences)."""
+    """List configured workers, the reconstructed host/proxy environment, and the coordinator policy (mode, instructions, runtime_context, dispatch_enabled). Call this first. If dispatch_enabled is false, this is a nested worker-inherited instance — do not dispatch or set_preferences."""
     try:
         registry = _registry(ctx)
         agents = await registry.list_agents()
@@ -94,7 +98,7 @@ async def set_preferences(
     mode: str | None = None,
     instructions: str | None = None,
 ) -> dict[str, Any]:
-    """Persist the coordinator policy when the user states a lasting preference (e.g. "from now on, research goes to antigravity"). mode is manual/auto/eager; instructions is free routing-preference text that REPLACES the stored text — read coordinator.instructions from list_agents first and write the merged result. Applies to this instance immediately and to others at their next start. Do not call for one-off, this-task-only wishes."""
+    """Persist the coordinator policy when the user states a lasting preference (e.g. "from now on, research goes to antigravity"). mode is manual/auto/eager; instructions is free routing-preference text that REPLACES the stored text — read coordinator.instructions from list_agents first and write the merged result. Applies to this instance immediately and to others at their next start. Do not call for one-off, this-task-only wishes. Rejected when coordinator.dispatch_enabled is false (nested worker-inherited Bridge)."""
     try:
         result = _registry(ctx).set_preferences(mode=mode, instructions=instructions)
         return {"ok": True, **result}
@@ -114,7 +118,7 @@ async def dispatch_task(
     title: str | None = None,
     user_requested: bool = False,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode: session/set_config_option after new/resume; dsh: spawn env, respawn if they change). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode: session/set_config_option after new/resume; dsh: spawn env, respawn if they change). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,
@@ -180,7 +184,7 @@ async def get_transcript(
 
 @mcp.tool()
 async def cancel_task(ctx: Context, task_id: str) -> dict[str, Any]:
-    """Cancel an in-flight worker turn. ACP sessions are cancelled; agy processes are killed."""
+    """Cancel an in-flight worker turn. ACP sessions are cancelled; agy processes are killed. Rejected when coordinator.dispatch_enabled is false."""
     try:
         return {"ok": True, **await _registry(ctx).cancel_task(task_id)}
     except Exception as exc:
@@ -198,7 +202,7 @@ async def list_sessions(ctx: Context, active_only: bool = False) -> dict[str, An
 
 @mcp.tool()
 async def end_session(ctx: Context, session_id: str) -> dict[str, Any]:
-    """Shut down a worker session process and mark it dead."""
+    """Shut down a worker session process and mark it dead. Rejected when coordinator.dispatch_enabled is false."""
     try:
         return {"ok": True, **await _registry(ctx).end_session(session_id)}
     except Exception as exc:

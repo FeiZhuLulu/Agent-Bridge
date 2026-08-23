@@ -1,8 +1,11 @@
 from agent_bridge.config import EnvConfig
 from agent_bridge.worker_env import (
+    WORKER_CONTEXT_ENV,
+    WORKER_CONTEXT_VALUE,
     apply_proxy_fallbacks,
     build_worker_env,
     describe_env,
+    is_worker_context,
     parse_powershell_grok_proxy,
     parse_win_inet_proxy_server,
     redact_proxy_url,
@@ -150,3 +153,40 @@ def test_describe_env_omits_secret_values():
 
 def test_redact_proxy_credentials():
     assert redact_proxy_url("http://user:pass@127.0.0.1:7897") == "http://***@127.0.0.1:7897"
+
+
+def test_worker_context_forced_after_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_HOME", str(tmp_path))
+    env = build_worker_env(
+        {WORKER_CONTEXT_ENV: "coordinator"},
+        base={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+        worker_context=True,
+    )
+    assert env[WORKER_CONTEXT_ENV] == WORKER_CONTEXT_VALUE
+    assert env["AGENT_BRIDGE_HOME"] == str((tmp_path / "nested").resolve())
+
+
+def test_default_build_worker_env_does_not_add_mark():
+    env = build_worker_env(
+        base={WORKER_CONTEXT_ENV: "coordinator"},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+    )
+    assert env.get(WORKER_CONTEXT_ENV) != WORKER_CONTEXT_VALUE
+    assert WORKER_CONTEXT_ENV not in build_worker_env(
+        base={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+    )
+
+
+def test_is_worker_context_strict_value():
+    assert is_worker_context({WORKER_CONTEXT_ENV: WORKER_CONTEXT_VALUE}) is True
+    assert is_worker_context({WORKER_CONTEXT_ENV: "coordinator"}) is False
+    assert is_worker_context({}) is False
+    assert is_worker_context({WORKER_CONTEXT_ENV: "Worker"}) is False

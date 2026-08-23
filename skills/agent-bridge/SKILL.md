@@ -5,7 +5,7 @@ description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity,
 
 # Dispatching workers through Agent Bridge
 
-You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, or `opencode` CLIs directly, and never drive their GUIs.
+You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, or `opencode` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
 
 ## Before anything: read the policy
 
@@ -13,6 +13,7 @@ Call `list_agents` first. Its result carries:
 
 - `coordinator.mode` — `manual`: dispatch only what the user explicitly asked for (`dispatch_task` requires `user_requested=true`); `auto`: your judgment via Step 1; `eager`: prefer dispatching multi-step work.
 - `coordinator.instructions` — the user's persistent routing preferences. They override Step 2 below. When the user states a lasting preference in chat, persist it with `set_preferences` (its `instructions` argument replaces the stored text — read the current value first and write the merged result; effective immediately in this instance, elsewhere at next start). One-off wishes are not preferences; follow them without persisting.
+- `coordinator.runtime_context` / `coordinator.dispatch_enabled` — a top-level host is `coordinator` / `true`. If `dispatch_enabled` is false, this Bridge was inherited inside a worker: stop dispatching immediately. Do not call `dispatch_task`, `set_preferences`, `cancel_task`, or `end_session`. `user_requested=true` does not bypass that. Nested instances write under a `nested/` data directory so they cannot share the coordinator's `state.json`.
 - `env.proxy` / `env.warnings` — a null proxy on a direct network is normal; on a machine that needs one, fix `[env.proxy]` in `agents.toml` instead of retrying a failed dispatch.
 
 ## Step 1 — dispatch, or do it yourself?
@@ -36,7 +37,12 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 ## The dispatch loop
 
 1. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute) — never the Agent Bridge install path, never a temp dir. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason; slugs and effort mappings per worker are documented in ORCHESTRATION.md in the Agent-Bridge repo.
-2. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host's MCP tool timeout (Codex ~600: default 180 is fine; Cursor kills tools after ~1 min: pass ~45; Kimi Code default 60 s: pass ~45 unless `toolTimeoutMs` was raised).
+2. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
+   - Codex: `tool_timeout_sec` 600; default 180 is fine.
+   - Cursor: host ~45–60 s; pass ~30 and loop.
+   - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.
+   - ZCode: configure `timeoutMs` 600000; otherwise ~15–20 s polls.
+   - Grok Build: official default `tool_timeout_sec` is 6000; set 600. If unsure or the host kills the call, ~30–45 s polls.
 3. `get_result`, then verify yourself: `git status` / `git diff`, run the relevant build and tests. Never trust the worker's self-report. Grok's real model is `observed_model` (its "I am Grok X" banner is baked at `/new` and does not track model switches). OpenCode `observed_model` / `observed_effort` are the last values Bridge set after mapping, not a live sampler. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
 4. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list — at most three follow-ups, then fix it yourself and tell the user.
 5. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.

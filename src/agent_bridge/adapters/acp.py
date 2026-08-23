@@ -335,7 +335,7 @@ class AcpAdapter(Adapter):
         self._live: dict[str, _Live] = {}
 
     def _env(self) -> dict[str, str]:
-        return build_worker_env(self.agent.env, config=self.env_config)
+        return build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
         if proc.stderr is None:

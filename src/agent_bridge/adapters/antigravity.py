@@ -226,7 +226,7 @@ class AgyAdapter(Adapter):
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         cmd = self._build_cmd(session, task)
-        env = build_worker_env(self.agent.env, config=self.env_config)
+        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

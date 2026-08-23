@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
@@ -34,10 +35,24 @@ from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
-from agent_bridge.worker_env import describe_env, install_host_env
+from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
 
 log = logging.getLogger(__name__)
+
+RuntimeContext = Literal["coordinator", "worker"]
+NESTED_DISPATCH_ERROR = (
+    "nested dispatch is disabled: this Agent Bridge instance was inherited inside a worker process"
+)
+NESTED_PREFERENCES_ERROR = (
+    "preference updates are disabled: this Agent Bridge instance was inherited inside a worker process"
+)
+NESTED_CANCEL_ERROR = (
+    "task cancellation is disabled: this Agent Bridge instance was inherited inside a worker process"
+)
+NESTED_END_SESSION_ERROR = (
+    "session shutdown is disabled: this Agent Bridge instance was inherited inside a worker process"
+)
 
 RESULT_TAIL = 6000
 # result_text kept on the Task (and persisted in state.json). get_result only
@@ -50,6 +65,14 @@ TASK_KEEP_PER_SESSION = 20
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _resolve_runtime_context(runtime_context: RuntimeContext | None) -> RuntimeContext:
+    if runtime_context is None:
+        return "worker" if is_worker_context() else "coordinator"
+    if runtime_context not in ("coordinator", "worker"):
+        raise ValueError(f"unknown runtime_context {runtime_context!r}; use coordinator or worker")
+    return runtime_context
 
 
 def _tail(text: str, limit: int = RESULT_TAIL) -> str:
@@ -67,6 +90,7 @@ class Registry:
         *,
         owner_pid: int | None = None,
         owner_create_time: float | None = None,
+        runtime_context: RuntimeContext | None = None,
     ) -> None:
         self.home = home
         self.config = config
@@ -83,6 +107,8 @@ class Registry:
         self._owner_create_time = (
             process_create_time(os.getpid()) if owner_create_time is None else owner_create_time
         )
+        self.runtime_context = _resolve_runtime_context(runtime_context)
+        self.dispatch_enabled = self.runtime_context == "coordinator"
 
     @classmethod
     def create(
@@ -92,6 +118,7 @@ class Registry:
         *,
         owner_pid: int | None = None,
         owner_create_time: float | None = None,
+        runtime_context: RuntimeContext | None = None,
     ) -> Registry:
         resolved = ensure_home(home)
         return cls(
@@ -99,6 +126,7 @@ class Registry:
             config or load_config(resolved),
             owner_pid=owner_pid,
             owner_create_time=owner_create_time,
+            runtime_context=runtime_context,
         )
 
     def _stamp_owner(self, record: Session | Task) -> None:
@@ -286,6 +314,8 @@ class Registry:
             "mode": cfg.mode,
             "hint": COORDINATOR_MODE_HINTS.get(cfg.mode, COORDINATOR_MODE_HINTS["auto"]),
             "instructions": cfg.instructions or None,
+            "runtime_context": self.runtime_context,
+            "dispatch_enabled": self.dispatch_enabled,
         }
 
     def set_preferences(
@@ -294,6 +324,8 @@ class Registry:
         mode: str | None = None,
         instructions: str | None = None,
     ) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_PREFERENCES_ERROR)
         if mode is None and instructions is None:
             raise ValueError("provide mode and/or instructions")
         if mode is not None:
@@ -326,6 +358,8 @@ class Registry:
         title: str | None = None,
         user_requested: bool = False,
     ) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_DISPATCH_ERROR)
         if self.config.coordinator.mode == "manual" and not user_requested:
             raise RuntimeError(
                 "coordinator mode is manual: dispatch only when the user explicitly "
@@ -593,6 +627,8 @@ class Registry:
         return page_events(events, offset=offset, limit=limit, kinds=kinds)
 
     async def cancel_task(self, task_id: str) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_CANCEL_ERROR)
         task = self._require_task(task_id)
         if task.status in TERMINAL_STATUSES:
             return self._task_snapshot(task)
@@ -635,6 +671,8 @@ class Registry:
         return rows
 
     async def end_session(self, session_id: str) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_END_SESSION_ERROR)
         session = self.sessions.get(session_id)
         if session is None:
             raise KeyError(f"unknown session {session_id}")

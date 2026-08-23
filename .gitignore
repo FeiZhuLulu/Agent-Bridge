@@ -18,3 +18,5 @@ design/
 灵感/
 # Local collaboration rules for this checkout only. Product orchestration lives in ORCHESTRATION.md.
 AGENTS.md
+# Live coordinator workspace. Recreate locally with scripts/setup_lab.py.
+lab/

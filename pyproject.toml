@@ -1,7 +1,7 @@
 [project]
 name = "agent-bridge"
 version = "0.1.0"
-description = "Connect local coding agents. Codex coordinates Antigravity CLI, Grok Build, Kimi Code, and DeepSeek Harness."
+description = "Connect local coding agents. Codex, Cursor, Kimi Code, ZCode, or Grok Build coordinates Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "FeiZhuLulu" }]
@@ -34,7 +34,6 @@ build-backend = "hatchling.build"
 packages = ["src/agent_bridge"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"agents.toml" = "agent_bridge/agents.toml"
 "src/agent_bridge/share/dsh-acp.cordis.yml" = "agent_bridge/share/dsh-acp.cordis.yml"
 "skills/agent-bridge/SKILL.md" = "agent_bridge/share/skills/agent-bridge/SKILL.md"
 "ORCHESTRATION.md" = "agent_bridge/share/ORCHESTRATION.md"

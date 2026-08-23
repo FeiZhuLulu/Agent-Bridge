@@ -9,5 +9,5 @@
       <circle cx="120" cy="172" r="16" fill="#E6EDF3"/>
     </g>
   </g>
-  <text x="172" y="98" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="1" fill="#E6EDF3">Agent<tspan fill="#6AB8FF">Bridge</tspan></text>
+  <text x="172" y="98" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="1" fill="#24292F">Agent<tspan fill="#6AB8FF">Bridge</tspan></text>
 </svg>

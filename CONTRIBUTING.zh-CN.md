@@ -11,6 +11,10 @@ uv sync --extra dev
 uv run pytest
 ```
 
+## 接入新 Worker
+
+接一个新 Agent CLI 有独立流程：[skills/add-worker/SKILL.md](skills/add-worker/SKILL.md)。普通 ACP CLI 通常一行代码都不用改，在 `~/.agent-bridge/agents.toml` 加一个块就行。要动 adapter 的 PR 请先读它。
+
 ## Pull request
 
 - 改动保持小而明确。

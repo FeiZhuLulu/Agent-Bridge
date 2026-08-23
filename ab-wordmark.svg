@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160">
+  <g transform="translate(8,8) scale(0.6)">
+    <rect width="240" height="240" rx="52" fill="#0D1117"/>
+    <g transform="rotate(90 120 120)">
+      <path d="M74 84 C74 122 120 110 120 146 V158" fill="none" stroke="#6AB8FF" stroke-width="11" stroke-linecap="round"/>
+      <path d="M166 84 C166 122 120 110 120 146 V158" fill="none" stroke="#6AB8FF" stroke-width="11" stroke-linecap="round"/>
+      <circle cx="74"  cy="70" r="13" fill="#E6EDF3"/>
+      <circle cx="166" cy="70" r="13" fill="#E6EDF3"/>
+      <circle cx="120" cy="172" r="16" fill="#E6EDF3"/>
+    </g>
+  </g>
+  <text x="172" y="98" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="1" fill="#E6EDF3">Agent<tspan fill="#6AB8FF">Bridge</tspan></text>
+</svg>

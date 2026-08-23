@@ -11,6 +11,10 @@ uv sync --extra dev
 uv run pytest
 ```
 
+## Adding a worker
+
+Connecting a new agent CLI has its own process: [skills/add-worker/SKILL.md](skills/add-worker/SKILL.md). A plain ACP CLI usually needs no code at all — just a block in `~/.agent-bridge/agents.toml`. Read it before opening a PR that touches the adapters.
+
 ## Pull requests
 
 - Keep changes focused.

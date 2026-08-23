@@ -1,6 +1,15 @@
-# Agent Bridge
+<p align="center">
+  <img src="ab-wordmark.svg" alt="Agent Bridge" width="420">
+</p>
 
-[English](#english) · [中文](#中文)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-green.svg" alt="Python 3.11+"></a>
+</p>
+
+<p align="center">
+  <a href="#english">English</a> · <a href="#中文">中文</a>
+</p>
 
 ## English
 
@@ -60,6 +69,19 @@ Restart Codex. The coordinator skill is written the first time the server starts
   }
 }
 ```
+
+### Connect another agent
+
+A plain ACP CLI needs no code. Add a block to `~/.agent-bridge/agents.toml`:
+
+```toml
+[agents.mycustom]
+protocol = "acp"
+command = ["mycustom-cli", "acp"]
+revivable = true
+```
+
+Full process, including agents that need adapter changes: [skills/add-worker/SKILL.md](skills/add-worker/SKILL.md).
 
 ### Update
 
@@ -144,6 +166,19 @@ codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
   }
 }
 ```
+
+### 接入其它 Agent
+
+普通 ACP CLI 不用改代码，在 `~/.agent-bridge/agents.toml` 加一段：
+
+```toml
+[agents.mycustom]
+protocol = "acp"
+command = ["mycustom-cli", "acp"]
+revivable = true
+```
+
+完整流程（含需要改适配器的情况）见 [skills/add-worker/SKILL.md](skills/add-worker/SKILL.md)。
 
 ### 更新
 

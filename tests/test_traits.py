@@ -4,7 +4,7 @@ from agent_bridge.adapters.acp import AcpAdapter
 from agent_bridge.config import AgentConfig, EnvConfig, load_config
 from agent_bridge.models import Session
 from agent_bridge.probes import probe_agent
-from agent_bridge.traits import Assurance, Capability, ObservationSource, traits_for
+from agent_bridge.traits import Assurance, Capability, ObservationSource, PermissionAssurance, traits_for
 
 
 def test_bundled_traits_are_explicit_and_normalized(tmp_path):
@@ -14,7 +14,7 @@ def test_bundled_traits_are_explicit_and_normalized(tmp_path):
     assert traits.cancellation is Capability.supported
     assert traits.model_selection is Capability.supported
     assert traits.effort_selection is Capability.supported
-    assert traits.permission_assurance is Assurance.declared
+    assert traits.permission_assurance is PermissionAssurance.unsupported
     assert traits.identity_assurance is Assurance.observed
     assert traits.revivability is Capability.supported
     assert traits.observation_source is ObservationSource.grok_sampler
@@ -27,7 +27,7 @@ def test_unknown_agent_capabilities_are_not_inferred_from_its_name():
     assert traits.cancellation is Capability.unknown
     assert traits.model_selection is Capability.unknown
     assert traits.effort_selection is Capability.unknown
-    assert traits.permission_assurance is Assurance.unknown
+    assert traits.permission_assurance is PermissionAssurance.unsupported
     assert traits.identity_assurance is Assurance.unknown
     assert traits.revivability is Capability.unknown
 

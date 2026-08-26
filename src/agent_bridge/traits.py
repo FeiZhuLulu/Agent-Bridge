@@ -20,12 +20,20 @@ class Capability(StrEnum):
 
 
 class Assurance(StrEnum):
-    """How strongly Bridge can state a permission or identity property."""
+    """How strongly Bridge can state an identity property."""
 
     unknown = "unknown"
     declared = "declared"
     applied = "applied"
     observed = "observed"
+
+
+class PermissionAssurance(StrEnum):
+    """How strongly Bridge can state the effective permission policy."""
+
+    enforced = "enforced"
+    observed = "observed"
+    unsupported = "unsupported"
 
 
 class ObservationSource(StrEnum):
@@ -58,7 +66,7 @@ class AgentTraits(BaseModel):
     cancellation: Capability = Capability.unknown
     model_selection: Capability = Capability.unknown
     effort_selection: Capability = Capability.unknown
-    permission_assurance: Assurance = Assurance.unknown
+    permission_assurance: PermissionAssurance = PermissionAssurance.unsupported
     identity_assurance: Assurance = Assurance.unknown
     revivability: Capability = Capability.unknown
     observation_source: ObservationSource = ObservationSource.adapter
@@ -71,14 +79,14 @@ class AgentTraits(BaseModel):
 BUILTIN_TRAITS: dict[str, AgentTraits] = {
     "grok": AgentTraits(
         resume="supported", cancellation="supported", model_selection="supported", effort_selection="supported",
-        permission_assurance="declared", identity_assurance="observed", revivability="supported",
+        permission_assurance="unsupported", identity_assurance="observed", revivability="supported",
         observation_source="grok_sampler",
         probe_notes=["model=grok models slugs via session/setModel after /new; effort=off|low|medium|high|max (off->none, max->xhigh)"],
         result_hint="Grok system-prompt identity is not the selected model; use observed_model from this payload.",
     ),
     "kimi": AgentTraits(
         resume="supported", cancellation="supported", model_selection="supported", effort_selection="supported",
-        permission_assurance="applied", identity_assurance="unknown", revivability="supported",
+        permission_assurance="observed", identity_assurance="unknown", revivability="supported",
         observation_source="kimi_sampler", probe_profile="kimi",
         probe_notes=["model=slugs the session advertises e.g. kimi-code/k3, kimi-code/k3-256k; effort mapped onto that model's thinking levels; mode forced to yolo"],
         result_hint="Kimi reports a failed turn as end_turn with empty text; an empty result is only clean if warnings is empty.",
@@ -88,7 +96,7 @@ BUILTIN_TRAITS: dict[str, AgentTraits] = {
     ),
     "dsh": AgentTraits(
         resume="unsupported", cancellation="supported", model_selection="supported", effort_selection="supported",
-        permission_assurance="declared", identity_assurance="declared", revivability="unsupported",
+        permission_assurance="unsupported", identity_assurance="declared", revivability="unsupported",
         launch_resolver="dsh", probe_profile="dsh",
         probe_notes=["effort=off|low|high|max via dispatch_task.effort; same session model change respawns"],
     ),
@@ -100,7 +108,7 @@ BUILTIN_TRAITS: dict[str, AgentTraits] = {
     ),
     "antigravity": AgentTraits(
         resume="supported", cancellation="supported", model_selection="supported", effort_selection="supported",
-        permission_assurance="declared", identity_assurance="declared", revivability="supported",
+        permission_assurance="unsupported", identity_assurance="declared", revivability="supported",
         probe_notes=["model=agy models slugs e.g. gemini-3.7-flash; effort=low|medium|high"],
     ),
 }

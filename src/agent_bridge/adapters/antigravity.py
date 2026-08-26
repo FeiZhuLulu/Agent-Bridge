@@ -13,9 +13,9 @@ from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task, TurnResult, agy_effort
 from agent_bridge.processes import (
     drop_pid,
-    kill_tree,
     process_create_time,
     process_image_name,
+    reap_subprocess,
     record_pid,
     resolve_command,
 )
@@ -175,7 +175,7 @@ class AgyAdapter(Adapter):
         super().__init__(agent, home, env_config)
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Session ids whose current turn was cancelled via cancel()/shutdown().
-        # kill_tree makes agy stdout hit EOF, which is otherwise
+        # Stopping the process makes agy stdout hit EOF, which is otherwise
         # indistinguishable from a normal end of stream.
         self._cancelled: set[str] = set()
 
@@ -310,9 +310,7 @@ class AgyAdapter(Adapter):
                 await asyncio.wait_for(proc.wait(), timeout=60)
             except TimeoutError:
                 log.warning("agy stdout closed but process lingered; killing %s", proc.pid)
-                if proc.pid:
-                    kill_tree(proc.pid)
-                await proc.wait()
+                await reap_subprocess(proc)
             if session.session_id in self._cancelled:
                 append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
                 return TurnResult(
@@ -379,8 +377,7 @@ class AgyAdapter(Adapter):
                 warnings=exit_warnings,
             )
         except asyncio.CancelledError:
-            if proc.pid:
-                kill_tree(proc.pid)
+            await reap_subprocess(proc)
             append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
             return TurnResult(
                 text="".join(text_parts),
@@ -391,8 +388,7 @@ class AgyAdapter(Adapter):
         except Exception:
             # e.g. readline() past STDIO_LIMIT. Without this, agy would keep
             # running with nobody reading its stdout and never get reaped.
-            if proc.returncode is None and proc.pid:
-                kill_tree(proc.pid)
+            await reap_subprocess(proc)
             raise
         finally:
             if not stderr_task.done():
@@ -408,8 +404,8 @@ class AgyAdapter(Adapter):
     async def cancel(self, session: Session) -> None:
         self._cancelled.add(session.session_id)
         proc = self._procs.get(session.session_id)
-        if proc and proc.pid:
-            kill_tree(proc.pid)
+        if proc is not None:
+            await reap_subprocess(proc)
 
     async def shutdown(self, session: Session) -> None:
         await self.cancel(session)

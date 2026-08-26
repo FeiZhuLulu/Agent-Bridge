@@ -20,13 +20,25 @@ from agent_bridge.logging_setup import setup_logging
 from agent_bridge.registry import Registry
 
 
-def report(label: str, waited: dict) -> None:
+def native_of(registry: Registry, session_id: str) -> str | None:
+    """wait_task snapshots are task-scoped; native ids live on the session."""
+    return next(
+        (
+            item["native_session_id"]
+            for item in registry.list_sessions()
+            if item["session_id"] == session_id
+        ),
+        None,
+    )
+
+
+def report(label: str, waited: dict, native: str | None) -> None:
     print(
         label,
         waited["status"],
         waited.get("stop_reason"),
         "session=", waited.get("session_id"),
-        "native=", waited.get("native_session_id"),
+        "native=", native,
     )
     for warning in waited.get("warnings") or []:
         print("   warning:", warning)
@@ -56,19 +68,11 @@ async def main(cwd: Path, model: str | None) -> int:
             model=model,
         )
         waited = await registry.wait_task(first["task_id"], timeout_sec=240)
-        report("turn1", waited)
+        native = native_of(registry, first["session_id"])
+        report("turn1", waited, native)
         if not (cwd / "smoke.txt").is_file():
             print("missing smoke.txt")
             return 1
-        native = next(
-            (
-                item["native_session_id"]
-                for item in registry.list_sessions()
-                if item["session_id"] == first["session_id"]
-            ),
-            None,
-        )
-        print("native_session_id", native)
 
         second = await registry.dispatch_task(
             "opencode",
@@ -77,17 +81,9 @@ async def main(cwd: Path, model: str | None) -> int:
             session_id=first["session_id"],
         )
         waited2 = await registry.wait_task(second["task_id"], timeout_sec=240)
-        report("turn2", waited2)
+        native2 = native_of(registry, first["session_id"])
+        report("turn2", waited2, native2)
         print("smoke.txt:", (cwd / "smoke.txt").read_text(encoding="utf-8", errors="replace"))
-        native2 = next(
-            (
-                item["native_session_id"]
-                for item in registry.list_sessions()
-                if item["session_id"] == first["session_id"]
-            ),
-            None,
-        )
-        print("native_session_id after turn2", native2)
         if native and native2 not in {None, native}:
             print("native_session_id changed across turns:", native, "->", native2)
             return 1
@@ -101,7 +97,7 @@ async def main(cwd: Path, model: str | None) -> int:
                 model="opencode/does-not-exist",
             )
             waited3 = await registry.wait_task(bogus["task_id"], timeout_sec=120)
-            report("turn3 (bogus model)", waited3)
+            report("turn3 (bogus model)", waited3, native_of(registry, first["session_id"]))
             if waited3["status"] != "failed":
                 print("expected the bogus model to fail the turn")
                 return 1

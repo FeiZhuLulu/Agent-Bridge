@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -70,27 +71,96 @@ def process_create_time(pid: int) -> float | None:
         return None
 
 
-def kill_tree(pid: int, timeout: float = 5.0) -> None:
+def _signal_asyncio_proc(proc: Any | None, *, force: bool = False) -> None:
+    """Send terminate/kill through an asyncio subprocess handle.
+
+    Used when psutil cannot see the pid — typical of restricted containers
+    whose /proc is hidden or belongs to another PID namespace.
+    """
+    if proc is None or getattr(proc, "returncode", None) is not None:
+        return
+    try:
+        if force:
+            proc.kill()
+        else:
+            proc.terminate()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _process_tree(pid: int) -> list[Any]:
     try:
         parent = psutil.Process(pid)
     except psutil.Error:
-        return
-    children = parent.children(recursive=True)
+        return []
+    try:
+        children = parent.children(recursive=True)
+    except psutil.Error:
+        children = []
+    return [parent, *children]
+
+
+def _signal_tree(pid: int, *, force: bool) -> bool:
+    """Signal pid and descendants. True if the root process accepted the signal."""
+    tree = _process_tree(pid)
+    if not tree:
+        return False
+    parent, *children = tree
     for child in children:
         try:
-            child.terminate()
+            if force:
+                child.kill()
+            else:
+                child.terminate()
         except psutil.Error:
             pass
     try:
-        parent.terminate()
+        if force:
+            parent.kill()
+        else:
+            parent.terminate()
     except psutil.Error:
+        return False
+    return True
+
+
+def kill_tree(pid: int | None, handle: Any | None = None, *, force: bool = False) -> None:
+    """Signal a process tree. Does not wait — callers that can await should."""
+    if pid and _signal_tree(pid, force=force):
         return
-    gone, alive = psutil.wait_procs([parent, *children], timeout=timeout)
+    _signal_asyncio_proc(handle, force=force)
+
+
+def _wait_and_kill_tree(pid: int, timeout: float = 5.0) -> None:
+    """Sync follow-up for paths that have no asyncio handle (orphan reap)."""
+    tree = _process_tree(pid)
+    if not tree:
+        return
+    gone, alive = psutil.wait_procs(tree, timeout=timeout)
     for leftover in alive:
         try:
             leftover.kill()
         except psutil.Error:
             pass
+
+
+async def reap_subprocess(proc: Any | None, timeout: float = 5.0) -> None:
+    """Stop a spawned asyncio subprocess without blocking the event loop."""
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    if getattr(proc, "returncode", None) is None:
+        kill_tree(pid, handle=proc)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return
+    except TimeoutError:
+        pass
+    kill_tree(pid, handle=proc, force=True)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+    except TimeoutError:
+        pass
 
 
 def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
@@ -196,6 +266,7 @@ def reap_orphans(home) -> list[int]:
         if match_image and match_time:
             log.warning("reaping orphan worker pid=%s session=%s", pid, session_id)
             kill_tree(pid)
+            _wait_and_kill_tree(pid)
             killed.append(pid)
         else:
             log.info(

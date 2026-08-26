@@ -1,9 +1,11 @@
+import asyncio
 import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from agent_bridge.paths import pids_path
@@ -11,9 +13,11 @@ from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.processes import (
     count_sibling_servers,
     drop_pid,
+    kill_tree,
     process_create_time,
     process_image_name,
     reap_orphans,
+    reap_subprocess,
     record_pid,
     resolve_command,
 )
@@ -285,6 +289,113 @@ def test_count_sibling_servers_other_host_nested_bridge_counts_once(monkeypatch)
         ),
     ]
     assert count_sibling_servers(procs) == 1
+
+
+def test_kill_tree_does_not_wait(monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.wait_procs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait_procs")),
+    )
+    child = subprocess.Popen(SLEEPER)
+    try:
+        kill_tree(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+
+def test_kill_tree_falls_back_to_handle_when_psutil_misses(monkeypatch):
+    calls: list[str] = []
+    handle = SimpleNamespace(returncode=None)
+    handle.terminate = lambda: calls.append("terminate")
+    handle.kill = lambda: calls.append("kill")
+
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001, handle=handle)
+    assert calls == ["terminate"]
+
+
+def test_kill_tree_without_handle_is_noop_when_psutil_misses(monkeypatch):
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001)
+
+
+def test_kill_tree_skips_finished_handle(monkeypatch):
+    calls: list[str] = []
+    handle = SimpleNamespace(returncode=0)
+    handle.terminate = lambda: calls.append("terminate")
+    handle.kill = lambda: calls.append("kill")
+
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001, handle=handle)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_does_not_call_wait_procs(monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.wait_procs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait_procs")),
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *SLEEPER,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await reap_subprocess(proc, timeout=2)
+        assert proc.returncode is not None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_stops_child_when_psutil_cannot_see_pid(monkeypatch):
+    proc = await asyncio.create_subprocess_exec(
+        *SLEEPER,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+
+        def boom(_pid):
+            raise psutil.NoSuchProcess(_pid)
+
+        monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+        await reap_subprocess(proc, timeout=2)
+        assert proc.returncode is not None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_kills_when_wait_times_out():
+    handle = SimpleNamespace(pid=None, returncode=None)
+    handle.terminate = lambda: None
+
+    async def hang():
+        if handle.returncode is None:
+            await asyncio.sleep(100)
+        return handle.returncode
+
+    handle.wait = hang
+    handle.kill = lambda: setattr(handle, "returncode", -9)
+    await reap_subprocess(handle, timeout=0.05)
+    assert handle.returncode == -9
 
 
 def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):

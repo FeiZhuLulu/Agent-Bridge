@@ -9,7 +9,7 @@ from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
 from agent_bridge.kimi_observe import kimi_home
-from agent_bridge.processes import kill_tree, resolve_command
+from agent_bridge.processes import reap_subprocess, resolve_command
 from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
@@ -28,8 +28,7 @@ async def _version_string(executable: str) -> str:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=6)
         except TimeoutError:
-            if proc.pid:
-                kill_tree(proc.pid)
+            await reap_subprocess(proc)
             continue
         text = (out or b"").decode("utf-8", errors="replace").strip() or (
             err or b""

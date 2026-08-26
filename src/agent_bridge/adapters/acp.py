@@ -24,9 +24,9 @@ from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
 from agent_bridge.processes import (
     drop_pid,
-    kill_tree,
     process_create_time,
     process_image_name,
+    reap_subprocess,
     record_pid,
     resolve_command,
 )
@@ -925,8 +925,8 @@ class AcpAdapter(Adapter):
                 # CancelledError derives from BaseException and must be
                 # listed explicitly; a cancelled prompt is the normal case.
                 pass
-        if live.proc and live.proc.pid:
-            kill_tree(live.proc.pid)
+        if live.proc is not None:
+            await reap_subprocess(live.proc)
             await self.shutdown(session)
 
     async def shutdown(self, session: Session) -> None:
@@ -941,12 +941,7 @@ class AcpAdapter(Adapter):
             except Exception:
                 pass
         if live.proc is not None:
-            if live.proc.returncode is None and live.proc.pid:
-                kill_tree(live.proc.pid)
-            try:
-                await asyncio.wait_for(live.proc.wait(), timeout=5)
-            except TimeoutError:
-                pass
+            await reap_subprocess(live.proc)
         if live.stderr_task is not None:
             if not live.stderr_task.done():
                 live.stderr_task.cancel()

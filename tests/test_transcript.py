@@ -1,3 +1,8 @@
+import json
+
+import pytest
+
+from agent_bridge.paths import transcript_path
 from agent_bridge.transcript import append_event, page_events, read_events, read_events_tail
 
 
@@ -37,3 +42,25 @@ def test_read_events_tail_small_file_reads_everything(bridge_home):
     append_event("sess_s", "message_chunk", {"text": "only"}, bridge_home)
     assert read_events_tail("sess_s", bridge_home) == read_events("sess_s", bridge_home)
     assert read_events_tail("sess_missing", bridge_home) == []
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+def test_read_events_tail_keeps_event_at_exact_line_boundary(bridge_home, line_ending):
+    first = {"type": "message_chunk", "data": {"text": "before"}}
+    last = {"type": "message_chunk", "data": {"text": "\u4e2d\u6587"}}
+    first_line = json.dumps(first, ensure_ascii=False).encode("utf-8") + line_ending
+    last_line = json.dumps(last, ensure_ascii=False).encode("utf-8") + line_ending
+    path = transcript_path("sess_boundary", bridge_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(first_line + last_line)
+
+    assert read_events_tail("sess_boundary", bridge_home, max_bytes=len(last_line)) == [last]
+
+
+def test_page_events_rejects_invalid_paging_parameters():
+    events = [{"type": "message_chunk"}]
+
+    with pytest.raises(ValueError, match="offset"):
+        page_events(events, offset=-1)
+    with pytest.raises(ValueError, match="limit"):
+        page_events(events, limit=0)

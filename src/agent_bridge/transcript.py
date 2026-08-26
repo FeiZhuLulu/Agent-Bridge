@@ -54,12 +54,16 @@ def read_events_tail(
         return []
     size = path.stat().st_size
     with path.open("rb") as fh:
+        discard_first_line = False
         if size > max_bytes:
-            fh.seek(size - max_bytes)
+            start = size - max_bytes
+            fh.seek(start - 1)
+            discard_first_line = fh.read(1) != b"\n"
+            fh.seek(start)
         blob = fh.read()
     lines = blob.decode("utf-8", errors="replace").splitlines()
-    if size > max_bytes and lines:
-        lines = lines[1:]  # the first line is almost certainly cut mid-record
+    if discard_first_line and lines:
+        lines = lines[1:]  # the first line is cut mid-record
     events: list[dict[str, Any]] = []
     for line in lines:
         line = line.strip()
@@ -79,6 +83,10 @@ def page_events(
     kinds: Iterable[str] | None = None,
     max_bytes: int = PAGE_BYTE_BUDGET,
 ) -> dict[str, Any]:
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     kind_set = set(kinds) if kinds else None
     selected = events
     if kind_set:

@@ -34,7 +34,7 @@ from agent_bridge.paths import ensure_home, state_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
-from agent_bridge.traits import ObservationSource, traits_for
+from agent_bridge.traits import ObservationSource, traits_for, traits_for_historical_agent
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
@@ -589,7 +589,7 @@ class Registry:
             payload["result_truncated"] = len(task.result_text.encode("utf-8")) > RESULT_TAIL
             payload["usage"] = task.usage
             payload["hint"] = "Use get_transcript for the full turn log."
-            hint = traits_for(self.config.get(task.agent)).result_hint
+            hint = traits_for_historical_agent(task.agent, self.config.agents).result_hint
             if hint:
                 payload["hint"] += f" {hint}"
         return payload

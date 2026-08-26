@@ -8,6 +8,7 @@ it behaved like a bundled worker.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -128,3 +129,20 @@ def traits_for(agent: object) -> AgentTraits:
     if isinstance(traits, AgentTraits) and "traits" in fields_set:
         return traits
     return BUILTIN_TRAITS.get(str(getattr(agent, "name", "")), AgentTraits())
+
+
+def traits_for_historical_agent(
+    name: str,
+    configured_agents: Mapping[str, object],
+) -> AgentTraits:
+    """Resolve traits for a persisted task without requiring its config entry.
+
+    A currently configured agent keeps any local trait override.  Once an
+    agent has been removed, only an exact bundled registration may contribute
+    a historical hint; custom names deliberately fall back to all-unknown.
+    """
+
+    agent = configured_agents.get(name)
+    if agent is not None:
+        return traits_for(agent)
+    return BUILTIN_TRAITS.get(name, AgentTraits())

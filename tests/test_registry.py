@@ -327,6 +327,37 @@ async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_get_result_survives_a_removed_custom_agent(bridge_home, tmp_path):
+    atomic_write_json(
+        state_path(bridge_home),
+        {
+            "sessions": [],
+            "tasks": [
+                Task(
+                    task_id="task_removed",
+                    session_id="sess_removed",
+                    agent="retired-custom-agent",
+                    message="already finished",
+                    cwd=str(tmp_path.resolve()),
+                    status=TaskStatus.completed,
+                    result_text="saved result",
+                    finished_at=iso(),
+                ).model_dump(mode="json")
+            ],
+        },
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        result = registry.get_result("task_removed")
+        assert result["status"] == "completed"
+        assert result["result_text"] == "saved result"
+        assert result["hint"] == "Use get_transcript for the full turn log."
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_kimi_silent_failure_becomes_a_warning(bridge_home, tmp_path, monkeypatch):
     """Kimi answers end_turn on a failed turn; wire.jsonl is the only witness."""
     work = tmp_path / "work"

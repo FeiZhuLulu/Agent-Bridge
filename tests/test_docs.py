@@ -60,6 +60,7 @@ def test_setup_claude_uses_mcp_json_and_settings_allow():
     assert "permissions.defaultMode" in setup
     assert "Do not put `mcpServers` in `settings.json`" in setup
     assert "CLAUDE.md" in setup
+    assert "smoke_claude_coordinator.py" in setup
 
 
 def test_setup_zcode_points_at_mcp_settings_not_plugin_marketplace():

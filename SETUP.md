@@ -267,6 +267,8 @@ CLI checks:
 claude mcp list
 ```
 
+Live coordinator loop (product `claude` as host, OpenCode as worker): `uv run python scripts/smoke_claude_coordinator.py`. That script uses `lab/`, `--mcp-config`, and denies Write/Edit/Bash so a pass cannot be the coordinator writing the file.
+
 ## Environment and proxy
 
 Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:

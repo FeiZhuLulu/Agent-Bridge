@@ -25,6 +25,15 @@ def test_loads_bundled_agents():
     assert cfg.agents["opencode"].protocol == "acp"
     assert cfg.agents["opencode"].command == ["opencode", "acp"]
     assert cfg.agents["opencode"].revivable is True
+    assert cfg.agents["claude"].protocol == "acp"
+    assert cfg.agents["claude"].command == ["claude-agent-acp"]
+    assert cfg.agents["claude"].fallback_commands == [["claude-code-acp"]]
+    assert cfg.agents["claude"].revivable is True
+    assert "ANTHROPIC_AUTH_TOKEN" in cfg.env.inherit
+    assert "ANTHROPIC_BASE_URL" in cfg.env.inherit
+    assert "CLAUDE_CONFIG_DIR" in cfg.env.inherit
+    assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in cfg.env.inherit
+    assert "OPENROUTER_API_KEY" in cfg.env.inherit
     # An explicit [env] inherit in agents.toml replaces DEFAULT_INHERIT_KEYS
     # wholesale, so Kimi's keys have to be listed there too.
     assert "KIMI_CODE_HOME" in cfg.env.inherit

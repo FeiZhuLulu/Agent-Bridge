@@ -1,6 +1,6 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, Kimi Code, ZCode, and Grok Build can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build is both); those are different processes and different session roles.
+Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build and Claude Code are both); those are different processes and different session roles.
 
 ## Install
 
@@ -214,12 +214,65 @@ CLI add (still use the resolved absolute exe):
 grok mcp add agent_bridge -- "C:\ABSOLUTE\PATH\agent-bridge.exe"
 ```
 
+## Register the MCP server (Claude Code)
+
+Claude Code has **two** on-disk files. Do not put `mcpServers` in `settings.json`.
+
+1. Project file `<project>\.mcp.json` (shared with the repo; this is what `scripts/setup_lab.py` writes):
+
+```json
+{
+  "mcpServers": {
+    "agent-bridge": {
+      "type": "stdio",
+      "command": "C:/ABSOLUTE/PATH/agent-bridge.exe",
+      "args": [],
+      "timeout": 600000
+    }
+  }
+}
+```
+
+2. User file `%USERPROFILE%\.claude.json` top-level `mcpServers` (all projects). Local scope (the `claude mcp add` default) nests the same object under that project's path in `~/.claude.json` — it is not the project file above.
+
+CLI add, still with the resolved absolute exe:
+
+```powershell
+claude mcp add --scope project --transport stdio agent-bridge -- "C:\ABSOLUTE\PATH\agent-bridge.exe"
+```
+
+Use `--scope user` for every project. After adding, put `"timeout": 600000` on the server entry (milliseconds). Official: [MCP](https://code.claude.com/docs/en/mcp), [MCP servers](https://code.claude.com/docs/en/mcp-servers).
+
+- `timeout` is milliseconds. 600000 leaves room for `wait_task` default 180 s. The CLI default for an unset `MCP_TOOL_TIMEOUT` is about 28 hours, so 180 s usually survives without the field; set it anyway so the budget is explicit. If the host still kills the call (the desktop app has historically ignored this and died around 60 s), poll about 45 s.
+- Startup wait is `MCP_TIMEOUT` (milliseconds, default 30 s). 30 s is enough for Bridge.
+- To pre-approve Bridge tools only, add to `<project>\.claude\settings.json` or `%USERPROFILE%\.claude\settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": ["mcp__agent-bridge__*"]
+  }
+}
+```
+
+MCP tools are named `mcp__{server}__{tool}` (for example `mcp__agent-bridge__dispatch_task`). Do not put `permissions.defaultMode` in a project example — that is a user-scoped preference.
+- Native user skills live in `%USERPROFILE%\.claude\skills`. Bridge writes `agent-bridge` there on first top-level start. Claude Code does **not** read `~/.agents/skills`.
+- Rules file: copy [ORCHESTRATION.md](ORCHESTRATION.md) as `CLAUDE.md` at the project root (native). Claude Code may also read `AGENTS.md`; CLAUDE.md is the one to use when you have a choice.
+- Claude Code stdio MCP inherits the process environment (no Codex-style env-clear). Still use the resolved absolute `command`.
+- Claude Code as a **worker** is a different process (`claude-agent-acp`, not the product TUI). If that worker inherits this MCP config from the project `.mcp.json`, the nested Bridge has dispatch, preference updates, cancel, and session shutdown disabled.
+
+CLI checks:
+
+```powershell
+claude mcp list
+```
+
 ## Environment and proxy
 
-Worker CLIs (Grok, Kimi, DSH, agy) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
+Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
-2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` directly, so PowerShell functions that wrap those CLIs never run.
+2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` / `claude-agent-acp` directly, so PowerShell functions that wrap those CLIs never run.
 
 Bridge rebuilds the environment **once at startup** (and again for each worker spawn) in this order, later wins:
 
@@ -254,7 +307,7 @@ agent-bridge upgrade
 - git checkout → `git pull` and `uv sync --extra dev` in that checkout, then the same skill refresh.
 - Anything else → the command tells you to `uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git`.
 
-Restart Codex / Cursor / Kimi Code / ZCode / Grok Build so they reconnect and pick up new tools and the MCP handshake instructions.
+Restart Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code so they reconnect and pick up new tools and the MCP handshake instructions.
 
 What you do **not** redo: `codex mcp add` / `mcp.json`, `%USERPROFILE%\.agent-bridge\agents.toml` (proxy, `[coordinator]`, `set_preferences`), or worker CLIs and their logins. If you copied `ORCHESTRATION.md` into another repo as `AGENTS.md`, that copy is still yours to refresh.
 
@@ -262,7 +315,7 @@ Already on a clone and want the tool install instead: `uv tool install git+https
 
 ## Multiple coordinators on one machine
 
-Running Codex, Cursor, Kimi Code, ZCode, and Grok Build coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts independent siblings (not a nested Bridge inside a worker this instance started). A `uv tool` install is shared and does not sync on spawn.
+Running Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code coordinators at the same time is supported: each host spawns its own Bridge process, and `list_agents` merely counts independent siblings (not a nested Bridge inside a worker this instance started). A `uv tool` install is shared and does not sync on spawn.
 
 What must not run twice is the **installer** of a git checkout. A plain `uv run` syncs the project before executing, and that sync rewrites `.venv\Scripts\agent-bridge.exe` — on Windows a file every running instance holds open. The second host's spawn then dies before the MCP handshake with:
 
@@ -284,7 +337,7 @@ The coordinator learns how to drive the Bridge through three channels; [ORCHESTR
 
 1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
 2. **Skill — automatic.** The first MCP start (and `agent-bridge upgrade`) writes [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
-3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, Kimi Code, ZCode, and Grok Build all read it there), or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the English file under 9500 characters (Grok may copy it as `AGENTS.md`) and under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
+3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, Kimi Code, ZCode, and Grok Build all read it there) or as `CLAUDE.md` for Claude Code, or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` / `%USERPROFILE%\.claude\CLAUDE.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the English file under 9500 characters (Grok may copy it as `AGENTS.md`) and under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
 Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.
 
@@ -315,7 +368,7 @@ The live workspace is a local `lab/` folder created by `scripts/setup_lab.py`. I
 uv run --no-sync python scripts/setup_lab.py
 ```
 
-1. Open the coordinator (Codex, Cursor, Kimi Code, ZCode, or Grok Build) on the `lab/` folder — not the Agent Bridge repo root.
+1. Open the coordinator (Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code) on the `lab/` folder — not the Agent Bridge repo root.
 2. Ask: `用 grok 在当前目录写一个 smoke.txt，内容 hello-bridge，做完后你自己 git diff 验收。` The coordinator must pass that folder as `dispatch_task.cwd` (not the Agent Bridge install path).
 3. Confirm it calls `dispatch_task` → loops `wait_task` → `get_result` → inspects the diff. `wait_task` defaults to 180 seconds; a timeout is not failure.
 4. Ask it to find a nit and send a follow-up on the same `session_id`.
@@ -329,7 +382,7 @@ The coordinator can pin a worker model and thinking intensity on `dispatch_task`
 dispatch_task(agent="antigravity", model="gemini-3.7-flash", effort="low", ...)
 ```
 
-`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process.
+`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process. Claude Code accepts a slug the session advertises (`sonnet`, `opus`, `haiku`, or a full id) plus `effort=off|low|medium|high|max` mapped onto that model's levels (`off` → `default`, `max` → `xhigh` unless the session lists `max`).
 
 ## Worker: Kimi Code
 
@@ -363,6 +416,28 @@ OpenCode has **no product login**. You connect providers by storing API keys (or
 `dispatch_task.model` is a `provider/model` slug the live session advertises (`opencode/...`, `xai/...`, …). `effort` maps onto that model's variants (`default|low|medium|high` is common; Bridge `max` usually becomes `high`). An unknown slug fails the turn and lists the real options; a model with no variants, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set on the session after that mapping, not a live sampler dump. Switching model on a live session re-applies effort: OpenCode resets the variant to the new model's default. Bridge revives with `session/resume` rather than `session/load`. Permissions are ACP `requestPermission`; Bridge auto-picks `allow-always`.
 
 If OpenCode's configured default model is disabled, the first prompt fails with `Model is disabled`. Pass a slug from `opencode models` for a provider that still has a working key.
+
+## Worker: Claude Code
+
+Product `claude` has **no** ACP profile. Bridge drives the published adapter:
+
+```powershell
+npm install -g @agentclientprotocol/claude-agent-acp @anthropic-ai/claude-code
+claude auth login
+```
+
+`claude-agent-acp` is the worker binary (`@zed-industries/claude-agent-acp` / `claude-code-acp` is the older name; Bridge lists it as a fallback). `list_agents` reports available when that binary is on PATH — a missing login only fails on the first prompt. Auth is `claude auth login` on disk, `ANTHROPIC_API_KEY`, or a gateway:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
+$env:ANTHROPIC_AUTH_TOKEN = $env:OPENROUTER_API_KEY
+$env:ANTHROPIC_API_KEY = ""
+$env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
+```
+
+If `OPENROUTER_API_KEY` is set and `ANTHROPIC_AUTH_TOKEN` is not, Bridge copies it and defaults the base URL to OpenRouter. A non-empty `ANTHROPIC_API_KEY` is treated as a direct Anthropic credential, so Bridge blanks it when a gateway token and base URL are both present.
+
+`dispatch_task.model` is a slug the live session advertises (`sonnet`, `opus`, `haiku`, or a full id). `effort` maps onto that model's levels (`default|low|medium|high|xhigh` is common; Bridge `off` → `default`, `max` → `xhigh` unless the session lists `max`). An unknown slug fails the turn and lists the real options; a model with no effort option, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set after that mapping. Switching model on a live session re-applies effort. Bridge forces `bypassPermissions` after `session/new` (a fresh session starts in manual `default` mode); if that mode is not advertised — for example when the process is root — ACP `requestPermission` still auto-picks `allow-always`. Revive uses `session/resume`: `session/load` replays the whole history.
 
 ## Permissions
 

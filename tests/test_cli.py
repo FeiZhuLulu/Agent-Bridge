@@ -37,10 +37,11 @@ def test_detect_checkout():
     assert (checkout_root() / "pyproject.toml").is_file()
 
 
-def test_skill_destinations_include_zcode(tmp_path):
+def test_skill_destinations_include_zcode_and_claude(tmp_path):
     dests = skill_destinations(tmp_path)
     assert any(part == ".zcode" for dest in dests for part in dest.parts)
-    assert dests[-1] == tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md"
+    assert any(part == ".claude" for dest in dests for part in dest.parts)
+    assert dests[-1] == tmp_path / ".claude" / "skills" / "agent-bridge" / "SKILL.md"
 
 
 def test_install_skill_writes_host_dirs(tmp_path):
@@ -97,6 +98,7 @@ def test_help_and_version(capsys):
     main(["help"])
     out = capsys.readouterr().out
     assert "uv tool install" in out
+    assert "Claude Code" in out
     assert "install-skill" not in out.split("Install:")[1].split("Update:")[0]
     main(["--version"])
     assert capsys.readouterr().out.strip()

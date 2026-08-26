@@ -35,3 +35,9 @@ def test_write_host_configs_uses_isolated_home(tmp_path: Path):
     assert "mcpServers" in cursor
     kimi = json.loads(by_rel[".kimi-code/mcp.json"].read_text(encoding="utf-8"))
     assert kimi["mcpServers"]["agent-bridge"]["toolTimeoutMs"] == 600000
+    claude = json.loads(by_rel[".mcp.json"].read_text(encoding="utf-8"))
+    assert claude["mcpServers"]["agent-bridge"]["timeout"] == 600000
+    assert claude["mcpServers"]["agent-bridge"]["type"] == "stdio"
+    settings = json.loads(by_rel[".claude/settings.json"].read_text(encoding="utf-8"))
+    assert "mcp__agent-bridge__*" in settings["permissions"]["allow"]
+    assert "bypassPermissions" not in settings["permissions"]

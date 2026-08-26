@@ -124,3 +124,39 @@ async def test_probe_does_not_inject_worker_context(monkeypatch):
     assert row["available"] is True
     assert captured["kwargs"].get("worker_context") in (None, False)
     assert captured["env"].get(WORKER_CONTEXT_ENV) != WORKER_CONTEXT_VALUE
+
+
+async def _probe_claude(monkeypatch, env):
+    monkeypatch.setattr("agent_bridge.probes.resolve_command", _fake_resolve)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: env)
+    return await probe_agent(
+        AgentConfig(name="claude", protocol="acp", command=["claude-agent-acp"]),
+        EnvConfig(discover_proxy=False, inherit=[]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_claude_probe_reports_gateway_auth_without_hiding_the_agent(tmp_path, monkeypatch):
+    row = await _probe_claude(
+        monkeypatch,
+        {
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-x",
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        },
+    )
+    assert row["available"] is True
+    assert "auth=gateway" in row["detail"]
+    assert "claude-agent-acp" in row["detail"]
+    assert "bypassPermissions" in row["detail"]
+    assert f"claude-home={tmp_path}" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_claude_probe_maps_openrouter_key_as_gateway(tmp_path, monkeypatch):
+    row = await _probe_claude(
+        monkeypatch,
+        {"CLAUDE_CONFIG_DIR": str(tmp_path), "OPENROUTER_API_KEY": "sk-or-x"},
+    )
+    assert row["available"] is True
+    assert "auth=gateway" in row["detail"]

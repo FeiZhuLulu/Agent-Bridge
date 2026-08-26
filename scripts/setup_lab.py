@@ -143,6 +143,45 @@ def write_host_configs(
         encoding="utf-8",
     )
     written.append(kimi)
+
+    claude_mcp = lab / ".mcp.json"
+    claude_mcp.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "agent-bridge": {
+                        "type": "stdio",
+                        "command": command,
+                        "args": args,
+                        "timeout": 600000,
+                        "env": env,
+                    }
+                }
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    written.append(claude_mcp)
+
+    claude_settings = lab / ".claude" / "settings.json"
+    claude_settings.parent.mkdir(parents=True, exist_ok=True)
+    claude_settings.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "allow": ["mcp__agent-bridge__*"]
+                }
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    written.append(claude_settings)
     return written
 
 

@@ -1,11 +1,11 @@
 ---
 name: agent-bridge
-description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness, OpenCode) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
+description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness, OpenCode, Claude Code) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
 ---
 
 # Dispatching workers through Agent Bridge
 
-You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, or `opencode` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
+You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, `opencode`, `claude`, or `claude-agent-acp` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
 
 ## Before anything: read the policy
 
@@ -32,6 +32,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 - **Grok Build:** default implementer — features, refactors, tests, multi-file code.
 - **Kimi Code:** second implementer — Grok busy or wrong, independent second take, or big single-context jobs.
 - **OpenCode:** optional third implementer — user asked for it, wants a connected provider/model, or Grok and Kimi are busy.
+- **Claude Code:** optional implementer — user asked, or Grok and Kimi are busy. Worker binary is `claude-agent-acp`.
 - **DeepSeek Harness:** only when others are unavailable or the user asks.
 
 ## The dispatch loop
@@ -43,6 +44,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
    - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.
    - ZCode: configure `timeoutMs` 600000; otherwise ~15–20 s polls.
    - Grok Build: official default `tool_timeout_sec` is 6000; set 600. If unsure or the host kills the call, ~30–45 s polls.
-3. `get_result`, then verify yourself: `git status` / `git diff`, run the relevant build and tests. Never trust the worker's self-report. Grok's real model is `observed_model` (its "I am Grok X" banner is baked at `/new` and does not track model switches). OpenCode `observed_model` / `observed_effort` are the last values Bridge set after mapping, not a live sampler. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
+   - Claude Code: per-server `timeout` 600000 (ms) in `.mcp.json`. CLI default is long; if unsure, ~45 s polls.
+3. `get_result`, then verify yourself: `git status` / `git diff`, run the relevant build and tests. Never trust the worker's self-report. Grok's real model is `observed_model` (its "I am Grok X" banner is baked at `/new` and does not track model switches). OpenCode and Claude Code `observed_model` / `observed_effort` are the last values Bridge set after mapping, not a live sampler. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
 4. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list — at most three follow-ups, then fix it yourself and tell the user.
 5. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.

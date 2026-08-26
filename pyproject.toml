@@ -1,7 +1,7 @@
 [project]
 name = "agent-bridge"
 version = "0.1.0"
-description = "Connect local coding agents. Codex, Cursor, Kimi Code, ZCode, or Grok Build coordinates Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode."
+description = "Connect local coding agents. Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code coordinates Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, and Claude Code."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "FeiZhuLulu" }]

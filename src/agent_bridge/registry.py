@@ -369,6 +369,10 @@ class Registry:
         cwd_path = Path(cwd)
         if not cwd_path.is_absolute():
             raise ValueError("cwd must be an absolute path")
+        if not cwd_path.exists():
+            raise ValueError(f"cwd does not exist: {cwd_path}")
+        if not cwd_path.is_dir():
+            raise ValueError(f"cwd is not a directory: {cwd_path}")
         effort = normalize_effort(effort)
         cfg = self.config.get(agent)
         async with self._lock:

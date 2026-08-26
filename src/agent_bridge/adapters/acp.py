@@ -31,6 +31,7 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
+from agent_bridge.traits import LaunchResolver, traits_for
 from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.acp_config import config_option_values
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
@@ -374,14 +375,14 @@ class AcpAdapter(Adapter):
                 f"{self.agent.name} {what} timed out after {int(timeout)}s"
             ) from None
 
-    async def _spawn(self, session: Session) -> _Live:
-        await self.shutdown(session)
-        if self.agent.name == "dsh":
+    def _launch_command_env(self, session: Session) -> tuple[list[str], dict[str, str]]:
+        traits = traits_for(self.agent)
+        if traits.launch_resolver is LaunchResolver.dsh:
             cmd = resolve_dsh_command(self.agent.command, self.agent.fallback_commands)
         else:
             cmd = resolve_command(self.agent.command, self.agent.fallback_commands)
         env = self._env()
-        if self.agent.name == "dsh":
+        if traits.launch_resolver is LaunchResolver.dsh:
             cmd, env = prepare_dsh_launch(
                 cmd,
                 env,
@@ -391,6 +392,12 @@ class AcpAdapter(Adapter):
             )
         elif self.agent.name == "grok":
             cmd = with_grok_cli_selection(cmd, session.model, session.effort)
+        return cmd, env
+
+    async def _spawn(self, session: Session) -> _Live:
+        await self.shutdown(session)
+        traits = traits_for(self.agent)
+        cmd, env = self._launch_command_env(session)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -426,7 +433,7 @@ class AcpAdapter(Adapter):
             "initialize",
             session,
         )
-        if self.agent.name == "dsh":
+        if traits.launch_resolver is LaunchResolver.dsh:
             live.applied_model = session.model
             live.applied_effort = dsh_effort(session.effort)
         return live

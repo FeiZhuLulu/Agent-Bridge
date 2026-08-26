@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.adapters.fake import FakeAdapter
+from agent_bridge.config import AgentConfig, AppConfig, WorkspacePolicy
 from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
 from agent_bridge.paths import state_path
 from agent_bridge.persist import atomic_write_json, read_json
@@ -112,6 +113,47 @@ async def test_relative_cwd_rejected(bridge_home):
     try:
         with pytest.raises(ValueError, match="absolute"):
             await registry.dispatch_task("fake", "x", cwd="relative")
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rejects_workspace_outside_configured_root(bridge_home, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    config = AppConfig(
+        agents={"fake": AgentConfig(name="fake", protocol="fake", command=["fake"])},
+        workspace=WorkspacePolicy(allowed_roots=[str(allowed)]),
+    )
+    registry = Registry.create(bridge_home, config=config)
+    await registry.start()
+    try:
+        with pytest.raises(ValueError, match="outside configured allowed_roots"):
+            await registry.dispatch_task("fake", "x", cwd=str(outside))
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rejects_agent_cwd_that_differs_from_session(bridge_home, tmp_path):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    config = AppConfig(
+        agents={
+            "fake": AgentConfig(
+                name="fake", protocol="fake", command=["fake"], cwd=str(configured)
+            )
+        }
+    )
+    registry = Registry.create(bridge_home, config=config)
+    await registry.start()
+    try:
+        with pytest.raises(ValueError, match="must equal session cwd"):
+            await registry.dispatch_task("fake", "x", cwd=str(requested))
     finally:
         await registry.stop()
 

@@ -37,6 +37,7 @@ from agent_bridge.processes import count_sibling_servers, owner_alive, process_c
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
+from agent_bridge.workspace_policy import WorkspacePolicy as WorkspaceValidator
 
 log = logging.getLogger(__name__)
 
@@ -366,11 +367,11 @@ class Registry:
                 "asked for a worker on this task. If they did, retry with "
                 "user_requested=true; otherwise do the work yourself."
             )
-        cwd_path = Path(cwd)
-        if not cwd_path.is_absolute():
-            raise ValueError("cwd must be an absolute path")
+        workspace_policy = WorkspaceValidator.model_validate(self.config.workspace.model_dump())
+        cwd_path = workspace_policy.validate_cwd(cwd)
         effort = normalize_effort(effort)
         cfg = self.config.get(agent)
+        workspace_policy.validate_configured_cwd(cfg.cwd, cwd_path)
         async with self._lock:
             if session_id:
                 session = self.sessions.get(session_id)
@@ -378,7 +379,7 @@ class Registry:
                     raise KeyError(f"unknown session {session_id}")
                 if session.agent != agent:
                     raise ValueError(f"session {session_id} belongs to agent {session.agent}, not {agent}")
-                if Path(session.cwd).resolve() != cwd_path.resolve():
+                if session.cwd != str(cwd_path):
                     raise ValueError(
                         f"session {session.session_id} is bound to {session.cwd}; "
                         "follow-up cwd must be the same project folder"
@@ -392,7 +393,7 @@ class Registry:
                 session = Session(
                     session_id=_new_id("sess"),
                     agent=agent,
-                    cwd=str(cwd_path.resolve()),
+                    cwd=str(cwd_path),
                     model=model,
                     effort=effort,
                     title=title,
@@ -407,7 +408,7 @@ class Registry:
             if title:
                 session.title = title
             if session_id is None:
-                session.cwd = str(cwd_path.resolve())
+                session.cwd = str(cwd_path)
             session.last_active_at = iso()
             task = Task(
                 task_id=_new_id("task"),

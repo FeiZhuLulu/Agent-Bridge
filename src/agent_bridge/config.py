@@ -78,6 +78,16 @@ class ServerConfig(BaseModel):
     idle_exit_sec: int = 7200
 
 
+class WorkspacePolicy(BaseModel):
+    """Dispatch-time workspace validation configuration.
+
+    Empty ``allowed_roots`` retains the historical unrestricted-root behavior.
+    """
+
+    allowed_roots: list[str] = Field(default_factory=list)
+    reject_reparse: bool = True
+
+
 COORDINATOR_MODES = ("manual", "auto", "eager")
 # The notes that inspired this used safe/yolo; yolo already means
 # "auto-approve tool calls" for Kimi and Grok, so the canonical names differ.
@@ -128,6 +138,7 @@ class AppConfig(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     env: EnvConfig = Field(default_factory=EnvConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    workspace: WorkspacePolicy = Field(default_factory=WorkspacePolicy)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
 
     def get(self, name: str) -> AgentConfig:
@@ -207,6 +218,18 @@ def _coerce_server(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _coerce_workspace(raw: dict[str, Any]) -> dict[str, Any]:
+    block = raw.get("workspace")
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if block.get("allowed_roots") is not None:
+        out["allowed_roots"] = [str(item) for item in block["allowed_roots"]]
+    if block.get("reject_reparse") is not None:
+        out["reject_reparse"] = bool(block["reject_reparse"])
+    return out
+
+
 def _coerce_coordinator(raw: dict[str, Any]) -> dict[str, Any]:
     block = raw.get("coordinator")
     if not isinstance(block, dict):
@@ -277,6 +300,12 @@ def _merge_server(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, An
     return out
 
 
+def _merge_workspace(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    out.update(overlay)
+    return out
+
+
 def load_config(home: Path | None = None) -> AppConfig:
     bundled_raw = _load_toml(bundled_agents_toml())
     user_home = home or bridge_home()
@@ -302,6 +331,9 @@ def load_config(home: Path | None = None) -> AppConfig:
     server = ServerConfig.model_validate(
         _merge_server(_coerce_server(bundled_raw), _coerce_server(overlay_raw))
     )
+    workspace = WorkspacePolicy.model_validate(
+        _merge_workspace(_coerce_workspace(bundled_raw), _coerce_workspace(overlay_raw))
+    )
     coord_raw = {**_coerce_coordinator(bundled_raw), **_coerce_coordinator(overlay_raw)}
     # Per-host override: each MCP host entry can set its own mode via env
     # (e.g. Codex manual, Cursor eager) without a second config file.
@@ -310,4 +342,10 @@ def load_config(home: Path | None = None) -> AppConfig:
         coord_raw["mode"] = env_mode
     coord_raw["mode"] = normalize_coordinator_mode(coord_raw.get("mode"))
     coordinator = CoordinatorConfig.model_validate(coord_raw)
-    return AppConfig(agents=agents, env=env, server=server, coordinator=coordinator)
+    return AppConfig(
+        agents=agents,
+        env=env,
+        server=server,
+        workspace=workspace,
+        coordinator=coordinator,
+    )

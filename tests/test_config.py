@@ -116,6 +116,23 @@ idle_exit_sec = 0
     assert cfg.server.idle_exit_sec == 0
 
 
+def test_workspace_policy_defaults_and_overlay(tmp_path):
+    assert AppConfig().workspace.allowed_roots == []
+    assert AppConfig().workspace.reject_reparse is True
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "agents.toml").write_text(
+        f'''[workspace]
+allowed_roots = ["{root.as_posix()}"]
+reject_reparse = false
+''',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.workspace.allowed_roots == [root.as_posix()]
+    assert cfg.workspace.reject_reparse is False
+
+
 def test_coordinator_defaults(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
     cfg = load_config(tmp_path)

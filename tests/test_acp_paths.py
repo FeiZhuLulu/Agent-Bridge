@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,3 +51,36 @@ async def test_rpc_timeout_raises_clear_error(tmp_path):
     session = Session(session_id="sess_rpc", agent="cursor", cwd=str(tmp_path))
     with pytest.raises(RpcTimeoutError, match="session/new timed out"):
         await adapter._rpc(asyncio.sleep(30), "session/new", session, timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_session_cwd_not_agent_override(tmp_path, monkeypatch):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    adapter = AcpAdapter(
+        AgentConfig(
+            name="cursor", protocol="acp", command=["cursor-agent"], cwd=str(configured)
+        ),
+        tmp_path,
+    )
+    session = Session(session_id="sess_cwd", agent="cursor", cwd=str(requested))
+    seen: dict[str, str] = {}
+
+    async def fake_spawn(*args, **kwargs):
+        seen["cwd"] = kwargs["cwd"]
+        return SimpleNamespace(stdin=object(), stdout=object(), stderr=None, pid=None)
+
+    async def no_rpc(*args, **kwargs):
+        return None
+
+    class Connection:
+        def initialize(self, **kwargs):
+            return None
+
+    monkeypatch.setattr("agent_bridge.adapters.acp.asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("agent_bridge.adapters.acp.connect_to_agent", lambda *args: Connection())
+    monkeypatch.setattr(adapter, "_rpc", no_rpc)
+    await adapter._spawn(session)
+    assert seen["cwd"] == str(requested)

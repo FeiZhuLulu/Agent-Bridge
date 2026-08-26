@@ -236,7 +236,7 @@ class AgyAdapter(Adapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            cwd=task.cwd or session.cwd,
+            cwd=session.cwd,
             limit=STDIO_LIMIT,
             **kwargs,
         )

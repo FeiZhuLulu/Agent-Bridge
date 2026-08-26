@@ -400,7 +400,9 @@ class AcpAdapter(Adapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            cwd=self.agent.cwd or session.cwd or None,
+            # Registry rejects a configured cwd that differs from the session.
+            # Keep the OS process and ACP session on that exact validated cwd.
+            cwd=session.cwd,
             limit=STDIO_LIMIT,
             **kwargs,
         )

@@ -12,6 +12,12 @@
 # [server]
 # idle_exit_sec = 7200
 
+# Optional dispatch-time workspace validation. Empty allowed_roots (the
+# default) allows any existing absolute directory; this is not a sandbox.
+# [workspace]
+# allowed_roots = ["D:/code"]
+# reject_reparse = true
+
 # Dispatch policy: mode = manual | auto | eager (default auto).
 # instructions is free text the coordinator reads via list_agents; it
 # overrides the default worker split and persists across sessions.

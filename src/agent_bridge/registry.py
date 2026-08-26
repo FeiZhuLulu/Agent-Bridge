@@ -34,6 +34,7 @@ from agent_bridge.paths import ensure_home, state_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
+from agent_bridge.traits import ObservationSource, traits_for
 from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
@@ -452,11 +453,12 @@ class Registry:
             task.files_changed = merge_files_changed(task.cwd, result.files_changed, before)
             task.usage = result.usage
             task.warnings = list(result.warnings)
-            if session.agent == "grok":
+            traits = traits_for(self.config.get(session.agent))
+            if traits.observation_source is ObservationSource.grok_sampler:
                 observed = observe_grok_session(session.cwd, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
-            elif session.agent == "kimi":
+            elif traits.observation_source is ObservationSource.kimi_sampler:
                 observed = observe_kimi_session(session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
@@ -464,7 +466,7 @@ class Registry:
                     # Kimi answered end_turn, so nothing above this line knows
                     # the turn failed. Say so where the coordinator looks.
                     task.warnings.append(
-                        f"kimi reported end_turn but the turn failed: {observed['failure']}"
+                        f"{session.agent} reported end_turn but the turn failed: {observed['failure']}"
                     )
             else:
                 # OpenCode (and any later ACP worker) has no on-disk sampler
@@ -587,21 +589,9 @@ class Registry:
             payload["result_truncated"] = len(task.result_text.encode("utf-8")) > RESULT_TAIL
             payload["usage"] = task.usage
             payload["hint"] = "Use get_transcript for the full turn log."
-            if task.agent == "grok":
-                payload["hint"] += (
-                    " Grok system-prompt identity is not the selected model; "
-                    "use observed_model from this payload."
-                )
-            if task.agent == "kimi":
-                payload["hint"] += (
-                    " Kimi reports a failed turn as end_turn with empty text; "
-                    "an empty result is only clean if warnings is empty."
-                )
-            if task.agent == "opencode":
-                payload["hint"] += (
-                    " OpenCode observed_model/effort are the last values Bridge "
-                    "successfully set on the session after mapping, not a live sampler."
-                )
+            hint = traits_for(self.config.get(task.agent)).result_hint
+            if hint:
+                payload["hint"] += f" {hint}"
         return payload
 
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:

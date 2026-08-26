@@ -9,6 +9,7 @@ from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import kill_tree, resolve_command
+from agent_bridge.traits import LaunchResolver, ProbeProfile, traits_for
 from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
@@ -63,15 +64,29 @@ def _kimi_auth(env: dict[str, str]) -> str:
 
 
 async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> dict:
+    traits = traits_for(cfg)
+    traits_payload = traits.model_dump(mode="json")
     if cfg.protocol == "fake":
-        return {"agent": cfg.name, "available": True, "version": "fake", "detail": "in-process fake adapter"}
+        return {
+            "agent": cfg.name,
+            "available": True,
+            "version": "fake",
+            "detail": "in-process fake adapter",
+            "traits": traits_payload,
+        }
     try:
-        if cfg.name == "dsh":
+        if traits.launch_resolver is LaunchResolver.dsh:
             command = resolve_dsh_command(cfg.command, cfg.fallback_commands)
         else:
             command = resolve_command(cfg.command, cfg.fallback_commands)
     except FileNotFoundError as exc:
-        return {"agent": cfg.name, "available": False, "version": None, "detail": str(exc)}
+        return {
+            "agent": cfg.name,
+            "available": False,
+            "version": None,
+            "detail": str(exc),
+            "traits": traits_payload,
+        }
 
     details: list[str] = [f"command={command[0]}"]
     version = await _version_string(command[0])
@@ -81,7 +96,7 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         log_fill=False,
     )
 
-    if cfg.name == "dsh":
+    if traits.probe_profile is ProbeProfile.dsh:
         bin_path = next((arg for arg in command if arg.endswith((".js", ".ts"))), None)
         if bin_path and not Path(bin_path).is_file():
             return {
@@ -89,13 +104,20 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
                 "available": False,
                 "version": version or None,
                 "detail": f"dsh-acp-demo bin missing: {bin_path}",
+                "traits": traits_payload,
             }
         if command[0].lower().endswith(("node", "node.exe")) or any(
             arg.endswith((".js", ".ts")) for arg in command
         ):
             node = shutil.which("node")
             if not node:
-                return {"agent": cfg.name, "available": False, "version": None, "detail": "node not found"}
+                return {
+                    "agent": cfg.name,
+                    "available": False,
+                    "version": None,
+                    "detail": "node not found",
+                    "traits": traits_payload,
+                }
             node_ver = await _version_string(node)
             details.append(f"node={node_ver or 'unknown'}")
         dsh_env = apply_dsh_worker_env(resolved, command=command)
@@ -106,35 +128,13 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             details.append(f"dsh-model={selection[0]}/{selection[1]}")
         else:
             details.append("dsh-model=unset (DSH composition default)")
-        details.append("effort=off|low|high|max via dispatch_task.effort; same session model change respawns")
+    details.extend(traits.probe_notes)
 
-    if cfg.name == "antigravity":
-        details.append("model=agy models slugs e.g. gemini-3.7-flash; effort=low|medium|high")
-
-    if cfg.name == "grok":
-        details.append(
-            "model=grok models slugs via session/setModel after /new; "
-            "effort=off|low|medium|high|max (off->none, max->xhigh)"
-        )
-
-    if cfg.name == "kimi":
-        details.append(
-            "model=slugs the session advertises e.g. kimi-code/k3, kimi-code/k3-256k; "
-            "effort mapped onto that model's thinking levels; mode forced to yolo"
-        )
+    if traits.probe_profile is ProbeProfile.kimi:
         details.append(f"kimi-home={_kimi_home(resolved)}")
         details.append(f"auth={_kimi_auth(resolved)}")
 
-    if cfg.name == "opencode":
-        details.append(
-            "model=provider/model slugs the session advertises e.g. opencode/..., "
-            "xai/...; effort mapped onto that model's variants"
-        )
-        details.append(
-            "auth=provider API keys via `opencode auth` "
-            "(official OpenCode Zen / Go, or any connected provider); "
-            "no product login"
-        )
+    if traits.probe_profile is ProbeProfile.opencode:
         if resolved.get("OPENCODE_API_KEY"):
             details.append("OPENCODE_API_KEY=set")
 
@@ -149,6 +149,7 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         "available": True,
         "version": version or None,
         "detail": "; ".join(details),
+        "traits": traits_payload,
     }
 
 
@@ -156,7 +157,7 @@ def command_exists(cfg: AgentConfig) -> bool:
     if cfg.protocol == "fake":
         return True
     try:
-        if cfg.name == "dsh":
+        if traits_for(cfg).launch_resolver is LaunchResolver.dsh:
             resolve_dsh_command(cfg.command, cfg.fallback_commands)
         else:
             resolve_command(cfg.command, cfg.fallback_commands)

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from agent_bridge.paths import bridge_home, bundled_agents_toml
 from agent_bridge.persist import atomic_write_text
+from agent_bridge.traits import AgentTraits
 
 DEFAULT_INHERIT_KEYS = (
     "HTTP_PROXY",
@@ -57,6 +58,7 @@ class AgentConfig(BaseModel):
     cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     session_meta: dict[str, Any] = Field(default_factory=dict)
+    traits: AgentTraits = Field(default_factory=AgentTraits)
     revivable: bool = False
     idle_unload_sec: int = 0
     print_timeout: str = "120m"

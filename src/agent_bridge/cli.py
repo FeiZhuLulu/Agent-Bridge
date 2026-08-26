@@ -26,6 +26,7 @@ SKILL_RELATIVE = (
     Path(".codex") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".kimi-code") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".zcode") / "skills" / "agent-bridge" / "SKILL.md",
+    Path(".claude") / "skills" / "agent-bridge" / "SKILL.md",
 )
 
 HELP = f"""Agent Bridge — connect local coding agents.
@@ -41,9 +42,9 @@ Usage:
 Install:
   uv tool install {GIT_SOURCE}
 
-Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, or Grok
-Build. Skill files are written automatically the first time a top-level
-coordinator starts the server.
+Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, Grok
+Build, or Claude Code. Skill files are written automatically the first
+time a top-level coordinator starts the server.
 
 Update:
   agent-bridge upgrade

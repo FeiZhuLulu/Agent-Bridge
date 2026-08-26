@@ -28,6 +28,14 @@ inherit = [
   "GROK_API_KEY",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+  "OPENROUTER_API_KEY",
   "GOOGLE_API_KEY",
   "GEMINI_API_KEY",
   "CLOUDFLARE_API_TOKEN",
@@ -105,6 +113,17 @@ command = ["dsh-acp-demo"]
 env = { DSH_PERMISSION_MODE = "danger-full-access" }
 revivable = false
 idle_unload_sec = 0
+
+[agents.claude]
+protocol = "acp"
+# Product `claude` has no ACP profile. Bridge drives the published adapter
+# `@agentclientprotocol/claude-agent-acp` (bin `claude-agent-acp`). Auth is
+# `claude auth login` on disk, ANTHROPIC_API_KEY, or a gateway
+# (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL, e.g. OpenRouter).
+command = ["claude-agent-acp"]
+fallback_commands = [["claude-code-acp"]]
+revivable = true
+idle_unload_sec = 900
 
 [agents.opencode]
 protocol = "acp"

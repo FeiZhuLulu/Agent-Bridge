@@ -430,6 +430,47 @@ async def test_opencode_observed_model_comes_from_the_adapter(bridge_home, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_claude_observed_model_comes_from_the_adapter(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    (bridge_home / "agents.toml").write_text(
+        '[agents.claude]\nprotocol = "fake"\n', encoding="utf-8"
+    )
+
+    async def applied_turn(self, session, task):
+        return TurnResult(
+            text="done",
+            stop_reason="end_turn",
+            observed_model="sonnet",
+            observed_effort="xhigh",
+        )
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", applied_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task(
+            "claude",
+            "do it",
+            cwd=str(work.resolve()),
+            model="sonnet",
+            effort="max",
+        )
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["model"] == "sonnet"
+        assert waited["effort"] == "max"
+        assert waited["observed_model"] == "sonnet"
+        assert waited["observed_effort"] == "xhigh"
+        result = registry.get_result(dispatched["task_id"])
+        assert "Claude Code observed_model/effort" in result["hint"]
+        assert "last values Bridge successfully set" in result["hint"]
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_late_turn_result_does_not_overwrite_cancelled(bridge_home, tmp_path, monkeypatch):
     """cancel_task's timeout path finalizes the task; the turn ending later must not flip it back."""
     work = tmp_path / "work"

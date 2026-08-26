@@ -602,6 +602,11 @@ class Registry:
                     " OpenCode observed_model/effort are the last values Bridge "
                     "successfully set on the session after mapping, not a live sampler."
                 )
+            if task.agent == "claude":
+                payload["hint"] += (
+                    " Claude Code observed_model/effort are the last values Bridge "
+                    "successfully set on the session after mapping, not a live sampler."
+                )
         return payload
 
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:

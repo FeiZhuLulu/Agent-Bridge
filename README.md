@@ -13,15 +13,16 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, or Grok Build — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, and OpenCode. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, and Claude Code. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
 ```text
-User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build)
+User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code)
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
                           → DeepSeek Harness
                           → OpenCode
+                          → Claude Code
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -71,9 +72,9 @@ Restart Codex. The coordinator skill is written the first time the server starts
 }
 ```
 
-### Connect ZCode or Grok Build
+### Connect ZCode, Grok Build, or Claude Code
 
-Resolve the real executable first (`Get-Command agent-bridge | Select-Object -ExpandProperty Source`). ZCode UI paste JSON, ZCode native `config.json`, and Grok `config.toml` are three different shapes — do not mix them. Copy-paste blocks: [SETUP.md](SETUP.md).
+Resolve the real executable first (`Get-Command agent-bridge | Select-Object -ExpandProperty Source`). ZCode UI paste JSON, ZCode native `config.json`, Grok `config.toml`, and Claude Code `.mcp.json` / `~/.claude.json` are different shapes — do not mix them. Copy-paste blocks: [SETUP.md](SETUP.md).
 
 ### Connect another agent
 
@@ -117,15 +118,16 @@ uv run pytest
 
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode 或 Grok Build——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
 
 ```text
-用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build）
+用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code）
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
                           → DeepSeek Harness
                           → OpenCode
+                          → Claude Code
 ```
 
 它不操作图形界面。用户只和协调者对话。
@@ -175,9 +177,9 @@ codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 }
 ```
 
-### 接到 ZCode 或 Grok Build
+### 接到 ZCode、Grok Build 或 Claude Code
 
-先解析真实可执行文件（`Get-Command agent-bridge | Select-Object -ExpandProperty Source`）。ZCode 弹窗 JSON、ZCode 原生 `config.json`、Grok 的 `config.toml` 是三种不同结构，不能混用。完整示例见 [SETUP.md](SETUP.md)。
+先解析真实可执行文件（`Get-Command agent-bridge | Select-Object -ExpandProperty Source`）。ZCode 弹窗 JSON、ZCode 原生 `config.json`、Grok 的 `config.toml`、Claude Code 的 `.mcp.json` / `~/.claude.json` 是不同结构，不能混用。完整示例见 [SETUP.md](SETUP.md)。
 
 ### 接入其它 Agent
 

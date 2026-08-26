@@ -7,7 +7,7 @@ def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def test_readme_and_setup_list_zcode_and_grok_coordinators():
+def test_readme_and_setup_list_zcode_grok_and_claude_coordinators():
     readme = _read("README.md")
     setup = _read("SETUP.md")
     for text in (readme, setup):
@@ -16,6 +16,7 @@ def test_readme_and_setup_list_zcode_and_grok_coordinators():
         assert "Codex" in text
         assert "Cursor" in text
         assert "Kimi Code" in text
+        assert "Claude Code" in text
 
 
 def test_setup_keeps_zcode_ui_and_native_shapes_distinct():
@@ -45,6 +46,21 @@ def test_setup_grok_uses_official_toml_and_permission_rules():
     assert "end_session" in setup
     assert "nested/" in setup
     assert "read-only" not in setup
+
+
+def test_setup_claude_uses_mcp_json_and_settings_allow():
+    setup = _read("SETUP.md")
+    assert ".mcp.json" in setup
+    assert "~/.claude.json" in setup or "%USERPROFILE%\\.claude.json" in setup
+    assert '"timeout": 600000' in setup
+    assert "mcp__agent-bridge__*" in setup
+    assert "claude-agent-acp" in setup
+    assert "@agentclientprotocol/claude-agent-acp" in setup
+    assert "code.claude.com/docs/en/mcp" in setup
+    assert "permissions.defaultMode" in setup
+    assert "Do not put `mcpServers` in `settings.json`" in setup
+    assert "CLAUDE.md" in setup
+    assert "smoke_claude_coordinator.py" in setup
 
 
 def test_setup_zcode_points_at_mcp_settings_not_plugin_marketplace():

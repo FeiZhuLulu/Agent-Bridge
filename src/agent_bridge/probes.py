@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from agent_bridge.config import AgentConfig, EnvConfig
+from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import kill_tree, resolve_command
@@ -137,6 +138,19 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         )
         if resolved.get("OPENCODE_API_KEY"):
             details.append("OPENCODE_API_KEY=set")
+
+    if cfg.name == "claude":
+        resolved = apply_claude_gateway_env(resolved)
+        details.append(
+            "model=slugs the session advertises (sonnet, opus, haiku, or full ids); "
+            "effort mapped onto that model's levels; mode forced to bypassPermissions"
+        )
+        details.append(f"claude-home={claude_config_home(resolved)}")
+        details.append(f"auth={describe_claude_auth(resolved)}")
+        details.append(
+            "product `claude` is not ACP; worker is claude-agent-acp "
+            "(@agentclientprotocol/claude-agent-acp)"
+        )
 
     proxy = resolved.get("HTTPS_PROXY") or resolved.get("HTTP_PROXY")
     if proxy:

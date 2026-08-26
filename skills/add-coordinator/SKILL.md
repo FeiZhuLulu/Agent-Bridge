@@ -1,6 +1,6 @@
 ---
 name: add-coordinator
-description: Verify that a new host can act as an Agent Bridge coordinator over stdio MCP. Use when adding a coordinator host, checking MCP/skill/timeout/permission setup for Codex, Cursor, Kimi Code, ZCode, or Grok Build, or when a host can also run as a worker and nested dispatch must stay disabled.
+description: Verify that a new host can act as an Agent Bridge coordinator over stdio MCP. Use when adding a coordinator host, checking MCP/skill/timeout/permission setup for Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code, or when a host can also run as a worker and nested dispatch must stay disabled.
 ---
 
 # Adding a coordinator host to Agent Bridge
@@ -36,8 +36,9 @@ Answer every item below from the host's current official docs and, when possible
 | Kimi Code | `~/.kimi-code/mcp.json` | `~/.kimi-code/skills` | `toolTimeoutMs` (ms) | Default 60 s without override. |
 | ZCode | user `~/.zcode/cli/config.json` (`mcp.servers`); project `<repo>/.zcode/config.json` | `~/.zcode/skills` | `timeoutMs` (ms) | UI "完整配置" accepts `{name:{...}}` or `{mcpServers:{...}}`. That is **not** the native file shape. Same-scope `.zcode` MCP skips `.agents/mcp.json` entirely. |
 | Grok Build | user `~/.grok/config.toml`; project `<repo>/.grok/config.toml` | `~/.grok/skills`, `./.grok/skills`, and `~/.agents/skills` | `startup_timeout_sec` / `tool_timeout_sec` (seconds; tool default 6000) | Also a Worker. MCP stdio inherits the process env (no `env_clear`). Official permission form is `[[permission.rules]]` with `tool = "mcp"` and `{server}__{tool}` names. `[ui] permission_mode` is user-scoped only. |
+| Claude Code | user `~/.claude.json` top-level `mcpServers`; project `<repo>/.mcp.json`; local scope nests under the project path in `~/.claude.json` | `~/.claude/skills` (does not read `~/.agents/skills`) | per-server `timeout` (ms); `MCP_TOOL_TIMEOUT` env; CLI default ~28 h | Also a Worker (`claude-agent-acp`, not product `claude`). Do not put `mcpServers` in `settings.json`. Pre-allow with `permissions.allow = ["mcp__agent-bridge__*"]`. Native rules file is `CLAUDE.md`. |
 
-Bridge already installs the coordinator skill into `.agents`, `.cursor`, `.codex`, `.kimi-code`, and `.zcode`. Grok reads `~/.agents/skills`; do not add a `.grok` copy unless a future host stops reading `.agents`.
+Bridge already installs the coordinator skill into `.agents`, `.cursor`, `.codex`, `.kimi-code`, `.zcode`, and `.claude`. Grok reads `~/.agents/skills`; do not add a `.grok` copy unless a future host stops reading `.agents`.
 
 ## Implementation checklist (coordinator only)
 
@@ -56,7 +57,7 @@ Automation:
 
 Human or live-host:
 
-- A local `lab/` workspace from `scripts/setup_lab.py` (its own git repo, project-scoped host config; not committed). Do not edit the user's global Codex/Cursor/Kimi/ZCode/Grok files for the test, and do not use `tests/` or a Temp folder.
+- A local `lab/` workspace from `scripts/setup_lab.py` (its own git repo, project-scoped host config; not committed). Do not edit the user's global Codex/Cursor/Kimi/ZCode/Grok/Claude files for the test, and do not use `tests/` or a Temp folder.
 - `list_agents` shows `dispatch_enabled=true` at the top-level host.
 - Two worker turns on one `session_id`; the file on disk has both lines.
 - If the host is also a Worker: nested `dispatch_task` is rejected with `nested dispatch is disabled`; nested `cancel_task` / `end_session` are also rejected; nested state lives under `AGENT_BRIDGE_HOME/nested`. Top-level `end_session` still tears down the worker tree and its nested Bridge. Top-level `env_status` does not count that nested Bridge as a sibling.

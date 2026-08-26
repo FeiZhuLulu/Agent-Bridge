@@ -39,6 +39,17 @@
 # KIMI_CODE_HOME = "D:/kimi-code"
 # KIMI_SHELL_PATH = "C:/Program Files/Git/bin/bash.exe"
 
+# Claude Code: product `claude` is not ACP. Install the adapter and log in:
+#   npm install -g @agentclientprotocol/claude-agent-acp @anthropic-ai/claude-code
+#   claude auth login
+# Gateway / OpenRouter (optional) — ANTHROPIC_API_KEY must stay empty:
+# [env.set]
+# ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
+# ANTHROPIC_AUTH_TOKEN = "do-not-commit"
+# CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
+# OPENROUTER_API_KEY is also inherited; if ANTHROPIC_AUTH_TOKEN is unset,
+# Bridge copies it and defaults the base URL to OpenRouter.
+
 # DSH: do not put a personal checkout path in the repo agents.toml.
 # Optional overrides live here or in the process environment:
 # DSH_ACP_BIN = "C:/path/to/dsh-acp-demo/lib/bin.js"

@@ -19,7 +19,7 @@ Connecting a new agent CLI has its own process: [skills/add-worker/SKILL.md](ski
 
 ## Adding a coordinator
 
-Proving a new host can drive existing workers over MCP is a different process: [skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md). That skill does not add adapters or worker entries. Read it before claiming Codex, Cursor, Kimi Code, ZCode, or Grok Build support is complete.
+Proving a new host can drive existing workers over MCP is a different process: [skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md). That skill does not add adapters or worker entries. Read it before claiming Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code support is complete.
 
 ## Pull requests
 

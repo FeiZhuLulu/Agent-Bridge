@@ -2,7 +2,7 @@
 
 > Rulebook for coordinators. Copy to a project root as `AGENTS.md`, or use [skills/agent-bridge](skills/agent-bridge/SKILL.md). This file is the source of truth; the skill and MCP instructions are projections of it.
 
-You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, and OpenCode are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
+You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, OpenCode, and Claude Code are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
 
 ## Mode and user preferences
 
@@ -14,7 +14,7 @@ Call `list_agents` first and re-read `coordinator` before every dispatch.
 
 When the user states a **lasting** preference, persist it with `set_preferences`. Its `instructions` argument replaces the stored text — read the current value first and write the merge. One-off wishes are not preferences.
 
-Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, or `opencode` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
+Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, `opencode`, `claude`, or `claude-agent-acp` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
 
 ## Step 1 — dispatch, or do it yourself?
 
@@ -34,6 +34,7 @@ User `instructions` override this.
 - **Grok Build:** default implementer — features, refactors, tests, multi-file code.
 - **Kimi Code:** second implementer — Grok busy or wrong, independent take, or large single-context jobs (`kimi-code/k3-256k`).
 - **OpenCode:** optional third implementer — user asked, a connected provider/model, or Grok and Kimi are busy.
+- **Claude Code:** optional implementer — user asked, or Grok and Kimi are busy. Worker binary is `claude-agent-acp`, not product `claude`.
 - **DeepSeek Harness:** only if others are unavailable or the user asked.
 
 In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit request is the permission.
@@ -46,6 +47,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - Grok: `grok models` slug + `off|low|medium|high|max` (`off`→`none`, `max`→`xhigh`). `/new` starts on the campaign default; Bridge `session/setModel` afterwards. Trust `get_result.observed_model`, never the "You are Grok 4.6" banner.
    - Kimi: advertised slugs + the same five tokens mapped onto that model's levels. Unknown slug fails; unmappable effort is a warning.
    - OpenCode: advertised `provider/model` + the same five tokens. Unknown slug fails; missing/unmappable effort is a warning. `observed_*` are last values Bridge set. Model switch re-applies effort. Revive via `session/resume`.
+   - Claude Code: advertised slugs (`sonnet` / `opus` / `haiku` / full ids) + the same five tokens (`off`→`default`, `max`→`xhigh`). Unknown slug fails; missing/unmappable effort is a warning. Mode forced to `bypassPermissions`. Revive via `session/resume`.
    - DSH: `provider/model` + `off|low|high|max`. Changing them respawns.
 3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
@@ -53,6 +55,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.
    - ZCode: configure `timeoutMs` 600000; otherwise ~15–20 s polls.
    - Grok Build: official default `tool_timeout_sec` is 6000; set 600. If unsure or the host kills the call, ~30–45 s polls.
+   - Claude Code: per-server `timeout` 600000 (ms) in `.mcp.json`. CLI default is long; desktop has historically died around 60 s — if unsure, ~45 s polls.
 4. `get_result`, then `git status` / `git diff` yourself. Run the relevant build and tests. Do not trust the worker's self-report. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
 5. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list. At most three follow-ups, then fix it yourself.
 6. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.

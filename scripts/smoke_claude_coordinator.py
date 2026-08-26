@@ -72,34 +72,26 @@ def prepare_lab(lab: Path, opencode_model: str) -> tuple[Path, Path]:
     env = mcp["mcpServers"]["agent-bridge"].setdefault("env", {})
     env["AGENT_BRIDGE_HOME"] = str(bridge_home)
     env["PATH"] = os.environ.get("PATH", "")
-    for key in (
-        "OPENROUTER_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "OPENCODE_API_KEY",
-    ):
-        value = os.environ.get(key)
-        if value:
-            env[key] = value
+    venv = ROOT / ".venv"
+    if venv.is_dir():
+        env["VIRTUAL_ENV"] = str(venv)
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_data_home:
+        env["XDG_DATA_HOME"] = xdg_data_home
+    if xdg_config_home:
+        env["XDG_CONFIG_HOME"] = xdg_config_home
+    # Do not copy API keys into .mcp.json. Claude Code inherits process env.
     _write_json(mcp_path, mcp)
 
-    settings = lab / ".claude" / "settings.json"
-    _write_json(
-        settings,
-        {
-            "permissions": {"allow": ["mcp__agent-bridge__*"]},
-            "enableAllProjectMcpServers": True,
-            "enabledMcpjsonServers": ["agent-bridge"],
-        },
-    )
-
-    skill_src = ROOT / "skills" / "agent-bridge" / "SKILL.md"
-    skill_dest = lab / ".claude" / "skills" / "agent-bridge" / "SKILL.md"
-    skill_dest.parent.mkdir(parents=True, exist_ok=True)
-    skill_dest.write_text(skill_src.read_text(encoding="utf-8"), encoding="utf-8")
+    trust = {
+        "permissions": {"allow": ["mcp__agent-bridge__*"]},
+        "enableAllProjectMcpServers": True,
+        "enabledMcpjsonServers": ["agent-bridge"],
+    }
+    _write_json(lab / ".claude" / "settings.json", trust)
+    # Claude Code persists project-MCP approval in local settings.
+    _write_json(lab / ".claude" / "settings.local.json", trust)
 
     (lab / "CLAUDE.md").write_text(
         "\n".join(
@@ -167,6 +159,8 @@ def collect_tools(stream_text: str) -> list[str]:
 def run_claude(lab: Path, mcp_path: Path, prompt: str, claude_home: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CLAUDE_CONFIG_DIR"] = str(claude_home)
+    stdout_path = lab / "_claude_coordinator.stream.jsonl"
+    stderr_path = lab / "_claude_coordinator.stderr.txt"
     argv = [
         "claude",
         "-p",
@@ -177,23 +171,29 @@ def run_claude(lab: Path, mcp_path: Path, prompt: str, claude_home: Path) -> sub
         "--permission-mode",
         "bypassPermissions",
         "--dangerously-skip-permissions",
+        "--disable-slash-commands",
         "--output-format",
         "stream-json",
         "--verbose",
         "--disallowedTools",
-        "Write,Edit,NotebookEdit,Bash",
+        "Write,Edit,NotebookEdit,Bash,Skill",
         "--allowedTools",
         "mcp__agent-bridge__list_agents,mcp__agent-bridge__dispatch_task,mcp__agent-bridge__wait_task,mcp__agent-bridge__check_task,mcp__agent-bridge__get_result,mcp__agent-bridge__get_transcript,mcp__agent-bridge__list_sessions,mcp__agent-bridge__end_session,Read",
     ]
-    print("run:", " ".join(argv[:6]), "...")
-    return subprocess.run(
-        argv,
-        cwd=str(lab),
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=600,
-    )
+    print("run:", " ".join(argv[:4]), "...")
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        completed = subprocess.run(
+            argv,
+            cwd=str(lab),
+            env=env,
+            text=True,
+            stdout=stdout,
+            stderr=stderr,
+            timeout=720,
+        )
+    completed.stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+    completed.stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    return completed
 
 
 def prompt_for(lab: Path, opencode_model: str) -> str:
@@ -250,18 +250,43 @@ def main() -> int:
     mcp_path, bridge_home = prepare_lab(lab, args.model)
     claude_home = (lab / "_claude_home").resolve()
     claude_home.mkdir(parents=True, exist_ok=True)
+    user_cfg = claude_home / ".claude.json"
+    existing: dict = {}
+    if user_cfg.is_file():
+        try:
+            existing = json.loads(user_cfg.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+    projects = existing.setdefault("projects", {})
+    projects[str(lab)] = {
+        **(projects.get(str(lab)) or {}),
+        "hasTrustDialogAccepted": True,
+        "hasCompletedProjectOnboarding": True,
+        "enableAllProjectMcpServers": True,
+        "enabledMcpjsonServers": ["agent-bridge"],
+    }
+    _write_json(user_cfg, existing)
 
     print("lab", lab)
     print("mcp", mcp_path)
     print("bridge_home", bridge_home)
     print("opencode model", args.model)
 
-    completed = run_claude(lab, mcp_path, prompt_for(lab, args.model), claude_home)
+    try:
+        completed = run_claude(lab, mcp_path, prompt_for(lab, args.model), claude_home)
+    except subprocess.TimeoutExpired:
+        print("claude timed out")
+        completed = subprocess.CompletedProcess(
+            args=["claude"],
+            returncode=124,
+            stdout=(lab / "_claude_coordinator.stream.jsonl").read_text(encoding="utf-8", errors="replace")
+            if (lab / "_claude_coordinator.stream.jsonl").is_file()
+            else "",
+            stderr=(lab / "_claude_coordinator.stderr.txt").read_text(encoding="utf-8", errors="replace")
+            if (lab / "_claude_coordinator.stderr.txt").is_file()
+            else "",
+        )
     out = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    log_path = lab / "_claude_coordinator.stream.jsonl"
-    log_path.write_text(completed.stdout or "", encoding="utf-8")
-    if completed.stderr:
-        (lab / "_claude_coordinator.stderr.txt").write_text(completed.stderr, encoding="utf-8")
     print("claude exit", completed.returncode)
     tools = collect_tools(out)
     print("mcp tools seen:", tools)

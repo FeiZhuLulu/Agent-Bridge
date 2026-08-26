@@ -13,6 +13,7 @@ from setup_lab import resolve_command, write_host_configs
 def test_resolve_command_prefers_checkout_venv():
     command, args = resolve_command(ROOT)
     assert Path(command).is_file()
+    assert ".venv" in Path(command).as_posix()
     if args:
         assert args == ["-m", "agent_bridge"]
 

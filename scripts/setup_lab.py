@@ -16,7 +16,10 @@ def resolve_command(root: Path = ROOT) -> tuple[str, list[str]]:
     for relative in (Path(".venv") / "Scripts" / "python.exe", Path(".venv") / "bin" / "python"):
         python = root / relative
         if python.is_file():
-            return str(python.resolve()), ["-m", "agent_bridge"]
+            # Keep the venv launcher. Path.resolve() follows the Linux
+            # .venv/bin/python -> /usr/bin/python3 symlink and then
+            # `python -m agent_bridge` misses the venv site-packages.
+            return str(python), ["-m", "agent_bridge"]
     exe = shutil.which("agent-bridge")
     if exe:
         return str(Path(exe).resolve()), []

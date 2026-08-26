@@ -46,8 +46,12 @@ def test_prepare_lab_writes_headless_mcp_trust(tmp_path, monkeypatch):
     assert "agent-bridge" in body
     assert str(bridge_home) in body
     settings = (lab / ".claude" / "settings.json").read_text(encoding="utf-8")
+    local = (lab / ".claude" / "settings.local.json").read_text(encoding="utf-8")
     assert "enableAllProjectMcpServers" in settings
+    assert "enabledMcpjsonServers" in local
     assert "mcp__agent-bridge__*" in settings
     assert (lab / "CLAUDE.md").is_file()
-    assert (lab / ".claude" / "skills" / "agent-bridge" / "SKILL.md").is_file()
+    assert not (lab / ".claude" / "skills" / "agent-bridge" / "SKILL.md").exists()
     assert DEFAULT_OPENCODE_MODEL in (lab / "opencode.json").read_text(encoding="utf-8")
+    assert "OPENROUTER_API_KEY" not in body
+    assert "ANTHROPIC_AUTH_TOKEN" not in body

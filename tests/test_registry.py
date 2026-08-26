@@ -117,6 +117,23 @@ async def test_relative_cwd_rejected(bridge_home):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_rejects_missing_cwd_and_file_path(bridge_home, tmp_path):
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        with pytest.raises(ValueError, match="does not exist"):
+            await registry.dispatch_task("fake", "x", cwd=str(tmp_path / "missing"))
+        file_path = tmp_path / "file.txt"
+        file_path.write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError, match="directory"):
+            await registry.dispatch_task("fake", "x", cwd=str(file_path))
+        assert registry.sessions == {}
+        assert registry.tasks == {}
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_bridge_restart_marks_running_failed(bridge_home):
     atomic_write_json(
         state_path(bridge_home),

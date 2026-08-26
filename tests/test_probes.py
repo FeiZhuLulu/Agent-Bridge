@@ -160,3 +160,30 @@ async def test_claude_probe_maps_openrouter_key_as_gateway(tmp_path, monkeypatch
     )
     assert row["available"] is True
     assert "auth=gateway" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_claude_probe_keeps_direct_anthropic_key_when_openrouter_is_set(tmp_path, monkeypatch):
+    row = await _probe_claude(
+        monkeypatch,
+        {
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "OPENROUTER_API_KEY": "sk-or-x",
+            "ANTHROPIC_API_KEY": "sk-ant-x",
+        },
+    )
+    assert row["available"] is True
+    assert "auth=api-key" in row["detail"]
+    assert "auth=gateway" not in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_claude_probe_does_not_treat_mcp_config_as_oauth(tmp_path, monkeypatch):
+    (tmp_path / ".claude.json").write_text(
+        '{"mcpServers": {"agent-bridge": {"command": "agent-bridge"}}}',
+        encoding="utf-8",
+    )
+    row = await _probe_claude(monkeypatch, {"CLAUDE_CONFIG_DIR": str(tmp_path)})
+    assert row["available"] is True
+    assert "auth=oauth" not in row["detail"]
+    assert "auth=missing" in row["detail"]

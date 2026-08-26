@@ -14,6 +14,7 @@ blanks it when a gateway token and base URL are both present.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -63,16 +64,25 @@ def apply_claude_gateway_env(env: Mapping[str, str]) -> dict[str, str]:
     Claude Code sends ``ANTHROPIC_API_KEY`` as ``x-api-key`` and treats it as
     a direct Anthropic login. An empty string is required so a gateway
     ``ANTHROPIC_AUTH_TOKEN`` is what actually authenticates.
+
+    ``OPENROUTER_API_KEY`` is borrowed only when the user is not already on
+    a direct Anthropic key, or they already set ``ANTHROPIC_BASE_URL``.
+    A machine that uses OpenRouter for OpenCode and Anthropic for Claude
+    must keep the Anthropic key.
     """
     out = dict(env)
     token = (out.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    api_key = (out.get("ANTHROPIC_API_KEY") or "").strip()
+    base_url = (out.get("ANTHROPIC_BASE_URL") or "").strip()
     openrouter = (out.get("OPENROUTER_API_KEY") or "").strip()
-    if not token and openrouter:
+    can_map_openrouter = bool(openrouter) and not token and (not api_key or bool(base_url))
+    if can_map_openrouter:
         out["ANTHROPIC_AUTH_TOKEN"] = openrouter
         token = openrouter
-        if not (out.get("ANTHROPIC_BASE_URL") or "").strip():
+        if not base_url:
             out["ANTHROPIC_BASE_URL"] = OPENROUTER_ANTHROPIC_BASE
-    if token and (out.get("ANTHROPIC_BASE_URL") or "").strip():
+            base_url = OPENROUTER_ANTHROPIC_BASE
+    if token and base_url:
         out["ANTHROPIC_API_KEY"] = ""
     return out
 
@@ -93,16 +103,38 @@ def describe_claude_auth(env: Mapping[str, str] | None = None) -> str:
     if (resolved.get("ANTHROPIC_AUTH_TOKEN") or "").strip():
         return "auth-token"
     home = claude_config_home(resolved)
-    candidates = (
-        home / ".credentials.json",
-        home / "credentials.json",
-        home / ".claude.json",
-        Path.home() / ".claude.json",
-    )
-    for path in candidates:
-        try:
-            if path.is_file():
-                return "oauth"
-        except OSError:
-            continue
+    for path in (home / ".credentials.json", home / "credentials.json"):
+        if _is_file(path):
+            return "oauth"
+    # ~/.claude.json is the coordinator MCP/user file. Existence is not a
+    # login. Isolated CLAUDE_CONFIG_DIR must not peek at the real home file.
+    if _json_has_oauth(home / ".claude.json"):
+        return "oauth"
+    isolated = bool((env or {}).get("CLAUDE_CONFIG_DIR", "").strip())
+    if not isolated and _json_has_oauth(Path.home() / ".claude.json"):
+        return "oauth"
     return "missing (run `claude auth login`, or set ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)"
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _json_has_oauth(path: Path) -> bool:
+    """True only when a JSON object actually carries an oauth payload."""
+    if not _is_file(path):
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    for key in ("oauthAccount", "claudeAiOauth"):
+        value = data.get(key)
+        if isinstance(value, dict) and value:
+            return True
+    return False

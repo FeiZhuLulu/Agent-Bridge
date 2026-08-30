@@ -2,7 +2,7 @@
 
 > Rulebook for coordinators. Copy to a project root as `AGENTS.md`, or use [skills/agent-bridge](skills/agent-bridge/SKILL.md). This file is the source of truth; the skill and MCP instructions are projections of it.
 
-You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, OpenCode, and Claude Code are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
+You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, OpenCode, Claude Code, and Codex CLI are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
 
 ## Mode and user preferences
 
@@ -14,7 +14,7 @@ Call `list_agents` first and re-read `coordinator` before every dispatch.
 
 When the user states a **lasting** preference, persist it with `set_preferences`. Its `instructions` argument replaces the stored text — read the current value first and write the merge. One-off wishes are not preferences.
 
-Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, `opencode`, `claude`, or `claude-agent-acp` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
+Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, or `codex` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
 
 ## Step 1 — dispatch, or do it yourself?
 
@@ -35,6 +35,7 @@ User `instructions` override this.
 - **Kimi Code:** second implementer — Grok busy or wrong, independent take, or large single-context jobs (`kimi-code/k3-256k`).
 - **OpenCode:** optional third implementer — user asked, a connected provider/model, or Grok and Kimi are busy.
 - **Claude Code:** optional implementer — user asked, or Grok and Kimi are busy. Worker binary is `claude-agent-acp`, not product `claude`.
+- **Codex CLI:** optional implementer — user asked, or others are busy. Desktop-bundled `codex exec`, not the Desktop GUI. Same product as this coordinator is a different process.
 - **DeepSeek Harness:** only if others are unavailable or the user asked.
 
 In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit request is the permission.
@@ -49,6 +50,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - OpenCode: advertised `provider/model` + the same five tokens. Unknown slug fails; missing/unmappable effort is a warning. `observed_*` are last values Bridge set. Model switch re-applies effort. Revive via `session/resume`.
    - Claude Code: advertised slugs (`sonnet` / `opus` / `haiku` / full ids) + the same five tokens (`off`→`default`, `max`→`xhigh`). Unknown slug fails; missing/unmappable effort is a warning. Mode forced to `bypassPermissions`. Revive via `session/resume`.
    - DSH: `provider/model` + `off|low|high|max`. Changing them respawns.
+   - Codex CLI: advertised slugs + `off|low|medium|high|max` (`off`→`none`). Default `--approve-for-me`; prompt on stdin. Revive via `exec resume`. Startup failures before JSONL are returned in `get_result.error`.
 3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
    - Cursor: host ~45–60 s; pass ~30 and loop.

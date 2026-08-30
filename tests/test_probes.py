@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.config import AgentConfig, EnvConfig
-from agent_bridge.probes import probe_agent
+from agent_bridge.probes import command_exists, probe_agent
 from agent_bridge.worker_env import WORKER_CONTEXT_ENV, WORKER_CONTEXT_VALUE
 
 
@@ -96,6 +96,31 @@ async def test_dsh_probe_unavailable_when_launcher_cannot_start(monkeypatch):
     )
     assert row["available"] is False
     assert "tsx" in (row["detail"] or "")
+
+
+@pytest.mark.asyncio
+async def test_codex_probe_routes_custom_agent_name_by_protocol(monkeypatch):
+    captured: dict = {}
+
+    def fake_resolve(command, fallbacks=None, *, env=None):
+        captured["env"] = env
+        return ["codex-test"]
+
+    async def fake_version(_exe):
+        return "codex-cli test"
+
+    worker_env = {"CODEX_CLI_PATH": "desktop-codex"}
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: worker_env)
+    monkeypatch.setattr("agent_bridge.probes.resolve_codex_command", fake_resolve)
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    cfg = AgentConfig(name="codex-alt", protocol="codex", command=["codex"])
+
+    row = await probe_agent(cfg, EnvConfig(discover_proxy=False, inherit=[]))
+
+    assert row["available"] is True
+    assert captured["env"] is worker_env
+    assert "model=codex slugs" in row["detail"]
+    assert command_exists(cfg) is True
 
 
 @pytest.mark.asyncio

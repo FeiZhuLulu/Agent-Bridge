@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
+from agent_bridge.codex_exec import resolve_codex_command
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import reap_subprocess, resolve_command
@@ -65,9 +66,16 @@ def _kimi_auth(env: dict[str, str]) -> str:
 async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> dict:
     if cfg.protocol == "fake":
         return {"agent": cfg.name, "available": True, "version": "fake", "detail": "in-process fake adapter"}
+    resolved = build_worker_env(
+        cfg.env,
+        config=env_config,
+        log_fill=False,
+    )
     try:
         if cfg.name == "dsh":
             command = resolve_dsh_command(cfg.command, cfg.fallback_commands)
+        elif cfg.protocol == "codex":
+            command = resolve_codex_command(cfg.command, cfg.fallback_commands, env=resolved)
         else:
             command = resolve_command(cfg.command, cfg.fallback_commands)
     except FileNotFoundError as exc:
@@ -75,11 +83,6 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
 
     details: list[str] = [f"command={command[0]}"]
     version = await _version_string(command[0])
-    resolved = build_worker_env(
-        cfg.env,
-        config=env_config,
-        log_fill=False,
-    )
 
     if cfg.name == "dsh":
         bin_path = next((arg for arg in command if arg.endswith((".js", ".ts"))), None)
@@ -151,6 +154,16 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             "(@agentclientprotocol/claude-agent-acp)"
         )
 
+    if cfg.protocol == "codex":
+        details.append(
+            "model=codex slugs e.g. gpt-5.6-sol; "
+            "effort=off|low|medium|high|max (off->none); "
+            "default --approve-for-me, prompt via stdin"
+        )
+        details.append(
+            "auth=$CODEX_HOME or ~/.codex ChatGPT login or CODEX_API_KEY / OPENAI_API_KEY"
+        )
+
     proxy = resolved.get("HTTPS_PROXY") or resolved.get("HTTP_PROXY")
     if proxy:
         details.append("proxy=set")
@@ -171,6 +184,12 @@ def command_exists(cfg: AgentConfig) -> bool:
     try:
         if cfg.name == "dsh":
             resolve_dsh_command(cfg.command, cfg.fallback_commands)
+        elif cfg.protocol == "codex":
+            resolve_codex_command(
+                cfg.command,
+                cfg.fallback_commands,
+                env=build_worker_env(cfg.env, log_fill=False),
+            )
         else:
             resolve_command(cfg.command, cfg.fallback_commands)
         return True

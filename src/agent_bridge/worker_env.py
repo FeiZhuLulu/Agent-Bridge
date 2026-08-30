@@ -164,7 +164,7 @@ def parse_powershell_grok_proxy(text: str) -> dict[str, str]:
     never run when Bridge spawn the raw executable. Scan those function
     bodies first so a machine that only set the proxy there still works.
     """
-    for name in ("grok", "opencode", "kimi", "agy", "claude"):
+    for name in ("grok", "opencode", "kimi", "agy", "claude", "codex"):
         body = extract_powershell_function(text, name)
         if not body:
             continue

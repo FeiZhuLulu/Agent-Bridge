@@ -27,6 +27,9 @@ inherit = [
   "XAI_API_KEY",
   "GROK_API_KEY",
   "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "CODEX_CLI_PATH",
+  "CODEX_HOME",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
@@ -139,5 +142,14 @@ idle_unload_sec = 900
 protocol = "agy"
 command = ["agy"]
 print_timeout = "120m"
+revivable = true
+idle_unload_sec = 0
+
+[agents.codex]
+protocol = "codex"
+# PATH `codex` is last. Bridge prefers Desktop's CODEX_CLI_PATH / Local\\OpenAI\\Codex\\bin.
+command = ["codex"]
+# Default is --approve-for-me (auto review + workspace-write). yolo is explicit only.
+# session_meta = { yolo = true }
 revivable = true
 idle_unload_sec = 0

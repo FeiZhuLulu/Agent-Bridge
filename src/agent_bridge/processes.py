@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -142,6 +143,34 @@ def _wait_and_kill_tree(pid: int, timeout: float = 5.0) -> None:
             leftover.kill()
         except psutil.Error:
             pass
+
+
+async def interrupt_then_reap(proc: Any | None, timeout: float = 3.0) -> None:
+    """Ask the process to stop, then escalate to terminate/kill.
+
+    Windows workers started with ``CREATE_NEW_PROCESS_GROUP`` get
+    ``CTRL_BREAK_EVENT`` first so Codex exec can run ``turn/interrupt``.
+    Unix workers get ``SIGINT``. If that does not finish the process,
+    ``reap_subprocess`` terminates then kills the tree.
+    """
+    if proc is None or getattr(proc, "returncode", None) is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    try:
+        if sys.platform == "win32" and pid:
+            os.kill(pid, signal.CTRL_BREAK_EVENT)
+        elif hasattr(proc, "send_signal"):
+            proc.send_signal(signal.SIGINT)
+        else:
+            kill_tree(pid, handle=proc)
+    except (ProcessLookupError, PermissionError, OSError, ValueError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return
+    except TimeoutError:
+        pass
+    await reap_subprocess(proc, timeout=timeout)
 
 
 async def reap_subprocess(proc: Any | None, timeout: float = 5.0) -> None:

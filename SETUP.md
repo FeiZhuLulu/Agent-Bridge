@@ -1,6 +1,6 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build and Claude Code are both); those are different processes and different session roles.
+Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build, Claude Code, and Codex CLI are); those are different processes and different session roles.
 
 ## Install
 
@@ -271,7 +271,7 @@ Live coordinator loop (product `claude` as host, OpenCode as worker): `uv run py
 
 ## Environment and proxy
 
-Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
+Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code, Codex) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
 2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` / `claude-agent-acp` directly, so PowerShell functions that wrap those CLIs never run.
@@ -384,7 +384,7 @@ The coordinator can pin a worker model and thinking intensity on `dispatch_task`
 dispatch_task(agent="antigravity", model="gemini-3.7-flash", effort="low", ...)
 ```
 
-`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process. Claude Code accepts a slug the session advertises (`sonnet`, `opus`, `haiku`, or a full id) plus `effort=off|low|medium|high|max` mapped onto that model's levels (`off` → `default`, `max` → `xhigh` unless the session lists `max`).
+`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process. Claude Code accepts a slug the session advertises (`sonnet`, `opus`, `haiku`, or a full id) plus `effort=off|low|medium|high|max` mapped onto that model's levels (`off` → `default`, `max` → `xhigh` unless the session lists `max`). Codex CLI accepts a Codex slug plus `effort=off|low|medium|high|max` (`off` → `none`). Bridge runs `codex exec --json` with the prompt on stdin and `--approve-for-me` by default.
 
 ## Worker: Kimi Code
 
@@ -419,6 +419,18 @@ OpenCode has **no product login**. You connect providers by storing API keys (or
 
 If OpenCode's configured default model is disabled, the first prompt fails with `Model is disabled`. Pass a slug from `opencode models` for a provider that still has a working key.
 
+## Worker: Codex CLI
+
+Bridge drives Desktop-bundled or PATH `codex` through `codex exec --json`. It does not open ChatGPT.exe. Discovery order: `CODEX_CLI_PATH` (env or `$CODEX_HOME/config.toml` / `~/.codex/config.toml`), then `%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<hash>\\codex.exe` (newest mtime among binaries that pass `exec --help` capability checks), then PATH `codex`.
+
+Login stays in `$CODEX_HOME` when set, otherwise `~/.codex`. `--ignore-user-config` skips Desktop `config.toml` (MCP / Computer Use), and Bridge adds `-c cli_auth_credentials_store="auto"` so ChatGPT login still resolves from keyring or `auth.json`. Project `.codex/config.toml`, `AGENTS.md`, and execpolicy rules can still apply. Bridge inherits `CODEX_HOME` so a custom home used by Desktop is visible to the worker.
+
+Default approval is `--approve-for-me` (auto review + workspace-write). `--yolo` is only used when `[agents.codex] session_meta = { yolo = true }`. Prompt is UTF-8 stdin (`-`), never an argv string.
+
+`dispatch_task.model` is a Codex slug (`gpt-5.6-sol`, …). `effort` maps `off` → `none`; `low|medium|high|max` pass through. Follow-ups reuse `exec resume <thread_id>`.
+
+Config, login, or execpolicy failures that happen before JSONL starts return a bounded stderr tail in `get_result.error`. `get_transcript` keeps the upstream `turn.completed` payload as `raw` and records one normalized `turn_end` per completed turn.
+
 ## Worker: Claude Code
 
 Product `claude` has **no** ACP profile. Bridge drives the published adapter:
@@ -443,4 +455,4 @@ If `OPENROUTER_API_KEY` is set and `ANTHROPIC_AUTH_TOKEN` is not, Bridge copies 
 
 ## Permissions
 
-Worker CLIs run in always-approve / skip-permissions mode. Review is the coordinator's job: `git diff`, build, tests. Cap follow-up turns at three, then the coordinator patches the rest.
+Most worker CLIs run in always-approve / skip-permissions mode. Codex CLI defaults to `--approve-for-me` (auto review + workspace-write); `--yolo` is opt-in via `[agents.codex] session_meta = { yolo = true }`. Review is the coordinator's job: `git diff`, build, tests. Cap follow-up turns at three, then the coordinator patches the rest.

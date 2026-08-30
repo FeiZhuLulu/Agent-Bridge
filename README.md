@@ -13,7 +13,7 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, and Claude Code. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, and Codex CLI. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
 ```text
 User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code)
@@ -23,6 +23,7 @@ User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude C
                           → DeepSeek Harness
                           → OpenCode
                           → Claude Code
+                          → Codex CLI
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -118,7 +119,7 @@ uv run pytest
 
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code、Codex CLI 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
 
 ```text
 用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code）
@@ -128,6 +129,7 @@ Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——
                           → DeepSeek Harness
                           → OpenCode
                           → Claude Code
+                          → Codex CLI
 ```
 
 它不操作图形界面。用户只和协调者对话。

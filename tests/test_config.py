@@ -29,6 +29,13 @@ def test_loads_bundled_agents():
     assert cfg.agents["claude"].command == ["claude-agent-acp"]
     assert cfg.agents["claude"].fallback_commands == [["claude-code-acp"]]
     assert cfg.agents["claude"].revivable is True
+    assert cfg.agents["codex"].protocol == "codex"
+    assert cfg.agents["codex"].command == ["codex"]
+    assert cfg.agents["codex"].revivable is True
+    assert cfg.agents["codex"].idle_unload_sec == 0
+    assert "CODEX_API_KEY" in cfg.env.inherit
+    assert "CODEX_CLI_PATH" in cfg.env.inherit
+    assert "CODEX_HOME" in cfg.env.inherit
     assert "ANTHROPIC_AUTH_TOKEN" in cfg.env.inherit
     assert "ANTHROPIC_BASE_URL" in cfg.env.inherit
     assert "CLAUDE_CONFIG_DIR" in cfg.env.inherit

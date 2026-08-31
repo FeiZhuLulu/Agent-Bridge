@@ -109,6 +109,20 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 | `list_sessions` | Known sessions |
 | `end_session` | Shut down a worker process |
 
+### Coordinator mode
+
+Three levels. Default `auto`. First connect does not ask, and does not write `mode` into your overlay.
+
+- `manual` — only when you explicitly ask; Bridge rejects the rest
+- `auto` — the coordinator decides
+- `eager` — prefer dispatching multi-step work; the coordinator still accepts
+
+Change it in chat, or set `[coordinator] mode` in `~/.agent-bridge/agents.toml`. Per-host: `AGENT_BRIDGE_MODE` in that host's MCP `env`. Lasting routing ("research goes to antigravity") is saved the same way. Details: [SETUP.md](SETUP.md).
+
+### Orchestration rulebook
+
+[ORCHESTRATION.md](ORCHESTRATION.md) is the coordinator rulebook: when to dispatch, to whom, how to verify. The skill and MCP handshake instructions are projections of it. First start writes the skill; copy this file into a project as `AGENTS.md` only if a host has no skills. Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md). This repo's `AGENTS.md` is for developing Bridge, not for end users.
+
 ### Tests
 
 ```powershell
@@ -214,6 +228,20 @@ revivable = true
 | `cancel_task` | 取消进行中的回合 |
 | `list_sessions` | 已知会话 |
 | `end_session` | 关掉 worker 进程 |
+
+### 协调者档位
+
+三档。默认 `auto`。第一次接入不会询问，也不会把 `mode` 写进 overlay。
+
+- `manual` — 只在你明确要求时才派；其它派发会被 Bridge 拒绝
+- `auto` — 协调者自己判断
+- `eager` — 多步工作优先派出去；验收仍是协调者
+
+对话里改，或在 `~/.agent-bridge/agents.toml` 写 `[coordinator] mode`。单个宿主不同档：该宿主 MCP 的 `env` 里设 `AGENT_BRIDGE_MODE`。长久路由（「调研都给 antigravity」）同样在对话里说一次即可。细节见 [SETUP.md](SETUP.md)。
+
+### 协调规则书
+
+[ORCHESTRATION.md](ORCHESTRATION.md) 是给协调者的规则书：什么时候派、派给谁、怎么验收。skill 和 MCP 握手 instructions 是它的投影。第一次启动会写入 skill；只有宿主没有 skill 时，才需要把这份文件拷进项目并命名为 `AGENTS.md`。中文译本：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)。本仓库的 `AGENTS.md` 只约束开发 Bridge，不是给最终用户的。
 
 ### 测试
 

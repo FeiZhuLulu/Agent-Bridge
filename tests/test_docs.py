@@ -77,6 +77,18 @@ def test_orchestration_english_stays_under_char_budget():
     assert len(text) <= 9500
 
 
+def test_readme_explains_coordinator_modes():
+    readme = _read("README.md")
+    for token in ("manual", "auto", "eager", "AGENT_BRIDGE_MODE"):
+        assert token in readme
+    assert "does not ask" in readme
+    assert "不会询问" in readme
+    assert "[coordinator] mode" in readme
+    assert "ORCHESTRATION.md" in readme
+    assert "ORCHESTRATION.zh-CN.md" in readme
+    assert "协调规则书" in readme
+
+
 def test_live_workspace_is_local_lab_not_pytest():
     readme = _read("README.md")
     setup = _read("SETUP.md")

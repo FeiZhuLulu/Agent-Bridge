@@ -4,13 +4,14 @@ import asyncio
 import contextlib
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agent_bridge.adapters.fake import FakeAdapter
 from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
-from agent_bridge.paths import result_path, state_path
+from agent_bridge.paths import result_path, state_path, transcript_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.registry import (
     NESTED_CANCEL_ERROR,
@@ -941,3 +942,163 @@ async def test_files_changed_uncapped_when_under_limit(bridge_home, tmp_path):
         assert waited["files_changed_total"] == len(waited["files_changed"])
     finally:
         await registry.stop()
+
+
+def _dead_session(session_id: str, cwd: str, last_active_at: str, proc_state: ProcState = ProcState.dead) -> Session:
+    return Session(
+        session_id=session_id,
+        agent="fake",
+        cwd=cwd,
+        proc_state=proc_state,
+        last_active_at=last_active_at,
+    )
+
+
+def _completed_task(task_id: str, session_id: str, cwd: str, created_at: str) -> Task:
+    return Task(
+        task_id=task_id,
+        session_id=session_id,
+        agent="fake",
+        message="x",
+        cwd=cwd,
+        status=TaskStatus.completed,
+        created_at=created_at,
+    )
+
+
+def test_prune_sessions_by_count(bridge_home, tmp_path):
+    cwd = str(tmp_path)
+    registry = Registry.create(bridge_home)
+    base = datetime.now(UTC)
+    for index in range(60):
+        session_id = f"sess_{index:03d}"
+        task_id = f"task_{index:03d}"
+        stamp = iso(base + timedelta(seconds=index))
+        registry.sessions[session_id] = _dead_session(session_id, cwd, stamp)
+        registry.tasks[task_id] = _completed_task(task_id, session_id, cwd, stamp)
+        registry._done[task_id] = asyncio.Event()
+        result_path(task_id, bridge_home).write_text("ok\n", encoding="utf-8")
+    registry._prune()
+    kept = {f"sess_{index:03d}" for index in range(10, 60)}
+    assert set(registry.sessions) == kept
+    for index in range(10):
+        assert f"task_{index:03d}" not in registry.tasks
+        assert f"task_{index:03d}" not in registry._done
+        assert not result_path(f"task_{index:03d}", bridge_home).exists()
+    for index in range(10, 60):
+        assert f"task_{index:03d}" in registry.tasks
+        assert result_path(f"task_{index:03d}", bridge_home).is_file()
+
+
+def test_prune_sessions_by_age(bridge_home, tmp_path):
+    cwd = str(tmp_path)
+    registry = Registry.create(bridge_home)
+    now = datetime.now(UTC)
+    registry.sessions["sess_old"] = _dead_session(
+        "sess_old", cwd, iso(now - timedelta(days=20)), ProcState.idle_unloaded
+    )
+    registry.sessions["sess_mid"] = _dead_session(
+        "sess_mid", cwd, iso(now - timedelta(days=2)), ProcState.idle_unloaded
+    )
+    registry.sessions["sess_new"] = _dead_session(
+        "sess_new", cwd, iso(now), ProcState.idle_unloaded
+    )
+    registry._prune()
+    assert "sess_old" not in registry.sessions
+    assert {"sess_mid", "sess_new"} <= set(registry.sessions)
+
+
+def test_prune_never_touches_active(bridge_home, tmp_path):
+    cwd = str(tmp_path)
+    registry = Registry.create(bridge_home)
+    old = iso(datetime.now(UTC) - timedelta(days=20))
+    for session_id, state in (
+        ("sess_busy", ProcState.busy),
+        ("sess_ready", ProcState.ready),
+        ("sess_spawning", ProcState.spawning),
+    ):
+        registry.sessions[session_id] = _dead_session(session_id, cwd, old, state)
+    held = _dead_session("sess_held", cwd, old, ProcState.idle_unloaded)
+    registry.sessions["sess_held"] = held
+    registry._adapters["sess_held"] = FakeAdapter(registry.config.get("fake"), registry.home)
+    queued = _dead_session("sess_queued", cwd, old, ProcState.idle_unloaded)
+    registry.sessions["sess_queued"] = queued
+    registry.tasks["task_queued"] = Task(
+        task_id="task_queued",
+        session_id="sess_queued",
+        agent="fake",
+        message="x",
+        cwd=cwd,
+        status=TaskStatus.queued,
+        created_at=old,
+    )
+    registry._prune()
+    assert set(registry.sessions) >= {"sess_busy", "sess_ready", "sess_spawning", "sess_held", "sess_queued"}
+    assert "task_queued" in registry.tasks
+
+
+def test_prune_tasks_global_cap(bridge_home, tmp_path):
+    cwd = str(tmp_path)
+    registry = Registry.create(bridge_home)
+    base = datetime.now(UTC)
+    index = 0
+    for session_n in range(15):
+        session_id = f"sess_{session_n:02d}"
+        registry.sessions[session_id] = _dead_session(session_id, cwd, iso(base))
+        for _ in range(20):
+            task_id = f"task_{index:03d}"
+            registry.tasks[task_id] = _completed_task(
+                task_id, session_id, cwd, iso(base + timedelta(seconds=index))
+            )
+            index += 1
+    registry._prune()
+    assert len(registry.tasks) <= 200
+    assert "task_000" not in registry.tasks
+    assert "task_299" in registry.tasks
+    remaining = sorted(registry.tasks)
+    assert remaining == [f"task_{n:03d}" for n in range(100, 300)]
+
+
+@pytest.mark.asyncio
+async def test_start_prunes_stale_sessions(bridge_home, tmp_path):
+    cwd = str(tmp_path)
+    base = datetime.now(UTC)
+    atomic_write_json(
+        state_path(bridge_home),
+        {
+            "sessions": [
+                _dead_session(
+                    f"sess_{index:03d}",
+                    cwd,
+                    iso(base + timedelta(seconds=index)),
+                ).model_dump(mode="json")
+                for index in range(60)
+            ],
+            "tasks": [],
+        },
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert len(registry.sessions) == 50
+        disk = read_json(state_path(bridge_home), {})
+        assert len(disk["sessions"]) == 50
+        assert {row["session_id"] for row in disk["sessions"]} == set(registry.sessions)
+    finally:
+        await registry.stop()
+
+
+def test_get_transcript_survives_pruned_session(bridge_home):
+    session_id = "sess_pruned"
+    path = transcript_path(session_id, bridge_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"ts":"2026-01-01T00:00:00+00:00","type":"message_chunk","data":{"text":"kept"}}\n',
+        encoding="utf-8",
+    )
+    registry = Registry.create(bridge_home)
+    page = registry.get_transcript(session_id)
+    assert page["total_matching"] == 1
+    assert page["events"][0]["data"]["text"] == "kept"
+    with pytest.raises(KeyError, match="unknown session"):
+        registry.get_transcript("sess_never")

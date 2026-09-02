@@ -32,7 +32,7 @@ from agent_bridge.models import (
     iso,
     normalize_effort,
 )
-from agent_bridge.paths import ensure_home, result_path, state_path
+from agent_bridge.paths import ensure_home, result_path, state_path, transcript_path
 from agent_bridge.persist import atomic_write_json, atomic_write_text, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
@@ -72,6 +72,9 @@ RESULT_STORE_MAX = 30000
 # not grow without bound over a long-lived Bridge.
 TASK_KEEP_PER_SESSION = 20
 FILES_CHANGED_MAX = 200
+SESSION_KEEP_INACTIVE = 50
+SESSION_RETAIN_SEC = 14 * 86400
+TASK_KEEP_TOTAL = 200
 
 
 def _new_id(prefix: str) -> str:
@@ -84,6 +87,13 @@ def _resolve_runtime_context(runtime_context: RuntimeContext | None) -> RuntimeC
     if runtime_context not in ("coordinator", "worker"):
         raise ValueError(f"unknown runtime_context {runtime_context!r}; use coordinator or worker")
     return runtime_context
+
+
+def _session_last_active_ts(last_active_at: str) -> float:
+    try:
+        return datetime.fromisoformat(last_active_at).timestamp()
+    except (ValueError, TypeError, OSError, OverflowError):
+        return 0.0
 
 
 def _tail(text: str, limit: int = RESULT_TAIL) -> str:
@@ -260,6 +270,10 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
+        # Stamp adopted owners onto disk first so a following prune is not
+        # undone by _merge_owned treating the old unowned rows as foreign.
+        self.save()
+        self._prune()
         self.save()
         self.touch_activity()
         if self.config.server.idle_exit_sec > 0:
@@ -458,7 +472,7 @@ class Registry:
             self.tasks[task.task_id] = task
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)
-            self._prune_tasks()
+            self._prune()
             self.save()
             log.info(
                 "task_dispatched task_id=%s session_id=%s agent=%s",
@@ -577,6 +591,43 @@ class Registry:
             )
             self._schedule_idle(session.session_id)
 
+    def _drop_task(self, task_id: str) -> None:
+        self.tasks.pop(task_id, None)
+        self._done.pop(task_id, None)
+        try:
+            result_path(task_id, self.home).unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not remove pruned result for task %s", task_id)
+
+    def _prune_sessions(self) -> None:
+        now = time.time()
+        candidates = [
+            session
+            for session in self.sessions.values()
+            if session.proc_state in {ProcState.dead, ProcState.idle_unloaded}
+            and session.session_id not in self._adapters
+            and self._busy_task(session.session_id) is None
+        ]
+        candidates.sort(key=lambda item: _session_last_active_ts(item.last_active_at), reverse=True)
+        drop = [
+            session
+            for index, session in enumerate(candidates)
+            if index >= SESSION_KEEP_INACTIVE
+            or now - _session_last_active_ts(session.last_active_at) > SESSION_RETAIN_SEC
+        ]
+        for session in drop:
+            session_id = session.session_id
+            self.sessions.pop(session_id, None)
+            self._cancel_idle(session_id)
+            for task in [item for item in self.tasks.values() if item.session_id == session_id]:
+                self._drop_task(task.task_id)
+            log.info(
+                "pruned session %s (%s, last active %s)",
+                session_id,
+                session.proc_state.value,
+                session.last_active_at,
+            )
+
     def _prune_tasks(self) -> None:
         by_session: dict[str, list[Task]] = {}
         for task in self.tasks.values():
@@ -587,12 +638,17 @@ class Registry:
                 continue
             terminal.sort(key=lambda item: item.created_at)
             for old in terminal[: len(terminal) - TASK_KEEP_PER_SESSION]:
-                self.tasks.pop(old.task_id, None)
-                self._done.pop(old.task_id, None)
-                try:
-                    result_path(old.task_id, self.home).unlink(missing_ok=True)
-                except OSError:
-                    log.warning("could not remove pruned result for task %s", old.task_id)
+                self._drop_task(old.task_id)
+        terminal_all = [task for task in self.tasks.values() if task.status in TERMINAL_STATUSES]
+        if len(terminal_all) <= TASK_KEEP_TOTAL:
+            return
+        terminal_all.sort(key=lambda item: item.created_at)
+        for old in terminal_all[: len(terminal_all) - TASK_KEEP_TOTAL]:
+            self._drop_task(old.task_id)
+
+    def _prune(self) -> None:
+        self._prune_sessions()
+        self._prune_tasks()
 
     def _cancel_idle(self, session_id: str) -> None:
         idle = self._idle.pop(session_id, None)
@@ -766,7 +822,7 @@ class Registry:
         return payload
 
     def get_transcript(self, session_id: str, offset: int = 0, limit: int = 50, kinds: list[str] | None = None) -> dict:
-        if session_id not in self.sessions:
+        if session_id not in self.sessions and not transcript_path(session_id, self.home).is_file():
             raise KeyError(f"unknown session {session_id}")
         events = read_events(session_id, self.home)
         return page_events(events, offset=offset, limit=limit, kinds=kinds)

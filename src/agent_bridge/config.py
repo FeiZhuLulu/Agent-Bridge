@@ -241,7 +241,30 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-_COORDINATOR_BLOCK = re.compile(r"(?ms)^\[coordinator\][^\n]*\n?.*?(?=^\[|\Z)")
+_COORDINATOR_HEADER = re.compile(r"(?m)^\[coordinator\][ \t]*(#[^\n]*)?\n?")
+_NEXT_TABLE = re.compile(r"(?m)^\[")
+
+
+def _coordinator_span(text: str) -> tuple[int, int] | None:
+    """Return the [coordinator] table span, skipping `[` lines inside strings."""
+    header = _COORDINATOR_HEADER.search(text)
+    if header is None:
+        return None
+    start = header.start()
+    header_end = header.end()
+    ends = [header_end + match.start() for match in _NEXT_TABLE.finditer(text[header_end:])]
+    ends.append(len(text))
+    for end in ends:
+        block = text[start:end]
+        rest = text[:start] + text[end:]
+        try:
+            parsed_block = tomllib.loads(block)
+            parsed_rest = tomllib.loads(rest) if rest.strip() else {}
+        except tomllib.TOMLDecodeError:
+            continue
+        if set(parsed_block) == {"coordinator"} and "coordinator" not in parsed_rest:
+            return (start, end)
+    raise ValueError("could not isolate the [coordinator] table")
 
 
 def write_coordinator_overlay(
@@ -259,26 +282,55 @@ def write_coordinator_overlay(
     path = home / "agents.toml"
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
     try:
-        existing = tomllib.loads(text).get("coordinator", {})
+        original = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"{path} is not valid TOML ({exc}); fix it by hand first") from exc
 
+    existing = original.get("coordinator", {}) if isinstance(original.get("coordinator"), dict) else {}
     new_mode = mode if mode is not None else existing.get("mode")
     new_instructions = instructions if instructions is not None else existing.get("instructions")
 
     lines = ["[coordinator]"]
+    written_mode: str | None = None
     if new_mode is not None:
-        lines.append(f'mode = "{normalize_coordinator_mode(str(new_mode), strict=True)}"')
+        written_mode = normalize_coordinator_mode(str(new_mode), strict=True)
+        lines.append(f'mode = "{written_mode}"')
     if new_instructions is not None:
         lines.append(f"instructions = {_toml_string(str(new_instructions))}")
     block = "\n".join(lines) + "\n"
 
-    match = _COORDINATOR_BLOCK.search(text)
-    if match:
-        text = text[: match.start()] + block + text[match.end() :]
+    try:
+        span = _coordinator_span(text)
+    except ValueError as exc:
+        raise ValueError(f"could not isolate the [coordinator] table in {path}") from exc
+    if span:
+        start, end = span
+        new_text = text[:start] + block + text[end:]
     else:
-        text = block if not text.strip() else text.rstrip() + "\n\n" + block
-    atomic_write_text(path, text)
+        new_text = block if not text.strip() else text.rstrip() + "\n\n" + block
+
+    try:
+        parsed = tomllib.loads(new_text)
+        coord = parsed.get("coordinator")
+        if not isinstance(coord, dict):
+            raise ValueError("missing coordinator table")
+        if written_mode is not None and coord.get("mode") != written_mode:
+            raise ValueError("mode mismatch")
+        if new_instructions is not None:
+            got = (coord.get("instructions") or "").strip()
+            expected = str(new_instructions or "").strip()
+            if got != expected:
+                raise ValueError("instructions mismatch")
+        original_other = {key: value for key, value in original.items() if key != "coordinator"}
+        parsed_other = {key: value for key, value in parsed.items() if key != "coordinator"}
+        if original_other != parsed_other:
+            raise ValueError("other tables changed")
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise ValueError(
+            "refusing to write agents.toml: rewritten [coordinator] block failed self-check"
+        ) from exc
+
+    atomic_write_text(path, new_text)
     return path
 
 
@@ -291,7 +343,14 @@ def _merge_server(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, An
 def load_config(home: Path | None = None) -> AppConfig:
     bundled_raw = _load_toml(bundled_agents_toml())
     user_home = home or bridge_home()
-    overlay_raw = _load_toml(user_home / "agents.toml")
+    overlay_path = user_home / "agents.toml"
+    try:
+        overlay_raw = _load_toml(overlay_path)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(
+            f"{overlay_path} is not valid TOML: {exc}. "
+            "Fix or delete the file, then restart the Bridge."
+        ) from exc
     bundled = _raw_agents(bundled_raw)
     overlay = _raw_agents(overlay_raw)
     merged: dict[str, dict[str, Any]] = {name: dict(spec) for name, spec in bundled.items()}

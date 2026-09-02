@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_bridge.config import AppConfig, load_config, write_coordinator_overlay
+from agent_bridge.config import (
+    AppConfig,
+    _coordinator_span,
+    load_config,
+    write_coordinator_overlay,
+)
 from agent_bridge.paths import bundled_agents_toml
 
 
@@ -213,3 +218,97 @@ def test_write_overlay_rejects_bad_mode_and_bad_toml(tmp_path):
     (tmp_path / "agents.toml").write_text("[coordinator\nmode=", encoding="utf-8")
     with pytest.raises(ValueError, match="not valid TOML"):
         write_coordinator_overlay(tmp_path, mode="manual")
+
+
+def test_overlay_survives_bracket_lines_in_instructions(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    instructions = "Rules:\n[1] research -> antigravity\n[2] code -> grok"
+    write_coordinator_overlay(tmp_path, instructions=instructions)
+    data = tomllib.loads((tmp_path / "agents.toml").read_text(encoding="utf-8"))
+    assert data["coordinator"]["instructions"].strip() == instructions
+
+    write_coordinator_overlay(tmp_path, mode="eager")
+    data = tomllib.loads((tmp_path / "agents.toml").read_text(encoding="utf-8"))
+    assert data["coordinator"]["mode"] == "eager"
+    assert data["coordinator"]["instructions"].strip() == instructions
+
+    updated = instructions + "\n[3] tests stay local"
+    write_coordinator_overlay(tmp_path, instructions=updated)
+    data = tomllib.loads((tmp_path / "agents.toml").read_text(encoding="utf-8"))
+    cfg = load_config(tmp_path)
+    assert data["coordinator"]["instructions"].strip() == updated
+    assert cfg.coordinator.mode == "eager"
+    assert cfg.coordinator.instructions == updated
+
+
+def test_overlay_keeps_other_tables_and_comments(tmp_path):
+    original = (
+        "# proxy comment, do not lose\n"
+        "[env.proxy]\n"
+        'url = "http://127.0.0.1:9"\n'
+        "\n"
+        "[coordinator]\n"
+        'mode = "auto"\n'
+        "\n"
+        "[agents.grok]\n"
+        "# grok comment, keep this too\n"
+        "idle_unload_sec = 12\n"
+    )
+    (tmp_path / "agents.toml").write_text(original, encoding="utf-8")
+    before_span = _coordinator_span(original)
+    assert before_span is not None
+    write_coordinator_overlay(tmp_path, mode="manual")
+    text = (tmp_path / "agents.toml").read_text(encoding="utf-8")
+    after_span = _coordinator_span(text)
+    assert after_span is not None
+    assert text[: after_span[0]] == original[: before_span[0]]
+    assert text[after_span[1] :] == original[before_span[1] :]
+    assert "# proxy comment, do not lose" in text
+    assert "# grok comment, keep this too" in text
+    data = tomllib.loads(text)
+    assert data["env"]["proxy"]["url"] == "http://127.0.0.1:9"
+    assert data["agents"]["grok"]["idle_unload_sec"] == 12
+    assert data["coordinator"]["mode"] == "manual"
+
+
+def test_overlay_isolates_basic_multiline_string(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_BRIDGE_MODE", raising=False)
+    (tmp_path / "agents.toml").write_text(
+        '[coordinator]\n'
+        'mode = "auto"\n'
+        'instructions = """\n'
+        "[x] one\n"
+        "[y] two\n"
+        '"""\n'
+        "\n"
+        "[agents.kimi]\n"
+        "idle_unload_sec = 5\n",
+        encoding="utf-8",
+    )
+    write_coordinator_overlay(tmp_path, mode="manual")
+    text = (tmp_path / "agents.toml").read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    assert "[x] one" in data["coordinator"]["instructions"]
+    assert "[y] two" in data["coordinator"]["instructions"]
+    assert data["agents"]["kimi"]["idle_unload_sec"] == 5
+    assert data["coordinator"]["mode"] == "manual"
+
+
+def test_overlay_missing_table_appends(tmp_path):
+    original = '# keep me\n[env.proxy]\nurl = "http://127.0.0.1:9"\n'
+    (tmp_path / "agents.toml").write_text(original, encoding="utf-8")
+    write_coordinator_overlay(tmp_path, mode="manual")
+    text = (tmp_path / "agents.toml").read_text(encoding="utf-8")
+    assert text.startswith(original.rstrip())
+    data = tomllib.loads(text)
+    assert data["coordinator"]["mode"] == "manual"
+    assert data["env"]["proxy"]["url"] == "http://127.0.0.1:9"
+
+
+def test_load_config_reports_overlay_path_on_bad_toml(tmp_path):
+    path = tmp_path / "agents.toml"
+    path.write_text("[coordinator\nmode=", encoding="utf-8")
+    with pytest.raises(ValueError, match="is not valid TOML") as exc_info:
+        load_config(tmp_path)
+    assert str(path) in str(exc_info.value)
+    assert "Fix or delete the file" in str(exc_info.value)

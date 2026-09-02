@@ -250,8 +250,8 @@ def test_overlay_keeps_other_tables_and_comments(tmp_path):
         "[coordinator]\n"
         'mode = "auto"\n'
         "\n"
-        "[agents.grok]\n"
         "# grok comment, keep this too\n"
+        "[agents.grok]\n"
         "idle_unload_sec = 12\n"
     )
     (tmp_path / "agents.toml").write_text(original, encoding="utf-8")
@@ -265,10 +265,36 @@ def test_overlay_keeps_other_tables_and_comments(tmp_path):
     assert text[after_span[1] :] == original[before_span[1] :]
     assert "# proxy comment, do not lose" in text
     assert "# grok comment, keep this too" in text
+    assert text.find("# grok comment, keep this too") < text.find("[agents.grok]")
     data = tomllib.loads(text)
     assert data["env"]["proxy"]["url"] == "http://127.0.0.1:9"
     assert data["agents"]["grok"]["idle_unload_sec"] == 12
     assert data["coordinator"]["mode"] == "manual"
+
+
+def test_overlay_keeps_hash_inside_multiline_string(tmp_path):
+    original = (
+        "[coordinator]\n"
+        'mode = "auto"\n'
+        "instructions = '''\n"
+        "# not a comment\n"
+        "keep this\n"
+        "'''\n"
+        "\n"
+        "# grok comment, keep this too\n"
+        "[agents.grok]\n"
+        "idle_unload_sec = 12\n"
+    )
+    (tmp_path / "agents.toml").write_text(original, encoding="utf-8")
+    write_coordinator_overlay(tmp_path, mode="manual")
+    text = (tmp_path / "agents.toml").read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    assert "# not a comment" in data["coordinator"]["instructions"]
+    assert "keep this" in data["coordinator"]["instructions"]
+    assert data["coordinator"]["mode"] == "manual"
+    assert "# grok comment, keep this too" in text
+    assert text.find("# grok comment, keep this too") < text.find("[agents.grok]")
+    assert data["agents"]["grok"]["idle_unload_sec"] == 12
 
 
 def test_overlay_isolates_basic_multiline_string(tmp_path, monkeypatch):

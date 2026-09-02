@@ -247,6 +247,25 @@ _COORDINATOR_HEADER = re.compile(r"(?m)^\[coordinator\][ \t]*(#[^\n]*)?\n?")
 _NEXT_TABLE = re.compile(r"(?m)^\[")
 
 
+def _trim_trailing_blank_and_comment_lines(text: str, start: int, end: int) -> int:
+    block = text[start:end]
+    lines: list[str] = []
+    last = 0
+    for index, char in enumerate(block):
+        if char == "\n":
+            lines.append(block[last : index + 1])
+            last = index + 1
+    if last < len(block):
+        lines.append(block[last:])
+    while lines:
+        stripped = lines[-1].strip()
+        if stripped == "" or stripped.startswith("#"):
+            lines.pop()
+            continue
+        break
+    return start + sum(len(line) for line in lines)
+
+
 def _coordinator_span(text: str) -> tuple[int, int] | None:
     """Return the [coordinator] table span, skipping `[` lines inside strings."""
     header = _COORDINATOR_HEADER.search(text)
@@ -265,6 +284,13 @@ def _coordinator_span(text: str) -> tuple[int, int] | None:
         except tomllib.TOMLDecodeError:
             continue
         if set(parsed_block) == {"coordinator"} and "coordinator" not in parsed_rest:
+            trimmed = _trim_trailing_blank_and_comment_lines(text, start, end)
+            try:
+                parsed_trimmed = tomllib.loads(text[start:trimmed])
+            except tomllib.TOMLDecodeError:
+                return (start, end)
+            if set(parsed_trimmed) == {"coordinator"}:
+                return (start, trimmed)
             return (start, end)
     raise ValueError("could not isolate the [coordinator] table")
 

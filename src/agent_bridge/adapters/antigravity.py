@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -64,9 +65,7 @@ def is_result_event(obj: dict[str, Any]) -> bool:
         return True
     if obj.get("type") in {"result", "final", "turn_complete", "completed"}:
         return True
-    if obj.get("status") in _RESULT_STATUSES and ("response" in obj or "error" in obj):
-        return True
-    return False
+    return obj.get("status") in _RESULT_STATUSES and ("response" in obj or "error" in obj)
 
 
 def unwrap_result(obj: dict[str, Any]) -> dict[str, Any]:
@@ -301,7 +300,8 @@ class AgyAdapter(Adapter):
                 if cid:
                     conversation_id = cid
                 event = str(obj.get("event") or obj.get("type") or "")
-                step = obj.get("step_update") if isinstance(obj.get("step_update"), dict) else {}
+                raw_step = obj.get("step_update")
+                step: dict[str, Any] = raw_step if isinstance(raw_step, dict) else {}
                 step_type = str(step.get("step_type") or "")
                 chunk = text_delta_of(obj)
                 event_type = "raw"
@@ -421,10 +421,8 @@ class AgyAdapter(Adapter):
         finally:
             if not stderr_task.done():
                 stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
-            except asyncio.CancelledError:
-                pass
             self._procs.pop(session.session_id, None)
             self._cancelled.discard(session.session_id)
             drop_pid(self.home, session.session_id)

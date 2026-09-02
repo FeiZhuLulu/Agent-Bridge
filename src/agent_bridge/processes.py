@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -137,12 +138,10 @@ def _wait_and_kill_tree(pid: int, timeout: float = 5.0) -> None:
     tree = _process_tree(pid)
     if not tree:
         return
-    gone, alive = psutil.wait_procs(tree, timeout=timeout)
+    _gone, alive = psutil.wait_procs(tree, timeout=timeout)
     for leftover in alive:
-        try:
+        with contextlib.suppress(psutil.Error):
             leftover.kill()
-        except psutil.Error:
-            pass
 
 
 async def interrupt_then_reap(proc: Any | None, timeout: float = 3.0) -> None:
@@ -186,10 +185,8 @@ async def reap_subprocess(proc: Any | None, timeout: float = 5.0) -> None:
     except TimeoutError:
         pass
     kill_tree(pid, handle=proc, force=True)
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=2)
-    except TimeoutError:
-        pass
 
 
 def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
@@ -446,10 +443,8 @@ def count_sibling_servers(
         me = psutil.Process()
         my_pid = me.pid
         ancestors: set[int] = set()
-        try:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             ancestors.update(parent.pid for parent in me.parents())
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
 
         if processes is None:
             proc_iter: Iterable[Any] = psutil.process_iter(["pid", "ppid", "name", "cmdline"])

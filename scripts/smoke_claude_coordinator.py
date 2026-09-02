@@ -225,13 +225,9 @@ def bridge_saw_opencode(bridge_home: Path) -> bool:
         payload = json.loads(state.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return False
-    for session in payload.get("sessions") or []:
-        if session.get("agent") == "opencode":
-            return True
-    for task in payload.get("tasks") or []:
-        if task.get("agent") == "opencode":
-            return True
-    return False
+    if any(session.get("agent") == "opencode" for session in payload.get("sessions") or []):
+        return True
+    return any(task.get("agent") == "opencode" for task in payload.get("tasks") or [])
 
 
 def main() -> int:

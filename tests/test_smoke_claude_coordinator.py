@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# Imported after sys.path injection so tests can load scripts/smoke_claude_coordinator.py.
 from smoke_claude_coordinator import (
     COORD_FILE,
     DEFAULT_OPENCODE_MODEL,

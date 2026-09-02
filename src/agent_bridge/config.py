@@ -180,7 +180,8 @@ def _coerce_env(raw: dict[str, Any]) -> dict[str, Any]:
     block = raw.get("env")
     if not isinstance(block, dict):
         return {}
-    proxy = block.get("proxy") if isinstance(block.get("proxy"), dict) else {}
+    raw_proxy = block.get("proxy")
+    proxy: dict[str, Any] = raw_proxy if isinstance(raw_proxy, dict) else {}
     out: dict[str, Any] = {}
     if "inherit" in block and block["inherit"] is not None:
         out["inherit"] = [str(item) for item in block["inherit"]]
@@ -201,7 +202,8 @@ def _merge_env(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for key, value in overlay.items():
         if key == "set" and isinstance(value, dict):
-            current = out.get("set") if isinstance(out.get("set"), dict) else {}
+            raw_set = out.get("set")
+            current: dict[str, Any] = raw_set if isinstance(raw_set, dict) else {}
             out["set"] = {**current, **value}
         else:
             out[key] = value

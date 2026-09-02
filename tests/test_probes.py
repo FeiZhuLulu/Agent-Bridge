@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -248,7 +249,5 @@ async def test_probe_agent_resolves_command_off_loop(monkeypatch):
         assert "command=fake-bin" in row["detail"]
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass

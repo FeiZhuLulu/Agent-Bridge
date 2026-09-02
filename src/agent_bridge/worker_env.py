@@ -417,10 +417,9 @@ def resolve_env(
         _assign(env, origin, {str(k): str(v) for k, v in agent_env.items()}, "agent.env")
 
     _mirror_proxy_keys(env, origin)
-    if _present(env, "HTTPS_PROXY") or _present(env, "HTTP_PROXY"):
-        if not _present(env, "NO_PROXY"):
-            env["NO_PROXY"] = DEFAULT_NO_PROXY
-            origin["NO_PROXY"] = "default"
+    if (_present(env, "HTTPS_PROXY") or _present(env, "HTTP_PROXY")) and not _present(env, "NO_PROXY"):
+        env["NO_PROXY"] = DEFAULT_NO_PROXY
+        origin["NO_PROXY"] = "default"
     env.setdefault("PYTHONIOENCODING", "utf-8")
     origin.setdefault("PYTHONIOENCODING", origin.get("PYTHONIOENCODING", "default"))
     return env, origin

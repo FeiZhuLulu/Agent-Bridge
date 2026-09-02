@@ -5,9 +5,9 @@ import logging
 import shutil
 from pathlib import Path
 
-from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.codex_exec import resolve_codex_command
+from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import reap_subprocess, resolve_command

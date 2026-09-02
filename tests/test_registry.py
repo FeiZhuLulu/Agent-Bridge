@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from pathlib import Path
@@ -821,10 +822,8 @@ async def test_env_status_does_not_block_event_loop(bridge_home, monkeypatch):
         assert any("3 other agent-bridge server instance(s)" in item for item in warnings)
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 @pytest.mark.asyncio

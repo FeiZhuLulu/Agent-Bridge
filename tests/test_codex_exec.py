@@ -11,6 +11,7 @@ import pytest
 from agent_bridge.adapters.codex import CodexAdapter
 from agent_bridge.codex_exec import (
     CodexTurnState,
+    _codex_exe_name,
     apply_codex_event,
     build_codex_exec_argv,
     codex_command_problem,
@@ -21,7 +22,6 @@ from agent_bridge.codex_exec import (
     read_codex_cli_path,
     resolve_codex_command,
     yolo_requested,
-    _codex_exe_name,
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task

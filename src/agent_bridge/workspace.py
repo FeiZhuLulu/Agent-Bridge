@@ -97,6 +97,7 @@ def _relative_to_cwd(raw: str, root: Path) -> str | None:
         if text.startswith("/") and len(text) >= 3 and text[2] == ":":
             text = text[1:]
     path = Path(text)
+    rel: str | None
     try:
         resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
         rel = resolved.relative_to(root).as_posix()

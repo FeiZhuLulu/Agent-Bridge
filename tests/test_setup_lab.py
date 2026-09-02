@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# Imported after sys.path injection so tests can load scripts/setup_lab.py.
 from setup_lab import resolve_command, write_host_configs
 
 

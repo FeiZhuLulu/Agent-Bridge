@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -19,9 +20,18 @@ from acp.schema import (
     RequestPermissionResponse,
 )
 
+from agent_bridge.acp_config import config_option_values
 from agent_bridge.adapters.base import STDIO_LIMIT, Adapter
+from agent_bridge.claude_meta import (
+    CLAUDE_MODE_BYPASS,
+    apply_claude_gateway_env,
+    resolve_claude_effort,
+)
 from agent_bridge.config import AgentConfig
+from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
+from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
 from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
+from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.processes import (
     drop_pid,
     process_create_time,
@@ -31,15 +41,6 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
-from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
-from agent_bridge.acp_config import config_option_values
-from agent_bridge.claude_meta import (
-    CLAUDE_MODE_BYPASS,
-    apply_claude_gateway_env,
-    resolve_claude_effort,
-)
-from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
-from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
 
@@ -958,18 +959,14 @@ class AcpAdapter(Adapter):
             session.pid = None
             return
         if live.conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(live.conn.close(), timeout=2)
-            except Exception:
-                pass
         if live.proc is not None:
             await reap_subprocess(live.proc)
         if live.stderr_task is not None:
             if not live.stderr_task.done():
                 live.stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await live.stderr_task
-            except asyncio.CancelledError:
-                pass
         drop_pid(self.home, session.session_id)
         session.pid = None

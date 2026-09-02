@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -91,10 +92,8 @@ class CodexAdapter(Adapter):
                 exc,
             )
         finally:
-            try:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
                 proc.stdin.close()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         env = self._worker_env()
@@ -156,7 +155,8 @@ class CodexAdapter(Adapter):
                 event = str(obj.get("type") or "")
                 event_type = "raw"
                 if event == "item.completed":
-                    item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                    raw_item = obj.get("item")
+                    item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                     item_type = str(item.get("type") or "")
                     if item_type == "agent_message":
                         event_type = "message_chunk"
@@ -236,10 +236,8 @@ class CodexAdapter(Adapter):
         finally:
             if not stderr_task.done():
                 stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
-            except asyncio.CancelledError:
-                pass
             self._procs.pop(session.session_id, None)
             self._cancelled.discard(session.session_id)
             drop_pid(self.home, session.session_id)

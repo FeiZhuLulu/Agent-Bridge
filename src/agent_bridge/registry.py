@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import psutil
 
@@ -208,10 +208,9 @@ class Registry:
             return False
         if time.monotonic() - self._last_activity < idle_sec:
             return False
-        for task in self.tasks.values():
-            if task.status in {TaskStatus.queued, TaskStatus.running}:
-                return False
-        return True
+        return all(
+            task.status not in {TaskStatus.queued, TaskStatus.running} for task in self.tasks.values()
+        )
 
     async def _idle_exit_watchdog(self) -> None:
         try:
@@ -405,7 +404,7 @@ class Registry:
         if not cwd_path.is_dir():
             raise ValueError(f"cwd is not a directory: {cwd_path}")
         effort = normalize_effort(effort)
-        cfg = self.config.get(agent)
+        self.config.get(agent)
         async with self._lock:
             if session_id:
                 session = self.sessions.get(session_id)
@@ -658,7 +657,7 @@ class Registry:
 
     def _task_snapshot(self, task: Task, include_result: bool = False) -> dict:
         events = read_events_tail(task.session_id, self.home)
-        payload = {
+        payload: dict[str, Any] = {
             "task_id": task.task_id,
             "session_id": task.session_id,
             "agent": task.agent,

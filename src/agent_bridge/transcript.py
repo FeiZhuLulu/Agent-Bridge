@@ -4,9 +4,10 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from agent_bridge.models import TranscriptEvent
 from agent_bridge.paths import transcript_path

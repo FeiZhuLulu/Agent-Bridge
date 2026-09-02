@@ -18,8 +18,8 @@ from agent_bridge.acp_config import config_option_values
 
 # Re-exported so existing imports and tests stay put.
 __all__ = (
-    "KIMI_MODE_YOLO",
     "KIMI_EFFORT_PREFERENCE",
+    "KIMI_MODE_YOLO",
     "config_option_values",
     "resolve_kimi_thinking",
 )

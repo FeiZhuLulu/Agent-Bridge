@@ -75,6 +75,7 @@ FILES_CHANGED_MAX = 200
 SESSION_KEEP_INACTIVE = 50
 SESSION_RETAIN_SEC = 14 * 86400
 TASK_KEEP_TOTAL = 200
+STOP_TASK_GRACE_SEC = 15
 
 
 def _new_id(prefix: str) -> str:
@@ -131,6 +132,7 @@ class Registry:
         self.runtime_context = _resolve_runtime_context(runtime_context)
         self.dispatch_enabled = self.runtime_context == "coordinator"
         self._sibling_cache: tuple[float, int] | None = None
+        self._stopping = False
 
     @classmethod
     def create(
@@ -245,6 +247,7 @@ class Registry:
             raise
 
     async def start(self) -> None:
+        self._stopping = False
         install_host_env(self.config.env)
         reap_orphans(self.home)
         payload = read_json(state_path(self.home), {})
@@ -283,14 +286,25 @@ class Registry:
             )
 
     async def stop(self) -> None:
+        self._stopping = True
         watchdog = self._watchdog
         self._watchdog = None
         if watchdog is not None:
             watchdog.cancel()
         for idle in list(self._idle.values()):
             idle.cancel()
-        for bg in list(self._bg.values()):
+        self._idle.clear()
+        bgs = [task for task in self._bg.values() if not task.done()]
+        for bg in bgs:
             bg.cancel()
+        if bgs:
+            _done, pending = await asyncio.wait(bgs, timeout=STOP_TASK_GRACE_SEC)
+            if pending:
+                log.warning(
+                    "%d task(s) did not finish cancelling within %ss",
+                    len(pending),
+                    STOP_TASK_GRACE_SEC,
+                )
         for session_id, adapter in list(self._adapters.items()):
             session = self.sessions.get(session_id)
             if session is not None:
@@ -656,6 +670,8 @@ class Registry:
             idle.cancel()
 
     def _schedule_idle(self, session_id: str) -> None:
+        if self._stopping:
+            return
         session = self.sessions.get(session_id)
         if session is None:
             return

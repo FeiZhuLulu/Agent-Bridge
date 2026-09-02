@@ -1102,3 +1102,36 @@ def test_get_transcript_survives_pruned_session(bridge_home):
     assert page["events"][0]["data"]["text"] == "kept"
     with pytest.raises(KeyError, match="unknown session"):
         registry.get_transcript("sess_never")
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_running_tasks(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "5")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    dispatched = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
+    await asyncio.sleep(0.1)
+    assert registry.tasks[dispatched["task_id"]].status == TaskStatus.running
+    started = time.monotonic()
+    await registry.stop()
+    assert time.monotonic() - started < 3
+    assert registry.tasks[dispatched["task_id"]].status == TaskStatus.cancelled
+    assert all(task.done() for task in registry._bg.values())
+    assert registry._idle == {}
+    payload = read_json(state_path(bridge_home), {})
+    row = next(item for item in payload["tasks"] if item["task_id"] == dispatched["task_id"])
+    assert row["status"] == "cancelled"
+
+
+def test_schedule_idle_noop_while_stopping(bridge_home, tmp_path):
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_idle"] = Session(
+        session_id="sess_idle",
+        agent="grok",
+        cwd=str(tmp_path),
+    )
+    registry._stopping = True
+    registry._schedule_idle("sess_idle")
+    assert registry._idle == {}

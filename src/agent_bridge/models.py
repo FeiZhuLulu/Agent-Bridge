@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -45,6 +46,15 @@ def normalize_effort(raw: str | None) -> str | None:
     if value not in EFFORTS:
         raise ValueError(f"effort must be one of off, low, medium, high, max (got {raw!r})")
     return value
+
+
+def normalize_request_id(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    try:
+        return str(uuid.UUID(raw.strip()))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("request_id must be a UUID") from exc
 
 
 def agy_effort(effort: str | None) -> str | None:
@@ -110,6 +120,11 @@ class Task(BaseModel):
     cwd: str
     model: str | None = None
     effort: str | None = None
+    request_id: str | None = None
+    requested_session_id: str | None = None
+    requested_model: str | None = None
+    requested_effort: str | None = None
+    requested_title: str | None = None
     observed_model: str | None = None
     observed_effort: str | None = None
     status: TaskStatus = TaskStatus.queued

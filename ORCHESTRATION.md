@@ -43,7 +43,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
 ## How to dispatch
 
 1. `list_agents`. Read `coordinator.mode` / `instructions` / `dispatch_enabled` and `env.proxy` / `env.warnings`. A null proxy on a direct network is normal; if a worker fails with connect errors on a proxied machine, fix `[env.proxy]` instead of retrying.
-2. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute). Never the Agent Bridge install path (unless the user is editing Bridge). Never a temp dir. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason.
+2. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute). Never the Agent Bridge install path (unless the user is editing Bridge). Never a temp dir. Give each logical dispatch a UUID `request_id`; if the response is lost, retry the exact request with the same ID. Bridge returns the recent existing task with `reused=true`, while a different payload with the same ID is rejected. This prevents duplicate Bridge tasks, not exactly-once worker side effects. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason.
    - Antigravity: `agy models` slugs; default `gemini-3.7-flash`.
    - Grok: `grok models` slug + `off|low|medium|high|max` (`off`→`none`, `max`→`xhigh`). `/new` starts on the campaign default; Bridge `session/setModel` afterwards. Trust `get_result.observed_model`, never the "You are Grok 4.6" banner.
    - Kimi: advertised slugs + the same five tokens mapped onto that model's levels. Unknown slug fails; unmappable effort is a warning.

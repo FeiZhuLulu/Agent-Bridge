@@ -40,7 +40,9 @@ INSTRUCTIONS = (
     "sessions resumable.\n"
     "Hard rules: workers are reached only through these tools — never drive the "
     "worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's "
-    "project folder (absolute), not the Agent Bridge install path. A wait_task "
+    "project folder (absolute), not the Agent Bridge install path. Give each "
+    "logical dispatch a request_id and reuse it after a lost response so Bridge "
+    "does not start the turn twice. A wait_task "
     "timeout is not failure; call it again. Verify results with get_result plus "
     "your own git diff — do not trust a worker's self-report. An empty Kimi "
     "result with non-empty warnings is a failed turn, not a no-op.\n"
@@ -118,8 +120,9 @@ async def dispatch_task(
     effort: str | None = None,
     title: str | None = None,
     user_requested: bool = False,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode/claude: session/set_config_option after new/resume; dsh: spawn env, respawn if they change; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. Returns immediately."""
+    """Start a worker turn. An optional request_id makes retries reuse the same recent request instead of starting another turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode/claude: session/set_config_option after new/resume; dsh: spawn env, respawn if they change; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,
@@ -130,6 +133,7 @@ async def dispatch_task(
             effort=effort,
             title=title,
             user_requested=user_requested,
+            request_id=request_id,
         )
         return {"ok": True, **result}
     except Exception as exc:

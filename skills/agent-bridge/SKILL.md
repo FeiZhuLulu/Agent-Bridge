@@ -38,7 +38,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 
 ## The dispatch loop
 
-1. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute) — never the Agent Bridge install path, never a temp dir. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason; slugs and effort mappings per worker are documented in ORCHESTRATION.md in the Agent-Bridge repo.
+1. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute) — never the Agent Bridge install path, never a temp dir. Generate one UUID `request_id` per logical dispatch and reuse it only when retrying the exact request after a lost response. A recent exact replay returns the existing task with `reused=true`; a conflicting payload is rejected. This prevents duplicate Bridge tasks, not exactly-once worker side effects. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason; slugs and effort mappings per worker are documented in ORCHESTRATION.md in the Agent-Bridge repo.
 2. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
    - Cursor: host ~45–60 s; pass ~30 and loop.

@@ -25,6 +25,7 @@ def test_handshake_instructions_carry_hard_rules():
         "coordinator.mode",
         "dispatch_enabled",
         "runtime_context",
+        "request_id",
         "cancel_task",
         "end_session",
     ):

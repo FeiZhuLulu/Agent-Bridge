@@ -298,6 +298,8 @@ class Registry:
 
     def env_status(self) -> dict:
         status = describe_env(self.config.env)
+        if self.config.warnings:
+            status.setdefault("warnings", []).extend(self.config.warnings)
         siblings = count_sibling_servers()
         if siblings > 0:
             warnings = status.setdefault("warnings", [])

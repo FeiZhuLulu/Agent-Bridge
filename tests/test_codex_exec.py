@@ -319,6 +319,51 @@ async def test_adapter_surfaces_stderr_when_codex_exits_before_jsonl(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_early_exit_surfaces_stderr(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_EARLY_EXIT", "1")
+    monkeypatch.setattr(
+        "agent_bridge.adapters.codex.resolve_codex_command",
+        lambda *args, **kwargs: [sys.executable, str(FAKE)],
+    )
+    adapter = CodexAdapter(
+        AgentConfig(name="codex", protocol="codex", command=["codex"]),
+        tmp_path,
+    )
+    session = Session(session_id="s-early", agent="codex", cwd=str(tmp_path))
+    result = await adapter.run_turn(
+        session,
+        Task(
+            task_id="t-early",
+            session_id=session.session_id,
+            agent="codex",
+            message="x" * 2_000_000,
+            cwd=str(tmp_path),
+        ),
+    )
+    assert result.stop_reason == "error"
+    assert "unexpected argument" in (result.error or "")
+    assert "codex exited with code 2" in result.warnings
+
+
+@pytest.mark.asyncio
+async def test_write_prompt_after_process_exit_does_not_raise(tmp_path: Path):
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(3)",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.wait()
+    adapter = CodexAdapter(
+        AgentConfig(name="codex", protocol="codex", command=["codex"]),
+        tmp_path,
+    )
+    await adapter._write_prompt(proc, "hello")
+
+
+@pytest.mark.asyncio
 async def test_adapter_error_then_completed_is_success(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_ERROR_THEN_COMPLETE", "1")
     monkeypatch.setattr(

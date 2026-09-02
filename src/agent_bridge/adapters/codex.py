@@ -84,6 +84,12 @@ class CodexAdapter(Adapter):
         try:
             proc.stdin.write(message.encode("utf-8"))
             await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            log.debug(
+                "codex closed stdin before reading the prompt for pid %s: %s",
+                proc.pid,
+                exc,
+            )
         finally:
             try:
                 proc.stdin.close()

@@ -871,3 +871,34 @@ async def test_env_status_caches_sibling_count(bridge_home, monkeypatch):
     second = await registry.env_status()
     assert calls == 1
     assert first.get("warnings") == second.get("warnings")
+
+
+@pytest.mark.asyncio
+async def test_workspace_snapshot_runs_off_loop(bridge_home, tmp_path, monkeypatch):
+    def slow_snapshot(cwd: str | Path) -> dict[str, tuple[int, int]]:
+        time.sleep(0.3)
+        return {}
+
+    monkeypatch.setattr("agent_bridge.registry.snapshot_workspace", slow_snapshot)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    ticks = 0
+
+    async def counter() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    ticker = asyncio.create_task(counter())
+    try:
+        dispatched = await registry.dispatch_task("fake", "snap", cwd=str(work.resolve()))
+        await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert ticks >= 10
+    finally:
+        ticker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ticker
+        await registry.stop()

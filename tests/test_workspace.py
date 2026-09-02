@@ -33,6 +33,34 @@ def test_drops_cwd_dot_and_root_paths(tmp_path: Path):
     assert changed == ["ok.txt"]
 
 
+def test_snapshot_skips_build_dirs_and_tracks_changes(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("print(1)\n", encoding="utf-8")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "x.js").write_text("export {}\n", encoding="utf-8")
+    (tmp_path / ".next").mkdir()
+    (tmp_path / ".next" / "y").write_text("cache\n", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "z").write_text("pkg\n", encoding="utf-8")
+    nested = tmp_path / "nested" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "b.txt").write_text("keep\n", encoding="utf-8")
+
+    before = snapshot_workspace(tmp_path)
+    assert set(before) == {"src/a.py", "nested/deep/b.txt"}
+    assert "\\" not in "".join(before)
+
+    (tmp_path / "src" / "a.py").write_text("print(2)\n", encoding="utf-8")
+    assert merge_files_changed(tmp_path, [], before) == ["src/a.py"]
+
+    (nested / "b.txt").unlink()
+    (tmp_path / "src" / "c.py").write_text("print(3)\n", encoding="utf-8")
+    changed = set(merge_files_changed(tmp_path, [], before))
+    assert "nested/deep/b.txt" in changed
+    assert "src/c.py" in changed
+    assert "src/a.py" in changed
+
+
 def test_collect_nested_tool_paths():
     found: set[str] = set()
     collect_update_paths(

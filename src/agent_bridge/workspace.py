@@ -19,6 +19,20 @@ SKIP_DIR_NAMES = {
     ".pytest_cache",
     ".mypy_cache",
     ".tox",
+    "dist",
+    "build",
+    "target",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".ruff_cache",
+    ".gradle",
+    ".idea",
+    "coverage",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".terraform",
 }
 
 _PATH_KEYS = (
@@ -34,23 +48,32 @@ _PATH_KEYS = (
 
 
 def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
+    """Map posix-relative paths to (mtime_ns, size). Skip SKIP_DIR_NAMES at
+    any depth. Symlink files are not followed and are omitted.
+    """
     root = Path(cwd)
     if not root.is_dir():
         return {}
     found: dict[str, tuple[int, int]] = {}
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [name for name in dirnames if name not in SKIP_DIR_NAMES]
-        current = Path(dirpath)
-        for name in filenames:
-            path = current / name
-            rel = path.relative_to(root).as_posix()
-            if _ignored_rel(rel):
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            found[rel] = (stat.st_mtime_ns, stat.st_size)
+    stack = [str(root)]
+    prefix_len = len(str(root)) + 1
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in SKIP_DIR_NAMES:
+                                stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            st = entry.stat(follow_symlinks=False)
+                            rel = entry.path[prefix_len:].replace(os.sep, "/")
+                            found[rel] = (st.st_mtime_ns, st.st_size)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
     return found
 
 

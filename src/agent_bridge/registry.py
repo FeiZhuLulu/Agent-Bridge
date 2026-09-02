@@ -485,7 +485,7 @@ class Registry:
         session.last_active_at = iso()
         self.save()
         try:
-            before = snapshot_workspace(task.cwd)
+            before = await asyncio.to_thread(snapshot_workspace, task.cwd)
             result = await adapter.run_turn(session, task)
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
@@ -500,7 +500,9 @@ class Registry:
                     f"full result persistence failed: {type(exc).__name__}: {exc}"
                 )
                 log.exception("could not persist full result for task %s", task.task_id)
-            task.files_changed = merge_files_changed(task.cwd, result.files_changed, before)
+            task.files_changed = await asyncio.to_thread(
+                merge_files_changed, task.cwd, result.files_changed, before
+            )
             task.usage = result.usage
             if session.agent == "grok":
                 observed = observe_grok_session(session.cwd, session.native_session_id)

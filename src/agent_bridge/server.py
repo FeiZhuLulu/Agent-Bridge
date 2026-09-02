@@ -148,7 +148,7 @@ async def wait_task(ctx: Context, task_id: str, timeout_sec: float = DEFAULT_WAI
 
 @mcp.tool(annotations=READ_ONLY)
 async def check_task(ctx: Context, task_id: str) -> dict[str, Any]:
-    """Non-blocking status, elapsed time, and recent activity for a task."""
+    """Non-blocking status, elapsed time, and recent activity for a task. files_changed is capped at 200 paths; files_changed_total carries the real count."""
     try:
         return {"ok": True, **_registry(ctx).check_task(task_id)}
     except Exception as exc:
@@ -162,7 +162,7 @@ async def get_result(
     cursor: int = 0,
     max_chars: int = RESULT_PAGE_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Return a page of the complete worker result plus changed files, usage, and requested/observed model. Continue with next_cursor while has_more is true. max_chars is capped at 60000. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not."""
+    """Return a page of the complete worker result plus changed files, usage, and requested/observed model. Continue with next_cursor while has_more is true. max_chars is capped at 60000. files_changed is capped at 200 paths; files_changed_total carries the real count. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not."""
     try:
         return {
             "ok": True,

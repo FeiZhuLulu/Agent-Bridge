@@ -117,6 +117,8 @@ class Task(BaseModel):
     result_text: str = ""
     result_chars: int = 0
     files_changed: list[str] = Field(default_factory=list)
+    files_changed_total: int = 0
+    files_changed_truncated: bool = False
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)

@@ -71,6 +71,7 @@ RESULT_STORE_MAX = 30000
 # Terminal tasks kept per session; older ones are pruned so state.json does
 # not grow without bound over a long-lived Bridge.
 TASK_KEEP_PER_SESSION = 20
+FILES_CHANGED_MAX = 200
 
 
 def _new_id(prefix: str) -> str:
@@ -500,9 +501,12 @@ class Registry:
                     f"full result persistence failed: {type(exc).__name__}: {exc}"
                 )
                 log.exception("could not persist full result for task %s", task.task_id)
-            task.files_changed = await asyncio.to_thread(
+            full_changed = await asyncio.to_thread(
                 merge_files_changed, task.cwd, result.files_changed, before
             )
+            task.files_changed_total = len(full_changed)
+            task.files_changed = full_changed[:FILES_CHANGED_MAX]
+            task.files_changed_truncated = len(full_changed) > FILES_CHANGED_MAX
             task.usage = result.usage
             if session.agent == "grok":
                 observed = observe_grok_session(session.cwd, session.native_session_id)
@@ -655,6 +659,11 @@ class Registry:
                 " Claude Code observed_model/effort are the last values Bridge "
                 "successfully set on the session after mapping, not a live sampler."
             )
+        if task.files_changed_truncated:
+            hint += (
+                f" files_changed lists the first {FILES_CHANGED_MAX} of "
+                f"{task.files_changed_total} paths; run git status in cwd for the full set."
+            )
         return hint
 
     def _task_snapshot(self, task: Task, include_result: bool = False) -> dict:
@@ -668,6 +677,8 @@ class Registry:
             "error": task.error,
             "warnings": task.warnings,
             "files_changed": task.files_changed,
+            "files_changed_total": task.files_changed_total,
+            "files_changed_truncated": task.files_changed_truncated,
             "model": task.model,
             "effort": task.effort,
             "observed_model": task.observed_model,

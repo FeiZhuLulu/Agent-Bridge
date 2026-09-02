@@ -902,3 +902,42 @@ async def test_workspace_snapshot_runs_off_loop(bridge_home, tmp_path, monkeypat
         with contextlib.suppress(asyncio.CancelledError):
             await ticker
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_files_changed_is_capped(bridge_home, tmp_path, monkeypatch):
+    paths = [f"gen/{i:04d}.txt" for i in range(500)]
+    monkeypatch.setattr("agent_bridge.registry.merge_files_changed", lambda *args, **kwargs: list(paths))
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "many files", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert len(waited["files_changed"]) == 200
+        assert waited["files_changed"] == paths[:200]
+        assert waited["files_changed_total"] == 500
+        assert waited["files_changed_truncated"] is True
+        result = registry.get_result(dispatched["task_id"])
+        assert "first 200 of 500" in result["hint"]
+        checked = registry.check_task(dispatched["task_id"])
+        assert checked["files_changed_total"] == 500
+        assert checked["files_changed_truncated"] is True
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_files_changed_uncapped_when_under_limit(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["files_changed_truncated"] is False
+        assert waited["files_changed_total"] == len(waited["files_changed"])
+    finally:
+        await registry.stop()

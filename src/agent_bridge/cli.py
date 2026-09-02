@@ -127,13 +127,13 @@ def install_skill(*, home: Path | None = None, only_existing: bool = False) -> l
     source = bundled_skill()
     if not source.is_file():
         raise FileNotFoundError(f"bundled skill not found at {source}")
-    text = source.read_text(encoding="utf-8")
+    content = source.read_bytes()
     written: list[Path] = []
     for dest in skill_destinations(home or Path.home()):
         if only_existing and not dest.is_file():
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+        dest.write_bytes(content)
         written.append(dest)
     return written
 

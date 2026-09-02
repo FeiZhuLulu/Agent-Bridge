@@ -25,6 +25,17 @@ from agent_bridge.worker_env import build_worker_env
 log = logging.getLogger(__name__)
 
 STDERR_TAIL_LIMIT = 16000
+AGY_ARGV_LIMIT = 32000
+
+
+def argv_too_long(cmd: list[str], *, platform: str = sys.platform) -> int | None:
+    """Return the serialized argv length when Windows would reject it."""
+    if not platform.startswith("win"):
+        return None
+    length = len(subprocess.list2cmdline(cmd))
+    if length > AGY_ARGV_LIMIT:
+        return length
+    return None
 _RESULT_STATUSES = {"SUCCESS", "ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING"}
 _TOOL_SCHEMA_MARKERS = (
     "invalid tool call error",
@@ -231,6 +242,13 @@ class AgyAdapter(Adapter):
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         cmd = self._build_cmd(session, task)
+        length = argv_too_long(cmd)
+        if length is not None:
+            raise ValueError(
+                f"antigravity prompt is {len(task.message)} chars; agy takes the prompt "
+                f"on the command line and Windows caps it near 32K ({length} chars total). "
+                "Shorten the task or put the material in a file under cwd and reference it."
+            )
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":

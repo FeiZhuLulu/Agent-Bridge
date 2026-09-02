@@ -1,5 +1,8 @@
+import pytest
+
 from agent_bridge.adapters.antigravity import (
     AgyAdapter,
+    argv_too_long,
     collect_tool_paths,
     conversation_id_of,
     is_agy_tool_schema_error,
@@ -188,3 +191,44 @@ def test_agy_follow_up_uses_conversation_not_new_project(tmp_path, monkeypatch):
     assert cmd.index("--conversation") < cmd.index("-p")
     assert cmd[cmd.index("--conversation") + 1] == "conv-1"
     assert "--new-project" not in cmd
+
+
+def test_argv_too_long_only_on_windows():
+    long_cmd = ["agy", "-p", "x" * 40000]
+    assert isinstance(argv_too_long(long_cmd, platform="win32"), int)
+    assert argv_too_long(["agy", "-p", "x" * 30], platform="win32") is None
+    assert argv_too_long(long_cmd, platform="linux") is None
+
+
+@pytest.mark.asyncio
+async def test_run_turn_rejects_overlong_argv(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.adapters.antigravity.resolve_command",
+        lambda command, fallbacks=None: ["agy"],
+    )
+    monkeypatch.setattr(
+        "agent_bridge.adapters.antigravity.argv_too_long",
+        lambda cmd, **kwargs: 40000,
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("create_subprocess_exec should not run")
+
+    monkeypatch.setattr(
+        "agent_bridge.adapters.antigravity.asyncio.create_subprocess_exec",
+        boom,
+    )
+    adapter = AgyAdapter(
+        AgentConfig(name="antigravity", protocol="agy", command=["agy"]),
+        tmp_path,
+    )
+    session = Session(session_id="sess_long", agent="antigravity", cwd=str(tmp_path))
+    task = Task(
+        task_id="task_long",
+        session_id=session.session_id,
+        agent="antigravity",
+        message="too long",
+        cwd=str(tmp_path),
+    )
+    with pytest.raises(ValueError, match="Shorten the task"):
+        await adapter.run_turn(session, task)

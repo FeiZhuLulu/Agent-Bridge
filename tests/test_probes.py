@@ -1,3 +1,5 @@
+import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -212,3 +214,41 @@ async def test_claude_probe_does_not_treat_mcp_config_as_oauth(tmp_path, monkeyp
     assert row["available"] is True
     assert "auth=oauth" not in row["detail"]
     assert "auth=missing" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_probe_agent_resolves_command_off_loop(monkeypatch):
+    def slow_resolve(command, fallbacks=None):
+        time.sleep(0.3)
+        return ["fake-bin"]
+
+    async def fake_version(_exe):
+        return "v1"
+
+    monkeypatch.setattr("agent_bridge.probes.resolve_command", slow_resolve)
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: {})
+    ticks = 0
+
+    async def counter() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    task = asyncio.create_task(counter())
+    try:
+        row = await probe_agent(
+            AgentConfig(name="grok", protocol="acp", command=["grok"]),
+            EnvConfig(discover_proxy=False, inherit=[]),
+        )
+        assert ticks >= 10
+        assert row["available"] is True
+        assert row["version"] == "v1"
+        assert "command=fake-bin" in row["detail"]
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

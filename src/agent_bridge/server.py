@@ -86,7 +86,7 @@ async def list_agents(ctx: Context) -> dict[str, Any]:
         return {
             "ok": True,
             "agents": agents,
-            "env": registry.env_status(),
+            "env": await registry.env_status(),
             "coordinator": registry.coordinator_status(),
         }
     except Exception as exc:

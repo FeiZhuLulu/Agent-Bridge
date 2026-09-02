@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+import psutil
+
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
 from agent_bridge.config import (
@@ -117,6 +119,7 @@ class Registry:
         )
         self.runtime_context = _resolve_runtime_context(runtime_context)
         self.dispatch_enabled = self.runtime_context == "coordinator"
+        self._sibling_cache: tuple[float, int] | None = None
 
     @classmethod
     def create(
@@ -308,9 +311,25 @@ class Registry:
         probes = [probe_agent(cfg, self.config.env) for cfg in self.config.agents.values()]
         return list(await asyncio.gather(*probes))
 
-    def env_status(self) -> dict:
+    SIBLING_CACHE_SEC = 60
+
+    async def _sibling_count(self) -> int:
+        now = time.monotonic()
+        if self._sibling_cache is not None:
+            cached_at, count = self._sibling_cache
+            if now - cached_at < self.SIBLING_CACHE_SEC:
+                return count
+        try:
+            count = await asyncio.to_thread(count_sibling_servers)
+        except (psutil.Error, OSError) as exc:
+            log.warning("could not count sibling agent-bridge servers: %s", exc)
+            count = 0
+        self._sibling_cache = (time.monotonic(), count)
+        return count
+
+    async def env_status(self) -> dict:
         status = describe_env(self.config.env)
-        siblings = count_sibling_servers()
+        siblings = await self._sibling_count()
         if siblings > 0:
             warnings = status.setdefault("warnings", [])
             warnings.append(

@@ -71,13 +71,15 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         config=env_config,
         log_fill=False,
     )
-    try:
+    def _resolve_probe_command() -> list[str]:
         if cfg.name == "dsh":
-            command = resolve_dsh_command(cfg.command, cfg.fallback_commands)
-        elif cfg.protocol == "codex":
-            command = resolve_codex_command(cfg.command, cfg.fallback_commands, env=resolved)
-        else:
-            command = resolve_command(cfg.command, cfg.fallback_commands)
+            return resolve_dsh_command(cfg.command, cfg.fallback_commands)
+        if cfg.protocol == "codex":
+            return resolve_codex_command(cfg.command, cfg.fallback_commands, env=resolved)
+        return resolve_command(cfg.command, cfg.fallback_commands)
+
+    try:
+        command = await asyncio.to_thread(_resolve_probe_command)
     except FileNotFoundError as exc:
         return {"agent": cfg.name, "available": False, "version": None, "detail": str(exc)}
 

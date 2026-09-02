@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -793,3 +794,50 @@ def test_registry_injection_overrides_env(bridge_home, monkeypatch):
     registry = Registry.create(bridge_home, runtime_context="coordinator")
     assert registry.runtime_context == "coordinator"
     assert registry.dispatch_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_env_status_does_not_block_event_loop(bridge_home, monkeypatch):
+    def slow_count() -> int:
+        time.sleep(0.5)
+        return 3
+
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", slow_count)
+    ticks = 0
+
+    async def counter() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    registry = Registry.create(bridge_home)
+    task = asyncio.create_task(counter())
+    try:
+        status = await registry.env_status()
+        assert ticks >= 10
+        warnings = status.get("warnings") or []
+        assert any("3 other agent-bridge server instance(s)" in item for item in warnings)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_env_status_caches_sibling_count(bridge_home, monkeypatch):
+    calls = 0
+
+    def counted() -> int:
+        nonlocal calls
+        calls += 1
+        return 1
+
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", counted)
+    registry = Registry.create(bridge_home)
+    first = await registry.env_status()
+    second = await registry.env_status()
+    assert calls == 1
+    assert first.get("warnings") == second.get("warnings")

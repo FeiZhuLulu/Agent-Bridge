@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 PAGE_BYTE_BUDGET = 8000
 BUFFER_BYTE_LIMIT = 64 * 1024
 BUFFER_MAX_AGE_SEC = 30.0
+_PARSE_CACHE_MAX = 4
+_parse_cache: dict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = {}
 
 
 @dataclass
@@ -44,6 +46,7 @@ def _flush_locked(path: Path, buffer: _Buffer) -> None:
     buffer.lines.clear()
     buffer.size = 0
     buffer.first_pending_at = None
+    _parse_cache.pop(path, None)
 
 
 def _pending_text(path: Path) -> str:
@@ -101,10 +104,23 @@ def flush_session(session_id: str, home: Path | None = None) -> None:
 
 
 def read_events(session_id: str, home: Path | None = None) -> list[dict[str, Any]]:
+    """Parse a session transcript.
+
+    Hits return the cached list object; callers must not mutate it.
+    ``page_events`` and ``recent_activity`` only read the list.
+    """
     path = transcript_path(session_id, home)
     pending = _pending_text(path)
-    if not path.is_file() and not pending:
-        return []
+    if path.is_file():
+        st = path.stat()
+        key = (st.st_size, st.st_mtime_ns, len(pending))
+    else:
+        if not pending:
+            return []
+        key = (0, 0, len(pending))
+    cached = _parse_cache.get(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
     events: list[dict[str, Any]] = []
     persisted = path.read_text(encoding="utf-8") if path.is_file() else ""
     for line in (persisted + pending).splitlines():
@@ -115,6 +131,9 @@ def read_events(session_id: str, home: Path | None = None) -> list[dict[str, Any
             events.append(json.loads(line))
         except json.JSONDecodeError:
             log.warning("skipping malformed transcript line in %s", path)
+    if path not in _parse_cache and len(_parse_cache) >= _PARSE_CACHE_MAX:
+        _parse_cache.pop(next(iter(_parse_cache)))
+    _parse_cache[path] = (key, events)
     return events
 
 

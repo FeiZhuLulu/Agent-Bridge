@@ -4,7 +4,7 @@ import pytest
 
 from agent_bridge import transcript
 from agent_bridge.paths import transcript_path
-from agent_bridge.transcript import append_event, page_events, read_events, read_events_tail
+from agent_bridge.transcript import append_event, flush_session, page_events, read_events, read_events_tail
 
 
 def test_small_events_stay_buffered_but_are_readable(bridge_home):
@@ -101,3 +101,38 @@ def test_page_events_rejects_invalid_paging_parameters():
         page_events(events, offset=-1)
     with pytest.raises(ValueError, match="limit"):
         page_events(events, limit=0)
+
+
+def test_read_events_reuses_parse_between_pages(bridge_home):
+    for text in ("one", "two", "three"):
+        append_event("sess_cache", "message_chunk", {"text": text}, bridge_home)
+    flush_session("sess_cache", bridge_home)
+    first = read_events("sess_cache", bridge_home)
+    second = read_events("sess_cache", bridge_home)
+    assert first is second
+    assert len(first) == 3
+
+
+def test_read_events_cache_invalidates_on_append(bridge_home):
+    for text in ("one", "two", "three"):
+        append_event("sess_inval", "message_chunk", {"text": text}, bridge_home)
+    flush_session("sess_inval", bridge_home)
+    first = read_events("sess_inval", bridge_home)
+    append_event("sess_inval", "message_chunk", {"text": "four"}, bridge_home)
+    buffered = read_events("sess_inval", bridge_home)
+    assert buffered is not first
+    assert len(buffered) == 4
+    flush_session("sess_inval", bridge_home)
+    flushed = read_events("sess_inval", bridge_home)
+    assert len(flushed) == 4
+    assert flushed is not buffered
+
+
+def test_parse_cache_is_bounded(bridge_home):
+    transcript._parse_cache.clear()
+    for index in range(6):
+        session_id = f"sess_bound_{index}"
+        append_event(session_id, "message_chunk", {"text": str(index)}, bridge_home)
+        flush_session(session_id, bridge_home)
+        read_events(session_id, bridge_home)
+    assert len(transcript._parse_cache) <= 4

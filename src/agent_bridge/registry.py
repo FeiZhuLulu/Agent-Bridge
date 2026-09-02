@@ -679,6 +679,12 @@ class Registry:
             )
         return rows
 
+    def session_scope(self) -> dict:
+        return {
+            "scope": "current_instance",
+            "other_live_instances": count_sibling_servers(),
+        }
+
     async def end_session(self, session_id: str) -> dict:
         if not self.dispatch_enabled:
             raise RuntimeError(NESTED_END_SESSION_ERROR)

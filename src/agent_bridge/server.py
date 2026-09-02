@@ -194,9 +194,14 @@ async def cancel_task(ctx: Context, task_id: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_sessions(ctx: Context, active_only: bool = False) -> dict[str, Any]:
-    """List known worker sessions."""
+    """List sessions owned by this Bridge instance and report live siblings."""
     try:
-        return {"ok": True, "sessions": _registry(ctx).list_sessions(active_only=active_only)}
+        registry = _registry(ctx)
+        return {
+            "ok": True,
+            **registry.session_scope(),
+            "sessions": registry.list_sessions(active_only=active_only),
+        }
     except Exception as exc:
         return _error(exc)
 

@@ -58,6 +58,7 @@ async def test_dispatch_wait_fake(bridge_home, tmp_path):
         assert "build foo" in waited["result_text"]
         sessions = registry.list_sessions()
         assert sessions[0]["title"] == "demo"
+        assert registry.sessions[dispatched["session_id"]].proc_state == ProcState.ready
         transcript = registry.get_transcript(dispatched["session_id"])
         assert transcript["count"] >= 1
     finally:
@@ -824,6 +825,36 @@ async def test_env_status_does_not_block_event_loop(bridge_home, monkeypatch):
             await task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_oneshot_adapter_marks_session_idle_unloaded(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr(FakeAdapter, "resident", False)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task("fake", "first turn", cwd=str(work.resolve()))
+        waited = await registry.wait_task(first["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        session = registry.sessions[first["session_id"]]
+        assert session.proc_state == ProcState.idle_unloaded
+        assert first["session_id"] not in {
+            row["session_id"] for row in registry.list_sessions(active_only=True)
+        }
+        assert first["session_id"] in {row["session_id"] for row in registry.list_sessions()}
+        second = await registry.dispatch_task(
+            "fake",
+            "second turn",
+            cwd=str(work.resolve()),
+            session_id=first["session_id"],
+        )
+        second_wait = await registry.wait_task(second["task_id"], timeout_sec=5)
+        assert second_wait["status"] == "completed"
+        assert second["session_id"] == first["session_id"]
+    finally:
+        await registry.stop()
 
 
 @pytest.mark.asyncio

@@ -549,7 +549,7 @@ class Registry:
                 task.finished_at = iso()
             session.last_active_at = iso()
             if session.proc_state != ProcState.dead:
-                session.proc_state = ProcState.ready
+                session.proc_state = ProcState.ready if adapter.resident else ProcState.idle_unloaded
             try:
                 flush_session(session.session_id, self.home)
             except OSError:
@@ -597,6 +597,9 @@ class Registry:
     def _schedule_idle(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
         if session is None:
+            return
+        adapter = self._adapters.get(session_id)
+        if adapter is not None and not adapter.resident:
             return
         try:
             cfg = self.config.get(session.agent)

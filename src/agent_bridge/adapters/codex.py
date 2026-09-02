@@ -36,6 +36,8 @@ STDERR_TAIL_LIMIT = 16000
 
 
 class CodexAdapter(Adapter):
+    resident = False
+
     def __init__(self, agent, home: Path, env_config=None) -> None:
         super().__init__(agent, home, env_config)
         self._procs: dict[str, asyncio.subprocess.Process] = {}

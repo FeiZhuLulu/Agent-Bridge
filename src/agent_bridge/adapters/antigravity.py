@@ -172,6 +172,8 @@ def collect_tool_paths(obj: dict[str, Any], into: set[str]) -> None:
 
 
 class AgyAdapter(Adapter):
+    resident = False
+
     def __init__(self, agent: AgentConfig, home: Path, env_config=None) -> None:
         super().__init__(agent, home, env_config)
         self._procs: dict[str, asyncio.subprocess.Process] = {}

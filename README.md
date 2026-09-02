@@ -103,11 +103,18 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 | `dispatch_task` | Start or resume a turn in the project `cwd` |
 | `wait_task` | Block up to `timeout_sec` (default 180) |
 | `check_task` | Non-blocking status |
-| `get_result` | Truncated result + changed files |
+| `get_result` | Complete final result in pages + changed files |
 | `get_transcript` | Paged session log |
 | `cancel_task` | Cancel the in-flight turn |
 | `list_sessions` | Known sessions |
 | `end_session` | Shut down a worker process |
+
+`get_result` returns up to 60,000 characters per call. Continue with
+`next_cursor` while `has_more` is true. Detailed work events remain available
+through `get_transcript` and `~/.agent-bridge/transcripts/`; sparse task
+lifecycle and error summaries use the rotating files in
+`~/.agent-bridge/logs/`. Transcript writes are buffered and reads do not flush
+them to disk.
 
 ### Coordinator mode
 
@@ -223,11 +230,16 @@ revivable = true
 | `dispatch_task` | 在项目 `cwd` 里开始或续上一次回合 |
 | `wait_task` | 最多等待 `timeout_sec`（默认 180） |
 | `check_task` | 非阻塞状态查询 |
-| `get_result` | 截断后的结果 + 改过的文件 |
+| `get_result` | 分页读取完整结果 + 改过的文件 |
 | `get_transcript` | 分页会话日志 |
 | `cancel_task` | 取消进行中的回合 |
 | `list_sessions` | 已知会话 |
 | `end_session` | 关掉 worker 进程 |
+
+`get_result` 每次最多返回 60,000 个字符；`has_more` 为 true 时，用
+`next_cursor` 继续读取。详细工作事件仍可通过 `get_transcript` 和
+`~/.agent-bridge/transcripts/` 查询；任务生命周期及错误摘要写入
+`~/.agent-bridge/logs/` 下的轮转日志。转录采用缓冲批量写入，读取不会触发刷盘。
 
 ### 协调者档位
 

@@ -32,7 +32,7 @@ from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
 
-STDERR_TAIL_LIMIT = 8000
+STDERR_TAIL_LIMIT = 16000
 
 
 class CodexAdapter(Adapter):
@@ -71,7 +71,6 @@ class CodexAdapter(Adapter):
                     return tail
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[codex %s] %s", session_id, text)
                     tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)

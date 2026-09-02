@@ -115,6 +115,7 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.queued
     stop_reason: str | None = None
     result_text: str = ""
+    result_chars: int = 0
     files_changed: list[str] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

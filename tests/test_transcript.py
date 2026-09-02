@@ -2,8 +2,45 @@ import json
 
 import pytest
 
+from agent_bridge import transcript
 from agent_bridge.paths import transcript_path
 from agent_bridge.transcript import append_event, page_events, read_events, read_events_tail
+
+
+def test_small_events_stay_buffered_but_are_readable(bridge_home):
+    append_event("sess_buffered", "message_chunk", {"text": "hi"}, bridge_home)
+    path = transcript_path("sess_buffered", bridge_home)
+    assert not path.exists()
+    assert read_events("sess_buffered", bridge_home)[0]["data"]["text"] == "hi"
+    assert read_events_tail("sess_buffered", bridge_home)[0]["data"]["text"] == "hi"
+
+    append_event("sess_buffered", "turn_end", {"stop_reason": "end_turn"}, bridge_home)
+    assert path.is_file()
+    assert [event["type"] for event in read_events("sess_buffered", bridge_home)] == [
+        "message_chunk",
+        "turn_end",
+    ]
+
+
+def test_transcript_queries_do_not_flush(bridge_home, monkeypatch):
+    writes: list[str] = []
+    monkeypatch.setattr(transcript, "_append_batch", lambda path, text: writes.append(text))
+    append_event("sess_read_only", "message_chunk", {"text": "pending"}, bridge_home)
+    assert read_events("sess_read_only", bridge_home)
+    assert read_events_tail("sess_read_only", bridge_home)
+    assert writes == []
+    append_event("sess_read_only", "turn_end", {}, bridge_home)
+    assert len(writes) == 1
+
+
+def test_many_chunks_are_written_in_batches(bridge_home, monkeypatch):
+    writes: list[str] = []
+    monkeypatch.setattr(transcript, "_append_batch", lambda path, text: writes.append(text))
+    for index in range(10_000):
+        append_event("sess_many", "message_chunk", {"text": f"chunk-{index}"}, bridge_home)
+    append_event("sess_many", "turn_end", {}, bridge_home)
+    assert 1 < len(writes) < 100
+    assert sum(text.count("\n") for text in writes) == 10_001
 
 
 def test_append_and_page(bridge_home):

@@ -58,7 +58,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - ZCode: configure `timeoutMs` 600000; otherwise ~15–20 s polls.
    - Grok Build: official default `tool_timeout_sec` is 6000; set 600. If unsure or the host kills the call, ~30–45 s polls.
    - Claude Code: per-server `timeout` 600000 (ms) in `.mcp.json`. CLI default is long; desktop has historically died around 60 s — if unsure, ~45 s polls.
-4. `get_result`, then `git status` / `git diff` yourself. Run the relevant build and tests. Do not trust the worker's self-report. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
+4. `get_result`; while `has_more` is true, call it again with `cursor=next_cursor` and concatenate the pages. Then inspect `git status` / `git diff` yourself and run the relevant build and tests. Do not trust the worker's self-report. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
 5. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list. At most three follow-ups, then fix it yourself.
 6. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.
 

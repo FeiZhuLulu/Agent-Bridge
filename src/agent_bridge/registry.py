@@ -30,11 +30,18 @@ from agent_bridge.models import (
     iso,
     normalize_effort,
 )
-from agent_bridge.paths import ensure_home, state_path
-from agent_bridge.persist import atomic_write_json, read_json
+from agent_bridge.paths import ensure_home, result_path, state_path
+from agent_bridge.persist import atomic_write_json, atomic_write_text, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
-from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
+from agent_bridge.transcript import (
+    flush_pending,
+    flush_session,
+    page_events,
+    read_events,
+    read_events_tail,
+    recent_activity,
+)
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
 
@@ -55,8 +62,9 @@ NESTED_END_SESSION_ERROR = (
 )
 
 RESULT_TAIL = 6000
-# result_text kept on the Task (and persisted in state.json). get_result only
-# ever returns the RESULT_TAIL suffix; the full log lives in the transcript.
+# Explicit get_result calls can read up to this many characters per page.
+RESULT_PAGE_MAX_CHARS = 60000
+# Retained only as a fallback if the one-time result artifact write fails.
 RESULT_STORE_MAX = 30000
 # Terminal tasks kept per session; older ones are pruned so state.json does
 # not grow without bound over a long-lived Bridge.
@@ -276,6 +284,10 @@ class Registry:
                 if session.proc_state != ProcState.dead:
                     session.proc_state = ProcState.idle_unloaded
         self._adapters.clear()
+        try:
+            flush_pending(self.home)
+        except OSError:
+            log.exception("could not flush transcripts during shutdown")
         self.save()
 
     def _adapter_for(self, session: Session) -> Adapter:
@@ -429,6 +441,12 @@ class Registry:
             self._cancel_idle(session.session_id)
             self._prune_tasks()
             self.save()
+            log.info(
+                "task_dispatched task_id=%s session_id=%s agent=%s",
+                task.task_id,
+                session.session_id,
+                agent,
+            )
             self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
         return {
             "task_id": task.task_id,
@@ -439,6 +457,7 @@ class Registry:
         }
 
     async def _run_task(self, task_id: str) -> None:
+        started_monotonic = time.monotonic()
         task = self.tasks[task_id]
         session = self.sessions[task.session_id]
         adapter = self._adapter_for(session)
@@ -452,10 +471,19 @@ class Registry:
             result = await adapter.run_turn(session, task)
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
-            task.result_text = _tail(result.text, RESULT_STORE_MAX)
+            task.result_chars = len(result.text)
+            task.warnings = list(result.warnings)
+            try:
+                atomic_write_text(result_path(task.task_id, self.home), result.text)
+                task.result_text = _tail(result.text)
+            except OSError as exc:
+                task.result_text = _tail(result.text, RESULT_STORE_MAX)
+                task.warnings.append(
+                    f"full result persistence failed: {type(exc).__name__}: {exc}"
+                )
+                log.exception("could not persist full result for task %s", task.task_id)
             task.files_changed = merge_files_changed(task.cwd, result.files_changed, before)
             task.usage = result.usage
-            task.warnings = list(result.warnings)
             if session.agent == "grok":
                 observed = observe_grok_session(session.cwd, session.native_session_id)
                 task.observed_model = observed["model"]
@@ -503,9 +531,26 @@ class Registry:
             session.last_active_at = iso()
             if session.proc_state != ProcState.dead:
                 session.proc_state = ProcState.ready
+            try:
+                flush_session(session.session_id, self.home)
+            except OSError:
+                log.exception("could not flush transcript for task %s", task.task_id)
             self._done[task_id].set()
             self._bg.pop(task_id, None)
             self.save()
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            log_method = log.warning if task.status == TaskStatus.failed else log.info
+            log_method(
+                "task_finished task_id=%s session_id=%s agent=%s status=%s "
+                "duration_ms=%s stop_reason=%s error=%r",
+                task.task_id,
+                task.session_id,
+                task.agent,
+                task.status.value,
+                duration_ms,
+                task.stop_reason,
+                (task.error or "")[:500],
+            )
             self._schedule_idle(session.session_id)
 
     def _prune_tasks(self) -> None:
@@ -520,6 +565,10 @@ class Registry:
             for old in terminal[: len(terminal) - TASK_KEEP_PER_SESSION]:
                 self.tasks.pop(old.task_id, None)
                 self._done.pop(old.task_id, None)
+                try:
+                    result_path(old.task_id, self.home).unlink(missing_ok=True)
+                except OSError:
+                    log.warning("could not remove pruned result for task %s", old.task_id)
 
     def _cancel_idle(self, session_id: str) -> None:
         idle = self._idle.pop(session_id, None)
@@ -560,6 +609,31 @@ class Registry:
             raise KeyError(f"unknown task {task_id}")
         return task
 
+    @staticmethod
+    def _result_hint(task: Task, prefix: str) -> str:
+        hint = prefix
+        if task.agent == "grok":
+            hint += (
+                " Grok system-prompt identity is not the selected model; "
+                "use observed_model from this payload."
+            )
+        if task.agent == "kimi":
+            hint += (
+                " Kimi reports a failed turn as end_turn with empty text; "
+                "an empty result is only clean if warnings is empty."
+            )
+        if task.agent == "opencode":
+            hint += (
+                " OpenCode observed_model/effort are the last values Bridge "
+                "successfully set on the session after mapping, not a live sampler."
+            )
+        if task.agent == "claude":
+            hint += (
+                " Claude Code observed_model/effort are the last values Bridge "
+                "successfully set on the session after mapping, not a live sampler."
+            )
+        return hint
+
     def _task_snapshot(self, task: Task, include_result: bool = False) -> dict:
         events = read_events_tail(task.session_id, self.home)
         payload = {
@@ -587,30 +661,17 @@ class Registry:
         else:
             payload["elapsed_sec"] = 0
         if include_result:
-            payload["result_text"] = _tail(task.result_text)
-            payload["result_truncated"] = len(task.result_text.encode("utf-8")) > RESULT_TAIL
+            preview = _tail(task.result_text)
+            total_chars = task.result_chars or len(task.result_text)
+            payload["result_text"] = preview
+            payload["result_total_chars"] = total_chars
+            payload["result_truncated"] = total_chars > len(preview)
             payload["usage"] = task.usage
-            payload["hint"] = "Use get_transcript for the full turn log."
-            if task.agent == "grok":
-                payload["hint"] += (
-                    " Grok system-prompt identity is not the selected model; "
-                    "use observed_model from this payload."
-                )
-            if task.agent == "kimi":
-                payload["hint"] += (
-                    " Kimi reports a failed turn as end_turn with empty text; "
-                    "an empty result is only clean if warnings is empty."
-                )
-            if task.agent == "opencode":
-                payload["hint"] += (
-                    " OpenCode observed_model/effort are the last values Bridge "
-                    "successfully set on the session after mapping, not a live sampler."
-                )
-            if task.agent == "claude":
-                payload["hint"] += (
-                    " Claude Code observed_model/effort are the last values Bridge "
-                    "successfully set on the session after mapping, not a live sampler."
-                )
+            payload["hint"] = self._result_hint(
+                task,
+                "Use get_result for the complete final result and get_transcript "
+                "for the detailed turn log.",
+            )
         return payload
 
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:
@@ -626,8 +687,49 @@ class Registry:
     def check_task(self, task_id: str) -> dict:
         return self._task_snapshot(self._require_task(task_id))
 
-    def get_result(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id), include_result=True)
+    def get_result(
+        self,
+        task_id: str,
+        cursor: int = 0,
+        max_chars: int = RESULT_PAGE_MAX_CHARS,
+    ) -> dict:
+        if cursor < 0:
+            raise ValueError("cursor must be non-negative")
+        if not 1 <= max_chars <= RESULT_PAGE_MAX_CHARS:
+            raise ValueError(f"max_chars must be between 1 and {RESULT_PAGE_MAX_CHARS}")
+        task = self._require_task(task_id)
+        path = result_path(task.task_id, self.home)
+        artifact = path.is_file()
+        try:
+            text = path.read_text(encoding="utf-8") if artifact else task.result_text
+        except OSError as exc:
+            log.warning("could not read full result for task %s: %s", task.task_id, exc)
+            artifact = False
+            text = task.result_text
+        if cursor > len(text):
+            raise ValueError(f"cursor exceeds result length ({len(text)})")
+        end = min(len(text), cursor + max_chars)
+        has_more = end < len(text)
+        payload = self._task_snapshot(task)
+        payload.update(
+            {
+                "result_text": text[cursor:end],
+                "result_offset": cursor,
+                "result_total_chars": len(text) if artifact else (task.result_chars or len(text)),
+                "next_cursor": end if has_more else None,
+                "has_more": has_more,
+                "result_truncated": has_more,
+                "result_complete": artifact,
+                "result_source": "artifact" if artifact else "legacy_state",
+                "usage": task.usage,
+                "hint": self._result_hint(
+                    task,
+                    "Continue with next_cursor while has_more is true. "
+                    "Use get_transcript for the detailed turn log.",
+                ),
+            }
+        )
+        return payload
 
     def get_transcript(self, session_id: str, offset: int = 0, limit: int = 50, kinds: list[str] | None = None) -> dict:
         if session_id not in self.sessions:

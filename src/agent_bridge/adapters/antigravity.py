@@ -24,6 +24,7 @@ from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
 
+STDERR_TAIL_LIMIT = 16000
 _RESULT_STATUSES = {"SUCCESS", "ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING"}
 _TOOL_SCHEMA_MARKERS = (
     "invalid tool call error",
@@ -210,19 +211,21 @@ class AgyAdapter(Adapter):
         ]
         return cmd
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> str:
         if proc.stderr is None:
-            return
+            return ""
+        tail = ""
         try:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
-                    return
+                    return tail
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[antigravity %s] %s", session_id, text)
+                    tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+            return tail
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         cmd = self._build_cmd(session, task)
@@ -311,6 +314,7 @@ class AgyAdapter(Adapter):
             except TimeoutError:
                 log.warning("agy stdout closed but process lingered; killing %s", proc.pid)
                 await reap_subprocess(proc)
+            stderr_tail = await stderr_task
             if session.session_id in self._cancelled:
                 append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
                 return TurnResult(
@@ -365,7 +369,11 @@ class AgyAdapter(Adapter):
                     warnings=exit_warnings,
                 )
             if proc.returncode not in (0, None) and not text_parts:
-                return TurnResult(text="", stop_reason="error", error=f"agy exit {proc.returncode}")
+                detail = stderr_tail.strip()
+                error = f"agy exit {proc.returncode}"
+                if detail:
+                    error += f": {detail}"
+                return TurnResult(text="", stop_reason="error", error=error)
             session.native_session_id = conversation_id
             append_event(session.session_id, "turn_end", {"stop_reason": "end_turn"}, self.home)
             return TurnResult(

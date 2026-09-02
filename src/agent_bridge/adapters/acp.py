@@ -43,6 +43,8 @@ from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
 
+STDERR_TAIL_LIMIT = 16000
+
 log = logging.getLogger(__name__)
 
 GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
@@ -321,6 +323,7 @@ class _Live:
         self.conn: Any = None
         self.client: _BridgeClient | None = None
         self.stderr_task: asyncio.Task[None] | None = None
+        self.stderr_tail = ""
         self.prompt_task: asyncio.Task[Any] | None = None
         self.applied_model: str | None = None
         self.applied_effort: str | None = None
@@ -345,7 +348,12 @@ class AcpAdapter(Adapter):
             return apply_claude_gateway_env(env)
         return env
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
+    async def _drain_stderr(
+        self,
+        proc: asyncio.subprocess.Process,
+        session_id: str,
+        live: _Live,
+    ) -> None:
         if proc.stderr is None:
             return
         try:
@@ -355,7 +363,7 @@ class AcpAdapter(Adapter):
                     return
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[%s %s] %s", self.agent.name, session_id, text)
+                    live.stderr_tail = f"{live.stderr_tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
 
@@ -370,12 +378,14 @@ class AcpAdapter(Adapter):
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
         except TimeoutError:
+            live = self._live.get(session.session_id)
             log.error(
-                "%s %s timed out after %ss for %s; killing worker",
+                "%s %s timed out after %ss for %s; killing worker stderr_tail=%r",
                 self.agent.name,
                 what,
                 timeout,
                 session.session_id,
+                live.stderr_tail if live else "",
             )
             await self.shutdown(session)
             raise RpcTimeoutError(
@@ -418,7 +428,9 @@ class AcpAdapter(Adapter):
         live.proc = proc
         live.client = _BridgeClient(session.session_id, self.home)
         live.conn = connect_to_agent(live.client, proc.stdin, proc.stdout)
-        live.stderr_task = asyncio.create_task(self._drain_stderr(proc, session.session_id))
+        live.stderr_task = asyncio.create_task(
+            self._drain_stderr(proc, session.session_id, live)
+        )
         self._live[session.session_id] = live
         session.pid = proc.pid
         session.pid_create_time = process_create_time(proc.pid) if proc.pid else None
@@ -861,6 +873,7 @@ class AcpAdapter(Adapter):
         live = self._live[session.session_id]
         assert live.conn is not None and live.client is not None
         live.client.reset_turn()
+        live.stderr_tail = ""
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
         if self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
@@ -886,6 +899,15 @@ class AcpAdapter(Adapter):
                 observed_model=live.applied_model,
                 observed_effort=live.applied_effort,
             )
+        except Exception:
+            if live.stderr_tail:
+                log.warning(
+                    "%s prompt failed for %s stderr_tail=%r",
+                    self.agent.name,
+                    session.session_id,
+                    live.stderr_tail,
+                )
+            raise
         finally:
             live.prompt_task = None
         stop = getattr(response, "stop_reason", None) or "end_turn"

@@ -10,7 +10,7 @@ from mcp_types import ToolAnnotations
 from agent_bridge.logging_setup import setup_logging
 from agent_bridge.models import DEFAULT_WAIT_SEC
 from agent_bridge.paths import ensure_home
-from agent_bridge.registry import Registry
+from agent_bridge.registry import RESULT_PAGE_MAX_CHARS, Registry
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -156,10 +156,18 @@ async def check_task(ctx: Context, task_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def get_result(ctx: Context, task_id: str) -> dict[str, Any]:
-    """Return the truncated worker result, changed files, usage, and requested/observed model. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not."""
+async def get_result(
+    ctx: Context,
+    task_id: str,
+    cursor: int = 0,
+    max_chars: int = RESULT_PAGE_MAX_CHARS,
+) -> dict[str, Any]:
+    """Return a page of the complete worker result plus changed files, usage, and requested/observed model. Continue with next_cursor while has_more is true. max_chars is capped at 60000. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not."""
     try:
-        return {"ok": True, **_registry(ctx).get_result(task_id)}
+        return {
+            "ok": True,
+            **_registry(ctx).get_result(task_id, cursor=cursor, max_chars=max_chars),
+        }
     except Exception as exc:
         return _error(exc)
 

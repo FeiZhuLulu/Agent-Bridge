@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 
 from agent_bridge.adapters.fake import FakeAdapter
 from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
-from agent_bridge.paths import state_path
+from agent_bridge.paths import result_path, state_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.registry import (
     NESTED_CANCEL_ERROR,
@@ -311,13 +312,14 @@ async def test_legacy_records_without_owner_fields_are_adopted(bridge_home):
 async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monkeypatch):
     work = tmp_path / "work"
     work.mkdir()
+    result_text = "结" * 8_605
 
     async def write_then_ok(self, session, task):
         (Path(task.cwd) / "smoke.txt").write_text("hello-bridge\n", encoding="utf-8")
         hidden = Path(task.cwd) / ".sessions"
         hidden.mkdir()
         (hidden / "log.jsonl").write_text("{}\n", encoding="utf-8")
-        return TurnResult(text="done", files_changed=[])
+        return TurnResult(text=result_text, files_changed=[])
 
     monkeypatch.setattr(FakeAdapter, "run_turn", write_then_ok)
     registry = Registry.create(bridge_home)
@@ -339,6 +341,73 @@ async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monke
         result = registry.get_result(dispatched["task_id"])
         assert result["model"] == "gemini-3.7-flash"
         assert "observed_model" in result
+        assert result["result_text"] == result_text
+        assert result["has_more"] is False
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_get_result_reads_complete_unicode_result_in_pages(
+    bridge_home, tmp_path, monkeypatch
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    full_text = "汉🙂abc\n" * 25_000
+
+    async def long_turn(self, session, task):
+        return TurnResult(text=full_text)
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", long_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "long", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["result_truncated"] is True
+        assert waited["result_total_chars"] == len(full_text)
+        assert len(registry.tasks[dispatched["task_id"]].result_text) < len(full_text)
+        assert result_path(dispatched["task_id"], bridge_home).read_text(
+            encoding="utf-8"
+        ) == full_text
+
+        cursor = 0
+        parts: list[str] = []
+        while True:
+            page = registry.get_result(
+                dispatched["task_id"], cursor=cursor, max_chars=17_000
+            )
+            assert page["result_complete"] is True
+            assert page["result_source"] == "artifact"
+            assert page["result_total_chars"] == len(full_text)
+            parts.append(page["result_text"])
+            if not page["has_more"]:
+                assert page["next_cursor"] is None
+                break
+            cursor = page["next_cursor"]
+        assert "".join(parts) == full_text
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_lifecycle_logging_is_sparse(bridge_home, tmp_path, caplog):
+    work = tmp_path / "work"
+    work.mkdir()
+    caplog.set_level(logging.INFO, logger="agent_bridge.registry")
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task(
+            "fake", "do not log this prompt", cwd=str(work.resolve())
+        )
+        await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        messages = [record.getMessage() for record in caplog.records]
+        lifecycle = [message for message in messages if message.startswith("task_")]
+        assert len([message for message in lifecycle if message.startswith("task_dispatched")]) == 1
+        assert len([message for message in lifecycle if message.startswith("task_finished")]) == 1
+        assert all("do not log this prompt" not in message for message in lifecycle)
     finally:
         await registry.stop()
 
@@ -535,6 +604,8 @@ async def test_old_terminal_tasks_are_pruned(bridge_home, tmp_path, monkeypatch)
             task_ids.append(more["task_id"])
         assert task_ids[0] not in registry.tasks
         assert task_ids[-1] in registry.tasks
+        assert not result_path(task_ids[0], bridge_home).exists()
+        assert result_path(task_ids[-1], bridge_home).is_file()
         terminal = [t for t in registry.tasks.values() if t.session_id == first["session_id"]]
         assert len(terminal) <= 3  # 2 kept terminal + possibly the newest
     finally:

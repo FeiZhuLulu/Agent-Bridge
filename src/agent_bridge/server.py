@@ -62,19 +62,11 @@ def _registry(ctx: Context) -> Registry:
     if isinstance(lifespan_ctx, Registry):
         lifespan_ctx.touch_activity()
         return lifespan_ctx
-    if isinstance(lifespan_ctx, dict) and "registry" in lifespan_ctx:
-        registry = lifespan_ctx["registry"]
-        registry.touch_activity()
-        return registry
-    registry = getattr(lifespan_ctx, "registry", None)
-    if isinstance(registry, Registry):
-        registry.touch_activity()
-        return registry
     raise RuntimeError("Agent Bridge registry is not available")
 
 
 def _error(exc: Exception) -> dict[str, Any]:
-    return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "error_type": type(exc).__name__}
 
 
 @mcp.tool(annotations=READ_ONLY)

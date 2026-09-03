@@ -39,6 +39,7 @@ inherit = [
   "CLAUDE_CONFIG_DIR",
   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
   "OPENROUTER_API_KEY",
+  "WINDSURF_API_KEY",
   "GOOGLE_API_KEY",
   "GEMINI_API_KEY",
   "CLOUDFLARE_API_TOKEN",
@@ -135,6 +136,17 @@ command = ["opencode", "acp"]
 # API-key connection added with `opencode auth`) are selected after
 # session/new through session/set_config_option. Revive via session/resume:
 # session/load replays the whole history and can outlast the handshake timeout.
+revivable = true
+idle_unload_sec = 900
+
+[agents.devin]
+protocol = "acp"
+# Devin CLI is a native ACP server. A fresh session starts in accept-edits;
+# Bridge switches it to bypass and sets the model through
+# session/set_config_option. Model ids carry the level (swe-1-7-medium,
+# claude-opus-5-high) — there is no separate effort. Auth is `devin auth
+# login` on disk or WINDSURF_API_KEY. Revive is session/load (replays history).
+command = ["devin", "acp"]
 revivable = true
 idle_unload_sec = 900
 

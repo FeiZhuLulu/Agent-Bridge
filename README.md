@@ -13,10 +13,10 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, and Codex CLI. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, or Devin — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, and Devin CLI. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
 ```text
-User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code)
+User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code / Devin)
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
@@ -24,6 +24,7 @@ User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude C
                           → OpenCode
                           → Claude Code
                           → Codex CLI
+                          → Devin CLI
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -57,6 +58,8 @@ Restart Codex. The coordinator skill is written the first time the server starts
   }
 }
 ```
+
+Devin (Desktop or CLI) reads this same `~/.cursor/mcp.json`, so it needs no entry of its own.
 
 ### Connect Kimi Code
 
@@ -144,10 +147,10 @@ uv run pytest
 
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code、Codex CLI 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build、Claude Code 或 Devin——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code、Codex CLI、Devin CLI 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
 
 ```text
-用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code）
+用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code / Devin）
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
@@ -155,6 +158,7 @@ Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——
                           → OpenCode
                           → Claude Code
                           → Codex CLI
+                          → Devin CLI
 ```
 
 它不操作图形界面。用户只和协调者对话。
@@ -188,6 +192,8 @@ codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
   }
 }
 ```
+
+Devin（Desktop 或 CLI）会直接读这份 `~/.cursor/mcp.json`，不需要单独配置。
 
 ### 接到 Kimi Code
 

@@ -845,6 +845,11 @@ class Registry:
                 " Claude Code observed_model/effort are the last values Bridge "
                 "successfully set on the session after mapping, not a live sampler."
             )
+        if task.agent == "devin":
+            hint += (
+                " Devin observed_model is the last id Bridge set on the session; "
+                "observed_effort is always null because the level is part of the model id."
+            )
         if task.files_changed_truncated:
             hint += (
                 f" files_changed lists the first {FILES_CHANGED_MAX} of "

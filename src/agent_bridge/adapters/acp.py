@@ -28,6 +28,7 @@ from agent_bridge.claude_meta import (
     resolve_claude_effort,
 )
 from agent_bridge.config import AgentConfig
+from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
 from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
 from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
@@ -52,8 +53,8 @@ GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
 # These workers' session/load replays persisted history as session/update
 # notifications. session/resume is advertised and skips that replay.
 _RESUME_AGENTS = frozenset({"kimi", "opencode", "claude"})
-_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude"})
-_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude"})
+_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude", "devin"})
+_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "devin"})
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
@@ -394,6 +395,8 @@ class AcpAdapter(Adapter):
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         if self.agent.name == "claude":
             return apply_claude_gateway_env(env)
+        if self.agent.name == "devin":
+            return apply_devin_env(env)
         return env
 
     async def _drain_stderr(
@@ -615,14 +618,74 @@ class AcpAdapter(Adapter):
             live.applied_effort = None
         live.applied_model = model
 
-    async def _set_kimi_option(
-        self,
-        live: _Live,
-        session: Session,
-        config_id: str,
-        value: str,
-    ) -> None:
-        await self._set_config_option(live, session, config_id, value)
+    async def _sync_model_option(self, live: _Live, session: Session) -> None:
+        """Apply ``session.model`` through the typed ``model`` config option.
+
+        A model the coordinator named explicitly and that this session does
+        not offer must fail the turn, not silently run on the default. The
+        error names the real options.
+        """
+        if not session.model or session.model == live.applied_model:
+            return
+        current_model, _ = config_option_values(live.config_options, "model")
+        if session.model == current_model:
+            # Already the session's model (commonly the default a coordinator
+            # names explicitly).
+            self._remember_applied_model(live, session.model)
+            return
+        try:
+            await self._set_config_option(live, session, "model", session.model)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            _, offered = config_option_values(live.config_options, "model")
+            raise RuntimeError(
+                f"{self.agent.name} rejected model {session.model!r}; "
+                f"session advertises {offered or 'no models'}"
+            ) from exc
+        self._remember_applied_model(live, session.model)
+
+    async def _sync_bypass_mode(self, live: _Live, session: Session, mode_id: str) -> None:
+        """Switch a session that starts in a manual mode to ``mode_id``.
+
+        A missing or rejected mode only warns: ACP ``requestPermission``
+        still auto-allows every tool call, so the turn runs either way.
+        """
+        if live.applied_mode == mode_id:
+            return
+        current_mode, offered_modes = config_option_values(live.config_options, "mode")
+        if current_mode == mode_id:
+            live.applied_mode = mode_id
+            return
+        if offered_modes and mode_id not in offered_modes:
+            message = (
+                f"{self.agent.name} {mode_id} is not advertised "
+                f"(session offers mode {offered_modes}); "
+                "ACP requestPermission will auto-allow instead"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        try:
+            await self._rpc(
+                live.conn.set_session_mode(
+                    session_id=session.native_session_id,
+                    mode_id=mode_id,
+                ),
+                "session/set_mode",
+                session,
+            )
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            message = (
+                f"{self.agent.name} rejected mode={mode_id}: {exc}; "
+                "ACP requestPermission will auto-allow instead"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_mode = mode_id
 
     async def _sync_kimi_selection(self, live: _Live, session: Session) -> None:
         """Force yolo mode, then apply model and thinking for a Kimi session.
@@ -646,28 +709,7 @@ class AcpAdapter(Adapter):
                 session,
             )
             live.applied_mode = KIMI_MODE_YOLO
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                # Already the session's model (commonly the default a
-                # coordinator names explicitly); switching thinking below is
-                # the only thing left to do.
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_kimi_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    # A model the coordinator named explicitly and that this
-                    # session does not offer must fail the turn, not silently
-                    # run on the default. Name the real options in the error.
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"kimi rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_model_option(live, session)
         # Order matters: thinking vocabularies are per model, and the set above
         # refreshed the snapshot this reads.
         await self._sync_kimi_thinking(live, session)
@@ -690,7 +732,7 @@ class AcpAdapter(Adapter):
             live.applied_effort = level
             return
         try:
-            await self._set_kimi_option(live, session, "thinking", level)
+            await self._set_config_option(live, session, "thinking", level)
         except RpcTimeoutError:
             raise
         except Exception as exc:
@@ -712,22 +754,7 @@ class AcpAdapter(Adapter):
         """
         if self.agent.name != "opencode" or live.conn is None or not session.native_session_id:
             return
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_config_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"opencode rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_model_option(live, session)
         await self._sync_opencode_effort(live, session)
 
     async def _sync_opencode_effort(self, live: _Live, session: Session) -> None:
@@ -768,55 +795,37 @@ class AcpAdapter(Adapter):
         """
         if self.agent.name != "claude" or live.conn is None or not session.native_session_id:
             return
-        if live.applied_mode != CLAUDE_MODE_BYPASS:
-            current_mode, offered_modes = config_option_values(live.config_options, "mode")
-            if current_mode == CLAUDE_MODE_BYPASS:
-                live.applied_mode = CLAUDE_MODE_BYPASS
-            elif offered_modes and CLAUDE_MODE_BYPASS not in offered_modes:
-                message = (
-                    f"claude bypassPermissions is not advertised "
-                    f"(session offers mode {offered_modes}); "
-                    "ACP requestPermission will auto-allow instead"
-                )
-                log.warning("%s", message)
-                live.pending_warnings.append(message)
-            else:
-                try:
-                    await self._rpc(
-                        live.conn.set_session_mode(
-                            session_id=session.native_session_id,
-                            mode_id=CLAUDE_MODE_BYPASS,
-                        ),
-                        "session/set_mode",
-                        session,
-                    )
-                    live.applied_mode = CLAUDE_MODE_BYPASS
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    message = (
-                        f"claude rejected mode={CLAUDE_MODE_BYPASS}: {exc}; "
-                        "ACP requestPermission will auto-allow instead"
-                    )
-                    log.warning("%s", message)
-                    live.pending_warnings.append(message)
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_config_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"claude rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_bypass_mode(live, session, CLAUDE_MODE_BYPASS)
+        await self._sync_model_option(live, session)
         await self._sync_claude_effort(live, session)
+
+    async def _sync_devin_selection(self, live: _Live, session: Session) -> None:
+        """Force bypass, then apply the model for a Devin CLI session.
+
+        ``devin acp`` starts every session in ``accept-edits`` regardless of
+        ``DEVIN_PERMISSION_MODE``. Model ids already carry the level
+        (``swe-1-7-medium``, ``claude-opus-5-high``); there is no effort
+        option, so a Bridge effort is reported as ignored.
+        """
+        if self.agent.name != "devin" or live.conn is None or not session.native_session_id:
+            return
+        await self._sync_bypass_mode(live, session, DEVIN_MODE_BYPASS)
+        await self._sync_model_option(live, session)
+        if session.effort:
+            message = (
+                f"devin has no effort option; effort={session.effort} ignored. "
+                "Pick a model id that carries the level instead "
+                "(e.g. swe-1-7-medium, claude-opus-5-high)"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+
+    async def _sync_selection(self, live: _Live, session: Session) -> None:
+        await self._sync_grok_model(live, session)
+        await self._sync_kimi_selection(live, session)
+        await self._sync_opencode_selection(live, session)
+        await self._sync_claude_selection(live, session)
+        await self._sync_devin_selection(live, session)
 
     async def _sync_claude_effort(self, live: _Live, session: Session) -> None:
         if not session.effort:
@@ -871,10 +880,7 @@ class AcpAdapter(Adapter):
                 session.native_session_id = None
                 await self.shutdown(session)
             else:
-                await self._sync_grok_model(live, session)
-                await self._sync_kimi_selection(live, session)
-                await self._sync_opencode_selection(live, session)
-                await self._sync_claude_selection(live, session)
+                await self._sync_selection(live, session)
                 return
         live = await self._spawn(session)
         native = session.native_session_id
@@ -893,10 +899,7 @@ class AcpAdapter(Adapter):
                 log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
             else:
                 self._remember_config_options(live, revived)
-                await self._sync_grok_model(live, session)
-                await self._sync_kimi_selection(live, session)
-                await self._sync_opencode_selection(live, session)
-                await self._sync_claude_selection(live, session)
+                await self._sync_selection(live, session)
                 return
         created = await self._rpc(
             self._call_new_session(live.conn, session.cwd, self._new_session_meta(session)),
@@ -911,10 +914,7 @@ class AcpAdapter(Adapter):
             # effort-only dispatch does not raise a spurious warning, and let
             # _sync_grok_model switch the model via session/setModel.
             live.applied_effort = grok_effort(session.effort)
-        await self._sync_grok_model(live, session)
-        await self._sync_kimi_selection(live, session)
-        await self._sync_opencode_selection(live, session)
-        await self._sync_claude_selection(live, session)
+        await self._sync_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         await self.ensure_session(session)

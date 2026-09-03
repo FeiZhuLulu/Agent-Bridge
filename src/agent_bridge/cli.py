@@ -45,7 +45,7 @@ Install:
   uv tool install {GIT_SOURCE}
 
 Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, Grok
-Build, or Claude Code. Skill files are written when a top-level
+Build, or Claude Code (Devin reads the Cursor entry). Skill files are written when a top-level
 coordinator first starts the server and refreshed after each upgrade;
 ordinary restarts leave your local edits alone.
 

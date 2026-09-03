@@ -1,11 +1,11 @@
 ---
 name: agent-bridge
-description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
+description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI) through the Agent Bridge MCP tools. Use when dispatching implementation, research, or test work to a worker; when the user mentions Agent Bridge, dispatch_task, or a worker by name; or when deciding whether to delegate a coding task instead of doing it yourself.
 ---
 
 # Dispatching workers through Agent Bridge
 
-You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, or `codex` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
+You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, `codex`, or `devin` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
 
 ## Before anything: read the policy
 
@@ -34,6 +34,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 - **OpenCode:** optional third implementer — user asked for it, wants a connected provider/model, or Grok and Kimi are busy.
 - **Claude Code:** optional implementer — user asked, or Grok and Kimi are busy. Worker binary is `claude-agent-acp`.
 - **Codex CLI:** optional implementer — user asked, or others are busy. Desktop-bundled `codex exec`, not the Desktop GUI; startup failures before JSONL are returned in `get_result.error`.
+- **Devin CLI:** optional implementer — user asked, or others are busy. `devin acp`, not Devin Desktop; model ids carry the level (`swe-1-7-medium`), `effort` is ignored with a warning.
 - **DeepSeek Harness:** only when others are unavailable or the user asks.
 
 ## The dispatch loop

@@ -8,6 +8,7 @@ from pathlib import Path
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.codex_exec import resolve_codex_command
 from agent_bridge.config import AgentConfig, EnvConfig
+from agent_bridge.devin_meta import apply_devin_env
 from agent_bridge.dsh_home import (
     apply_dsh_worker_env,
     default_model,
@@ -43,6 +44,31 @@ async def _version_string(executable: str) -> str:
         if text:
             return text.splitlines()[0][:200]
     return ""
+
+
+async def _devin_auth(executable: str, env: dict[str, str]) -> str:
+    """First line of ``devin auth status``: ``Logged in (via Devin).`` or ``Not logged in.``
+
+    The CLI reports "Not logged in" whenever ``ACP_BACKEND`` is present, so
+    the probe runs with the same env the worker will get.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            executable,
+            "auth",
+            "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except OSError:
+        return "unknown"
+    except TimeoutError:
+        await reap_subprocess(proc)
+        return "unknown"
+    first = (out or b"").decode("utf-8", errors="replace").strip().splitlines()
+    return first[0][:80] if first else "unknown"
 
 
 def _kimi_home(env: dict[str, str]) -> Path:
@@ -166,6 +192,16 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             "product `claude` is not ACP; worker is claude-agent-acp "
             "(@agentclientprotocol/claude-agent-acp)"
         )
+
+    if cfg.name == "devin":
+        resolved = apply_devin_env(resolved)
+        details.append(
+            "model=ids the session advertises (`devin models list`), level is part of the id "
+            "e.g. swe-1-7-medium, claude-opus-5-high; no effort option; mode forced to bypass"
+        )
+        details.append(f"auth={await _devin_auth(command[0], resolved)}")
+        if resolved.get("WINDSURF_API_KEY"):
+            details.append("WINDSURF_API_KEY=set")
 
     if cfg.protocol == "codex":
         details.append(

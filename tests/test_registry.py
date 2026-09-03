@@ -1251,6 +1251,26 @@ async def test_check_task_reports_silent_for_sec(bridge_home, tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_cancel_immediately_after_dispatch_returns_fast(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        started = time.monotonic()
+        cancelled = await registry.cancel_task(dispatched["task_id"])
+        assert time.monotonic() - started < 3
+        assert cancelled["status"] == "cancelled"
+        assert registry._bg == {}
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=1)
+        assert waited["status"] == "cancelled"
+        assert registry.sessions[dispatched["session_id"]].proc_state != ProcState.spawning
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_cancel_task_still_wins_over_stall(bridge_home, tmp_path, monkeypatch):
     monkeypatch.setattr("agent_bridge.registry.STALL_POLL_SEC", 0.2)
     monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "10")

@@ -942,12 +942,19 @@ class Registry:
         bg = self._bg.get(task_id)
         if bg is not None:
             bg.cancel()
-        try:
-            await asyncio.wait_for(self._done[task_id].wait(), timeout=15)
-        except TimeoutError:
+            await asyncio.wait({bg}, timeout=15)
+        else:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._done[task_id].wait(), timeout=15)
+        if not self._done[task_id].is_set():
+            # _run_task never ran (cancelled before its first step) or did not
+            # finish in time; close the record here.
             task.status = TaskStatus.cancelled
             task.stop_reason = "cancelled"
             task.finished_at = iso()
+            if task.started_at is None and session.proc_state == ProcState.spawning:
+                session.proc_state = ProcState.idle_unloaded
+            self._bg.pop(task_id, None)
             self._done[task_id].set()
             self.save()
         return self._task_snapshot(self.tasks[task_id])

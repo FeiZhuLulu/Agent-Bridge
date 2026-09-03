@@ -114,7 +114,9 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 through `get_transcript` and `~/.agent-bridge/transcripts/`; sparse task
 lifecycle and error summaries use the rotating files in
 `~/.agent-bridge/logs/`. Transcript writes are buffered and reads do not flush
-them to disk. A turn whose worker stays silent past `stall_timeout_sec`
+them to disk. Buffered events reach disk after 64 KB or 30 s, or as soon as a
+turn ends; a normal stop flushes everything, so only a crash or a hard kill can
+lose that last window. A turn whose worker stays silent past `stall_timeout_sec`
 (default 1800 s, per worker) ends `failed` / `stalled`; `check_task` shows
 `silent_for_sec`.
 
@@ -242,6 +244,7 @@ revivable = true
 `next_cursor` 继续读取。详细工作事件仍可通过 `get_transcript` 和
 `~/.agent-bridge/transcripts/` 查询；任务生命周期及错误摘要写入
 `~/.agent-bridge/logs/` 下的轮转日志。转录采用缓冲批量写入，读取不会触发刷盘。
+缓冲事件在累计 64 KB、间隔 30 秒或一轮结束时落盘；正常停止会全部刷出，只有崩溃或被强杀才可能丢掉最后这一窗口。
 Worker 静默超过 `stall_timeout_sec`（默认 1800 秒，可按 Worker 设置）的一轮会以
 `failed` / `stalled` 结束；`check_task` 会给出 `silent_for_sec`。
 

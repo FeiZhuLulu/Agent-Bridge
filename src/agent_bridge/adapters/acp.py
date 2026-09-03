@@ -440,6 +440,9 @@ class AcpAdapter(Adapter):
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=CURSOR_MODEL_LIST_TIMEOUT_SEC
             )
+        except asyncio.CancelledError:
+            await reap_subprocess(proc)
+            raise
         except TimeoutError:
             await reap_subprocess(proc)
             raise RuntimeError(

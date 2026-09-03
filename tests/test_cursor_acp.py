@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from agent_bridge.adapters.acp import (
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task
+from agent_bridge.processes import reap_subprocess
 
 
 CURSOR_AGENT = Path(__file__).with_name("cursor_agent.py")
@@ -122,3 +124,42 @@ async def test_cursor_unavailable_model_fails_before_acp_start(tmp_path):
     with pytest.raises(ValueError, match="available model IDs: cursor-model-a, cursor-model-b"):
         await adapter.run_turn(session, task)
     assert session.pid is None
+
+
+@pytest.mark.asyncio
+async def test_cursor_model_discovery_reaps_process_on_cancel(tmp_path, monkeypatch):
+    reaped: list[object] = []
+    started = asyncio.Event()
+    real_exec = asyncio.create_subprocess_exec
+    real_reap = reap_subprocess
+
+    async def wrapping_exec(*args, **kwargs):
+        proc = await real_exec(*args, **kwargs)
+        started.set()
+        return proc
+
+    async def tracking_reap(proc, timeout=5.0):
+        reaped.append(proc)
+        await real_reap(proc, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", wrapping_exec)
+    monkeypatch.setattr("agent_bridge.adapters.acp.reap_subprocess", tracking_reap)
+
+    adapter = AcpAdapter(
+        AgentConfig(
+            name="cursor",
+            protocol="acp",
+            command=[sys.executable, "-c", "import time; time.sleep(30)", "acp"],
+        ),
+        tmp_path / "bridge-home",
+    )
+    task = asyncio.create_task(
+        adapter._cursor_models(adapter.agent.command, adapter._env(), str(tmp_path))
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reaped
+    proc = reaped[0]
+    assert proc.returncode is not None

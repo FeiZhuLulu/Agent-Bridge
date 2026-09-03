@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sys
 import time
 from pathlib import Path
 
@@ -139,6 +141,51 @@ async def test_cursor_followup_cannot_change_startup_model(bridge_home, tmp_path
                 model="cursor-model-b",
             )
         assert registry.sessions[first["session_id"]].model == "cursor-model-a"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_can_correct_model_before_acp_session_starts(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    cursor_agent = Path(__file__).resolve().with_name("cursor_agent.py")
+    command = [sys.executable, str(cursor_agent), "acp"]
+    encoded = ", ".join(json.dumps(part) for part in command)
+    (bridge_home / "agents.toml").write_text(
+        "[agents.cursor]\n"
+        'protocol = "acp"\n'
+        f"command = [{encoded}]\n",
+        encoding="utf-8",
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task(
+            "cursor", "one", cwd=str(work.resolve()), model="made-up-model"
+        )
+        waited = await registry.wait_task(first["task_id"], timeout_sec=15)
+        assert waited["status"] == "failed"
+        assert waited["error"] is not None
+        assert "made-up-model" in waited["error"]
+        session = registry.sessions[first["session_id"]]
+        assert session.native_session_id is None
+        assert session.pid is None
+
+        second = await registry.dispatch_task(
+            "cursor",
+            "two",
+            cwd=str(work.resolve()),
+            session_id=first["session_id"],
+            model="cursor-model-a",
+        )
+        waited = await registry.wait_task(second["task_id"], timeout_sec=15)
+        assert waited["timed_out"] is False
+        assert waited["status"] == "completed"
+        session = registry.sessions[first["session_id"]]
+        assert session.model == "cursor-model-a"
+        assert session.native_session_id is not None
     finally:
         await registry.stop()
 

@@ -393,10 +393,15 @@ class Registry:
                         f"session {session.session_id} is busy with {busy.task_id}; call wait_task first"
                     )
                 if agent == "cursor" and model is not None and model != session.model:
-                    raise ValueError(
-                        "cursor fixes its model when the ACP process starts; "
-                        "start a new Bridge session to use a different model"
-                    )
+                    if session.native_session_id is not None:
+                        raise ValueError(
+                            "cursor fixes its model when the ACP process starts; "
+                            "start a new Bridge session to use a different model"
+                        )
+                    # No native session yet: drop any partial ACP process before pinning a new model.
+                    adapter = self._adapters.get(session.session_id)
+                    if adapter is not None:
+                        await adapter.shutdown(session)
             else:
                 session = Session(
                     session_id=_new_id("sess"),

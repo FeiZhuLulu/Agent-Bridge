@@ -8,7 +8,13 @@ from pathlib import Path
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.codex_exec import resolve_codex_command
 from agent_bridge.config import AgentConfig, EnvConfig
-from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
+from agent_bridge.dsh_home import (
+    apply_dsh_worker_env,
+    default_model,
+    dsh_home,
+    installed_dsh_version,
+    resolve_dsh_command,
+)
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import reap_subprocess, resolve_command
 from agent_bridge.worker_env import build_worker_env
@@ -103,6 +109,9 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
                 return {"agent": cfg.name, "available": False, "version": None, "detail": "node not found"}
             node_ver = await _version_string(node)
             details.append(f"node={node_ver or 'unknown'}")
+        dsh_version = await asyncio.to_thread(installed_dsh_version)
+        if dsh_version:
+            version = dsh_version
         dsh_env = apply_dsh_worker_env(resolved, command=command)
         home = dsh_home(dsh_env)
         details.append(f"dsh-home={home}")

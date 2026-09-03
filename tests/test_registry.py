@@ -106,6 +106,44 @@ async def test_followup_cwd_must_match(bridge_home, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cursor_followup_cannot_change_startup_model(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    bridge_home.mkdir(parents=True, exist_ok=True)
+    (bridge_home / "agents.toml").write_text(
+        '[agents.cursor]\nprotocol = "fake"\n', encoding="utf-8"
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        first = await registry.dispatch_task(
+            "cursor", "one", cwd=str(work.resolve()), model="cursor-model-a"
+        )
+        await registry.wait_task(first["task_id"], timeout_sec=5)
+
+        same = await registry.dispatch_task(
+            "cursor",
+            "two",
+            cwd=str(work.resolve()),
+            session_id=first["session_id"],
+            model="cursor-model-a",
+        )
+        await registry.wait_task(same["task_id"], timeout_sec=5)
+
+        with pytest.raises(ValueError, match="start a new Bridge session"):
+            await registry.dispatch_task(
+                "cursor",
+                "three",
+                cwd=str(work.resolve()),
+                session_id=first["session_id"],
+                model="cursor-model-b",
+            )
+        assert registry.sessions[first["session_id"]].model == "cursor-model-a"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_relative_cwd_rejected(bridge_home):
     registry = Registry.create(bridge_home)
     await registry.start()

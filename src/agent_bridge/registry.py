@@ -392,6 +392,11 @@ class Registry:
                     raise RuntimeError(
                         f"session {session.session_id} is busy with {busy.task_id}; call wait_task first"
                     )
+                if agent == "cursor" and model is not None and model != session.model:
+                    raise ValueError(
+                        "cursor fixes its model when the ACP process starts; "
+                        "start a new Bridge session to use a different model"
+                    )
             else:
                 session = Session(
                     session_id=_new_id("sess"),
@@ -610,6 +615,12 @@ class Registry:
                 payload["hint"] += (
                     " Claude Code observed_model/effort are the last values Bridge "
                     "successfully set on the session after mapping, not a live sampler."
+                )
+            if task.agent == "cursor":
+                payload["hint"] += (
+                    " Cursor observed_model is the model ID Bridge validated and pinned "
+                    "when launching ACP, not a live sampler; start a new Bridge session "
+                    "to change it."
                 )
         return payload
 

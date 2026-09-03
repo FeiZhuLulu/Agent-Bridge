@@ -8,7 +8,7 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from acp import PROTOCOL_VERSION, connect_to_agent, text_block
 from acp.schema import (
@@ -229,7 +229,13 @@ class _BridgeClient:
         self.usage = {}
         self.tool_kinds = {}
 
-    async def request_permission(self, session_id, tool_call, options, **kwargs):
+    async def request_permission(
+        self,
+        session_id: str,
+        tool_call: Any,
+        options: list[Any] | None,
+        **kwargs: Any,
+    ) -> RequestPermissionResponse:
         option = _pick_permission_option(options or [])
         dumped = _dump(tool_call)
         if option is None:
@@ -250,7 +256,7 @@ class _BridgeClient:
             outcome=AllowedOutcome(option_id=option.option_id, outcome="selected")
         )
 
-    async def session_update(self, session_id, update, **kwargs):
+    async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         dumped = _dump(update)
         type_name = type(update).__name__
         text = ""
@@ -304,42 +310,58 @@ class _BridgeClient:
                     data["output"] = summary
         append_event(self.session_id, event_type, data, self.home)
 
-    async def write_text_file(self, session_id, path, content, **kwargs):
+    async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("filesystem client methods are disabled")
 
-    async def read_text_file(self, session_id, path, line=None, limit=None, **kwargs):
+    async def read_text_file(
+        self,
+        session_id: str,
+        path: str,
+        line: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> NoReturn:
         raise RuntimeError("filesystem client methods are disabled")
 
-    async def create_terminal(self, session_id, command, args=None, env=None, cwd=None, output_byte_limit=None, **kwargs):
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[str] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def terminal_output(self, session_id, terminal_id, **kwargs):
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def release_terminal(self, session_id, terminal_id, **kwargs):
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> None:
         return None
 
-    async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
+    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def kill_terminal(self, session_id, terminal_id, **kwargs):
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> None:
         return None
 
-    async def create_elicitation(self, message, mode, **kwargs):
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
         from acp.schema import DeclineElicitationResponse
 
         return DeclineElicitationResponse(action="decline")
 
-    async def complete_elicitation(self, elicitation_id, **kwargs):
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         return None
 
-    async def ext_method(self, method, params):
+    async def ext_method(self, method: str, params: Any) -> dict[str, Any]:
         return {}
 
-    async def ext_notification(self, method, params):
+    async def ext_notification(self, method: str, params: Any) -> None:
         return None
 
-    def on_connect(self, conn) -> None:
+    def on_connect(self, conn: Any) -> None:
         return None
 
 

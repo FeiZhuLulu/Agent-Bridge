@@ -659,16 +659,22 @@ class Registry:
             {"error": task.error, "stalled": True, "stall_timeout_sec": limit},
             self.home,
         )
-        try:
-            await adapter.cancel(session)
-        except Exception:
-            log.exception("stall cancel failed for task %s", task.task_id)
+        # The turn normally returns (and _run_task tears this watch down)
+        # while cancel() is still reaping the worker; shield so that
+        # cleanup runs to completion instead of dying with the watch.
+        await asyncio.shield(self._cancel_stalled(adapter, session, task.task_id))
         try:
             await asyncio.wait_for(self._done[task.task_id].wait(), timeout=STALL_CANCEL_GRACE_SEC)
         except TimeoutError:
             bg = self._bg.get(task.task_id)
             if bg is not None:
                 bg.cancel()
+
+    async def _cancel_stalled(self, adapter: Adapter, session: Session, task_id: str) -> None:
+        try:
+            await adapter.cancel(session)
+        except Exception:
+            log.exception("stall cancel failed for task %s", task_id)
 
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)

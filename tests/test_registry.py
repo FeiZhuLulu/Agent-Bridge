@@ -1267,3 +1267,34 @@ async def test_cancel_task_still_wins_over_stall(bridge_home, tmp_path, monkeypa
         assert cancelled["stop_reason"] == "cancelled"
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_stall_cancel_finishes_after_turn_returns(bridge_home, tmp_path, monkeypatch):
+    """The turn usually returns before adapter.cancel() has finished reaping;
+    tearing down the watchdog must not abort that cleanup halfway."""
+    monkeypatch.setattr("agent_bridge.registry.STALL_POLL_SEC", 0.2)
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "10")
+    cancel_finished = asyncio.Event()
+    original_cancel = FakeAdapter.cancel
+
+    async def slow_cancel(self, session):
+        await original_cancel(self, session)
+        await asyncio.sleep(0.5)
+        cancel_finished.set()
+
+    monkeypatch.setattr(FakeAdapter, "cancel", slow_cancel)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 1
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "silent", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=8)
+        assert waited["stop_reason"] == "stalled"
+        assert not cancel_finished.is_set()
+        await asyncio.sleep(0.8)
+        assert cancel_finished.is_set()
+    finally:
+        await registry.stop()

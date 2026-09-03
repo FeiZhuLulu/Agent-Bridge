@@ -257,7 +257,9 @@ class Registry:
             own, self._pending_state = self._pending_state, None
             try:
                 await asyncio.to_thread(self._write_state, own)
-            except OSError:
+            except Exception:
+                # A failed write must not kill the flush task: stop() awaits
+                # it, and the next save() has to be able to retry.
                 log.exception("could not write state.json")
 
     async def flush_state(self) -> None:

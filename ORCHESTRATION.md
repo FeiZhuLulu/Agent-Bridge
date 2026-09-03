@@ -51,7 +51,7 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - Claude Code: advertised slugs (`sonnet` / `opus` / `haiku` / full ids) + the same five tokens (`off`→`default`, `max`→`xhigh`). Unknown slug fails; missing/unmappable effort is a warning. Mode forced to `bypassPermissions`. Revive via `session/resume`.
    - DSH: `provider/model` + `off|low|high|max`. Changing them respawns.
    - Codex CLI: advertised slugs + `off|low|medium|high|max` (`off`→`none`). Default `--approve-for-me`; prompt on stdin. Revive via `exec resume`. Startup failures before JSONL are returned in `get_result.error`.
-3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
+3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. `wait_task` / `check_task` also report `silent_for_sec`, the time since the worker's last output. Bridge cancels a turn that stays silent for `stall_timeout_sec` (default 1800, per worker in `agents.toml`, 0 disables) and returns `status=failed`, `stop_reason="stalled"`. A long silent build looks the same as a hung worker: if the step was legitimate, raise that worker's limit; otherwise resume on the same `session_id` with a narrower task. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
    - Cursor: host ~45–60 s; pass ~30 and loop.
    - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.

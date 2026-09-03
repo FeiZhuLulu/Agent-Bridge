@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -37,12 +38,16 @@ from agent_bridge.persist import atomic_write_json, atomic_write_text, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
 from agent_bridge.transcript import (
+    append_event,
     flush_pending,
     flush_session,
+    forget_worker_activity,
+    mark_worker_activity,
     page_events,
     read_events,
     read_events_tail,
     recent_activity,
+    worker_silence_sec,
 )
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
@@ -76,6 +81,8 @@ SESSION_KEEP_INACTIVE = 50
 SESSION_RETAIN_SEC = 14 * 86400
 TASK_KEEP_TOTAL = 200
 STOP_TASK_GRACE_SEC = 15
+STALL_POLL_SEC = 30
+STALL_CANCEL_GRACE_SEC = 15
 
 
 def _new_id(prefix: str) -> str:
@@ -513,8 +520,19 @@ class Registry:
         session.proc_state = ProcState.busy
         session.last_active_at = iso()
         self.save()
+        watch = None
         try:
+            mark_worker_activity(session.session_id, self.home)
             before = await asyncio.to_thread(snapshot_workspace, task.cwd)
+            limit = self.config.get(session.agent).stall_timeout_sec
+            watch = (
+                asyncio.create_task(
+                    self._stall_watch(task, session, adapter, limit),
+                    name=f"stall-{task_id}",
+                )
+                if limit > 0
+                else None
+            )
             result = await adapter.run_turn(session, task)
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
@@ -578,6 +596,10 @@ class Registry:
                 task.error = str(exc)
                 task.stop_reason = "error"
         finally:
+            if watch is not None:
+                watch.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watch
             if task.finished_at is None:
                 task.finished_at = iso()
             session.last_active_at = iso()
@@ -604,6 +626,49 @@ class Registry:
                 (task.error or "")[:500],
             )
             self._schedule_idle(session.session_id)
+
+    async def _stall_watch(
+        self,
+        task: Task,
+        session: Session,
+        adapter: Adapter,
+        limit: int,
+    ) -> None:
+        while True:
+            silence = worker_silence_sec(session.session_id, self.home) or 0.0
+            remaining = limit - silence
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, STALL_POLL_SEC))
+        if task.status in TERMINAL_STATUSES:
+            return
+        log.warning(
+            "task %s stalled: no worker output for %ss; cancelling the turn",
+            task.task_id,
+            limit,
+        )
+        task.status = TaskStatus.failed
+        task.stop_reason = "stalled"
+        task.error = (
+            f"worker produced no output for {limit}s (stall_timeout_sec); "
+            "Bridge cancelled the turn"
+        )
+        append_event(
+            session.session_id,
+            "error",
+            {"error": task.error, "stalled": True, "stall_timeout_sec": limit},
+            self.home,
+        )
+        try:
+            await adapter.cancel(session)
+        except Exception:
+            log.exception("stall cancel failed for task %s", task.task_id)
+        try:
+            await asyncio.wait_for(self._done[task.task_id].wait(), timeout=STALL_CANCEL_GRACE_SEC)
+        except TimeoutError:
+            bg = self._bg.get(task.task_id)
+            if bg is not None:
+                bg.cancel()
 
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
@@ -632,6 +697,7 @@ class Registry:
         for session in drop:
             session_id = session.session_id
             self.sessions.pop(session_id, None)
+            forget_worker_activity(session_id, self.home)
             self._cancel_idle(session_id)
             for task in [item for item in self.tasks.values() if item.session_id == session_id]:
                 self._drop_task(task.task_id)
@@ -736,6 +802,13 @@ class Registry:
                 f" files_changed lists the first {FILES_CHANGED_MAX} of "
                 f"{task.files_changed_total} paths; run git status in cwd for the full set."
             )
+        if task.stop_reason == "stalled":
+            hint += (
+                " The worker went silent for stall_timeout_sec and Bridge cancelled the turn; "
+                "read get_transcript for its last activity, then either dispatch a narrower "
+                f"task on the same session_id or raise [agents.{task.agent}] stall_timeout_sec "
+                "if that step was legitimately long."
+            )
         return hint
 
     def _task_snapshot(self, task: Task, include_result: bool = False) -> dict:
@@ -778,6 +851,13 @@ class Registry:
                 "Use get_result for the complete final result and get_transcript "
                 "for the detailed turn log.",
             )
+        payload["silent_for_sec"] = (
+            int(worker_silence_sec(task.session_id, self.home) or 0)
+            if task.status == TaskStatus.running
+            else None
+        )
+        cfg = self.config.agents.get(task.agent)
+        payload["stall_timeout_sec"] = cfg.stall_timeout_sec if cfg is not None else None
         return payload
 
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:
@@ -900,6 +980,7 @@ class Registry:
         if adapter is not None:
             await adapter.shutdown(session)
         self._cancel_idle(session_id)
+        forget_worker_activity(session_id, self.home)
         session.proc_state = ProcState.dead
         session.pid = None
         self.save()

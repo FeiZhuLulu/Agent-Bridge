@@ -4,7 +4,16 @@ import pytest
 
 from agent_bridge import transcript
 from agent_bridge.paths import transcript_path
-from agent_bridge.transcript import append_event, flush_session, page_events, read_events, read_events_tail
+from agent_bridge.transcript import (
+    append_event,
+    flush_session,
+    forget_worker_activity,
+    mark_worker_activity,
+    page_events,
+    read_events,
+    read_events_tail,
+    worker_silence_sec,
+)
 
 
 def test_small_events_stay_buffered_but_are_readable(bridge_home):
@@ -126,6 +135,20 @@ def test_read_events_cache_invalidates_on_append(bridge_home):
     flushed = read_events("sess_inval", bridge_home)
     assert len(flushed) == 4
     assert flushed is not buffered
+
+
+def test_worker_activity_clock(bridge_home):
+    assert worker_silence_sec("sess_never", bridge_home) is None
+    mark_worker_activity("sess_act", bridge_home)
+    silence = worker_silence_sec("sess_act", bridge_home)
+    assert silence is not None
+    assert silence == pytest.approx(0, abs=0.5)
+    append_event("sess_act", "message_chunk", {"text": "hi"}, bridge_home)
+    refreshed = worker_silence_sec("sess_act", bridge_home)
+    assert refreshed is not None
+    assert refreshed == pytest.approx(0, abs=0.5)
+    forget_worker_activity("sess_act", bridge_home)
+    assert worker_silence_sec("sess_act", bridge_home) is None
 
 
 def test_parse_cache_is_bounded(bridge_home):

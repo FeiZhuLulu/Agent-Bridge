@@ -39,7 +39,7 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 ## The dispatch loop
 
 1. `dispatch_task` with `cwd` = **this conversation's project folder** (absolute) — never the Agent Bridge install path, never a temp dir. The `message` must be self-contained: background, absolute paths, acceptance criteria, things not to do. Leave `model`/`effort` unset unless you have a reason; slugs and effort mappings per worker are documented in ORCHESTRATION.md in the Agent-Bridge repo.
-2. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
+2. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. `silent_for_sec` in the payload is the time since the worker's last output; a turn silent past `stall_timeout_sec` (default 1800) ends `failed` / `stop_reason="stalled"` — raise that worker's limit in `agents.toml` if the step was legitimately long. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
    - Cursor: host ~45–60 s; pass ~30 and loop.
    - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.

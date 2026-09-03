@@ -10,7 +10,15 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.adapters.fake import FakeAdapter
-from agent_bridge.models import ProcState, Session, Task, TaskStatus, TurnResult, iso
+from agent_bridge.models import (
+    TERMINAL_STATUSES,
+    ProcState,
+    Session,
+    Task,
+    TaskStatus,
+    TurnResult,
+    iso,
+)
 from agent_bridge.paths import result_path, state_path, transcript_path
 from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.registry import (
@@ -20,6 +28,7 @@ from agent_bridge.registry import (
     NESTED_PREFERENCES_ERROR,
     Registry,
 )
+from agent_bridge.transcript import append_event, read_events
 
 
 @pytest.mark.asyncio
@@ -1135,3 +1144,126 @@ def test_schedule_idle_noop_while_stopping(bridge_home, tmp_path):
     registry._stopping = True
     registry._schedule_idle("sess_idle")
     assert registry._idle == {}
+
+
+@pytest.mark.asyncio
+async def test_stall_watchdog_fails_silent_turn(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.STALL_POLL_SEC", 0.2)
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "10")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 1
+    await registry.start()
+    try:
+        started = time.monotonic()
+        dispatched = await registry.dispatch_task("fake", "silent", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=8)
+        assert time.monotonic() - started < 6
+        assert waited["status"] == "failed"
+        assert waited["stop_reason"] == "stalled"
+        assert waited["error"] is not None and "no output for 1s" in waited["error"]
+        assert waited["silent_for_sec"] is None
+        assert "stall_timeout_sec" in (waited.get("hint") or "")
+        assert registry._bg == {}
+        events = read_events(dispatched["session_id"], bridge_home)
+        assert any(
+            event.get("type") == "error" and (event.get("data") or {}).get("stalled") is True
+            for event in events
+        )
+        payload = read_json(state_path(bridge_home), {})
+        row = next(item for item in payload["tasks"] if item["task_id"] == dispatched["task_id"])
+        assert row["status"] == "failed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_stall_watchdog_resets_on_worker_output(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.STALL_POLL_SEC", 0.2)
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "2.5")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 1
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "ticking", cwd=str(work.resolve()))
+        task_id = dispatched["task_id"]
+        session_id = dispatched["session_id"]
+
+        async def _tick() -> None:
+            while registry.tasks[task_id].status not in TERMINAL_STATUSES:
+                append_event(session_id, "message_chunk", {"text": "tick"}, bridge_home)
+                await asyncio.sleep(0.3)
+
+        ticker = asyncio.create_task(_tick())
+        try:
+            waited = await registry.wait_task(task_id, timeout_sec=8)
+            assert waited["status"] == "completed"
+        finally:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_stall_watchdog_disabled_when_zero(bridge_home, tmp_path, monkeypatch):
+    async def _boom(*args, **kwargs):
+        raise AssertionError("_stall_watch should not start when stall_timeout_sec is 0")
+
+    monkeypatch.setattr(Registry, "_stall_watch", _boom)
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "0.3")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 0
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "ok", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_reports_silent_for_sec(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "2")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
+        await asyncio.sleep(0.5)
+        checked = registry.check_task(dispatched["task_id"])
+        assert isinstance(checked["silent_for_sec"], int)
+        assert 0 <= checked["silent_for_sec"] <= 2
+        assert checked["stall_timeout_sec"] == 1800
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["silent_for_sec"] is None
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_still_wins_over_stall(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.STALL_POLL_SEC", 0.2)
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "10")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 1
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
+        await asyncio.sleep(0.05)
+        cancelled = await registry.cancel_task(dispatched["task_id"])
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["stop_reason"] == "cancelled"
+    finally:
+        await registry.stop()

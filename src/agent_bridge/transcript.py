@@ -29,6 +29,7 @@ class _Buffer:
 
 
 _buffers: dict[Path, _Buffer] = {}
+_activity: dict[Path, float] = {}
 _buffers_lock = threading.Lock()
 
 
@@ -72,11 +73,33 @@ def append_event(session_id: str, event_type: str, data: dict[str, Any] | None =
             and now - buffer.first_pending_at >= BUFFER_MAX_AGE_SEC
         )
         terminal = event_type in {"turn_end", "error"}
+        _activity[path] = now
         if buffer.size >= BUFFER_BYTE_LIMIT or aged or terminal:
             _flush_locked(path, buffer)
         if terminal and not buffer.lines:
             _buffers.pop(path, None)
     return event
+
+
+def mark_worker_activity(session_id: str, home: Path | None = None) -> None:
+    path = transcript_path(session_id, home)
+    with _buffers_lock:
+        _activity[path] = time.monotonic()
+
+
+def worker_silence_sec(session_id: str, home: Path | None = None) -> float | None:
+    path = transcript_path(session_id, home)
+    with _buffers_lock:
+        stamped = _activity.get(path)
+    if stamped is None:
+        return None
+    return time.monotonic() - stamped
+
+
+def forget_worker_activity(session_id: str, home: Path | None = None) -> None:
+    path = transcript_path(session_id, home)
+    with _buffers_lock:
+        _activity.pop(path, None)
 
 
 def flush_pending(home: Path | None = None) -> None:

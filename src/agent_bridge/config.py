@@ -70,6 +70,7 @@ class AgentConfig(BaseModel):
     session_meta: dict[str, Any] = Field(default_factory=dict)
     revivable: bool = False
     idle_unload_sec: int = 0
+    stall_timeout_sec: int = Field(default=1800, ge=0)
     print_timeout: str = "120m"
 
 

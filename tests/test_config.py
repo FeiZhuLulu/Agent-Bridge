@@ -2,8 +2,10 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from agent_bridge.config import (
+    AgentConfig,
     AppConfig,
     _coordinator_span,
     load_config,
@@ -105,6 +107,25 @@ def test_fake_agent_opt_in(tmp_path, monkeypatch):
     cfg = load_config(tmp_path)
     assert "fake" in cfg.agents
     assert cfg.agents["fake"].protocol == "fake"
+
+
+def test_stall_timeout_default_and_overlay(tmp_path):
+    assert AgentConfig(name="x", protocol="fake", command=["x"]).stall_timeout_sec == 1800
+    (tmp_path / "agents.toml").write_text(
+        "[agents.grok]\nstall_timeout_sec = 60\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.agents["grok"].stall_timeout_sec == 60
+
+
+def test_stall_timeout_rejects_negative(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        "[agents.grok]\nstall_timeout_sec = -1\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(tmp_path)
 
 
 def test_server_idle_exit_defaults(tmp_path):

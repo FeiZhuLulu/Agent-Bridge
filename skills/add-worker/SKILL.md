@@ -31,7 +31,7 @@ revivable = true
 idle_unload_sec = 900
 ```
 
-Fields (all optional except `protocol` and `command`): `fallback_commands` (list of alternative argv lists), `cwd`, `env` (per-worker overlay), `session_meta` (extra params for `session/new`), `revivable`, `idle_unload_sec`, `print_timeout`.
+Fields (all optional except `protocol` and `command`): `fallback_commands` (list of alternative argv lists), `cwd`, `env` (per-worker overlay), `session_meta` (extra params for `session/new`), `revivable`, `idle_unload_sec`, `stall_timeout_sec`, `print_timeout`.
 
 Verify end to end before doing anything else:
 

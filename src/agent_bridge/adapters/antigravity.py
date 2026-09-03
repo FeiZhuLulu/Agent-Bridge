@@ -35,6 +35,12 @@ _TOOL_SCHEMA_MARKERS = (
 )
 
 
+def _scoped_usage(usage: dict[str, Any], resumed: bool) -> dict[str, Any]:
+    if not usage:
+        return usage
+    return {**usage, "scope": "conversation" if resumed else "turn"}
+
+
 def conversation_id_of(obj: dict[str, Any]) -> str | None:
     for key in ("conversation_id", "conversationId"):
         value = obj.get(key)
@@ -252,6 +258,11 @@ class AgyAdapter(Adapter):
                 proc.stdin.close()
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
+        """Drive one agy turn.
+
+        ``usage.scope`` is ``conversation`` when this turn resumes an existing
+        conversation (those counters cover every turn so far); otherwise ``turn``.
+        """
         cmd = self._build_cmd(session, task)
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         kwargs: dict[str, Any] = {}
@@ -282,6 +293,7 @@ class AgyAdapter(Adapter):
         await self._write_prompt(proc, task.message)
         text_parts: list[str] = []
         conversation_id = session.native_session_id
+        resumed = bool(session.native_session_id)
         usage: dict[str, Any] = {}
         files: set[str] = set()
         last_result: dict[str, Any] | None = None
@@ -373,7 +385,7 @@ class AgyAdapter(Adapter):
                             text=result_text,
                             files_changed=sorted(files),
                             stop_reason="end_turn",
-                            usage=usage,
+                            usage=_scoped_usage(usage, resumed),
                             native_session_id=cid,
                             warnings=[err, *exit_warnings],
                         )
@@ -383,7 +395,7 @@ class AgyAdapter(Adapter):
                         files_changed=sorted(files),
                         stop_reason="error",
                         error=err,
-                        usage=usage,
+                        usage=_scoped_usage(usage, resumed),
                         native_session_id=cid,
                     )
                 append_event(session.session_id, "turn_end", {"stop_reason": "end_turn"}, self.home)
@@ -391,7 +403,7 @@ class AgyAdapter(Adapter):
                     text=result_text,
                     files_changed=sorted(files),
                     stop_reason="end_turn",
-                    usage=usage,
+                    usage=_scoped_usage(usage, resumed),
                     native_session_id=cid,
                     warnings=exit_warnings,
                 )
@@ -407,7 +419,7 @@ class AgyAdapter(Adapter):
                 text="".join(text_parts),
                 files_changed=sorted(files),
                 stop_reason="end_turn",
-                usage=usage,
+                usage=_scoped_usage(usage, resumed),
                 native_session_id=conversation_id,
                 warnings=exit_warnings,
             )

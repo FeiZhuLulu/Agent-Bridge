@@ -5,6 +5,7 @@ import pytest
 
 from agent_bridge.adapters.antigravity import (
     AgyAdapter,
+    _scoped_usage,
     collect_tool_paths,
     conversation_id_of,
     is_agy_tool_schema_error,
@@ -232,6 +233,32 @@ async def test_run_turn_sends_prompt_over_stdin(tmp_path, monkeypatch):
     assert result.text.startswith("echo:")
     assert report.read_text(encoding="utf-8") == "50000"
     assert session.native_session_id == "conv-fake-agy"
+    assert result.usage["scope"] == "turn"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_labels_resumed_usage_as_conversation(tmp_path, monkeypatch):
+    adapter = _agy_adapter(tmp_path, monkeypatch)
+    session = Session(
+        session_id="sess_resume",
+        agent="antigravity",
+        cwd=str(tmp_path),
+        native_session_id="conv-1",
+    )
+    task = Task(
+        task_id="task_resume",
+        session_id=session.session_id,
+        agent="antigravity",
+        message="again",
+        cwd=str(tmp_path),
+    )
+    result = await adapter.run_turn(session, task)
+    assert result.stop_reason == "end_turn"
+    assert result.usage["scope"] == "conversation"
+
+
+def test_scoped_usage_leaves_empty_dict_alone():
+    assert _scoped_usage({}, True) == {}
 
 
 @pytest.mark.asyncio

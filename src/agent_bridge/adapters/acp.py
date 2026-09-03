@@ -65,6 +65,14 @@ RPC_TIMEOUT_SEC = 60.0
 # files the agent merely opened. Under-matching is safe: the disk snapshot
 # diff in merge_files_changed still catches every real write.
 MUTATING_TOOL_KINDS = {"edit", "delete", "move", "write", "create"}
+_TOOL_IO_LIMIT = 500
+
+
+def _tool_io_summary(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= _TOOL_IO_LIMIT else text[:_TOOL_IO_LIMIT] + "…"
 
 
 class RpcTimeoutError(RuntimeError):
@@ -277,6 +285,23 @@ class _BridgeClient:
                 data["title"] = title
             if dumped.get("path"):
                 data["path"] = dumped["path"]
+        if event_type in {"tool_call", "tool_call_update"} and isinstance(dumped, dict):
+            for src, dst in (("toolCallId", "tool_call_id"), ("kind", "kind"), ("status", "status")):
+                if dumped.get(src) is not None:
+                    data[dst] = dumped[src]
+            locations = dumped.get("locations")
+            if isinstance(locations, list):
+                paths = [loc.get("path") for loc in locations if isinstance(loc, dict) and loc.get("path")]
+                if paths:
+                    data["locations"] = paths[:20]
+            if event_type == "tool_call":
+                summary = _tool_io_summary(dumped.get("rawInput"))
+                if summary is not None:
+                    data["input"] = summary
+            elif dumped.get("status") == "failed":
+                summary = _tool_io_summary(dumped.get("rawOutput"))
+                if summary is not None:
+                    data["output"] = summary
         append_event(self.session_id, event_type, data, self.home)
 
     async def write_text_file(self, session_id, path, content, **kwargs):

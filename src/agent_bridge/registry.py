@@ -555,11 +555,11 @@ class Registry:
             task.files_changed_truncated = len(full_changed) > FILES_CHANGED_MAX
             task.usage = result.usage
             if session.agent == "grok":
-                observed = observe_grok_session(session.cwd, session.native_session_id)
+                observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
             elif session.agent == "kimi":
-                observed = observe_kimi_session(session.native_session_id)
+                observed = await asyncio.to_thread(observe_kimi_session, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
                 if observed["failure"]:

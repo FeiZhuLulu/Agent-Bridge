@@ -115,7 +115,7 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
 
     if cfg.name == "antigravity":
         details.append("model=agy models slugs e.g. gemini-3.7-flash; effort=low|medium|high")
-        details.append("prompt via argv (<32K chars on Windows)")
+        details.append("prompt via stdin (stream-json)")
 
     if cfg.name == "grok":
         details.append(

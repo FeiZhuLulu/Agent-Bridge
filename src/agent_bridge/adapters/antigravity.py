@@ -26,17 +26,6 @@ from agent_bridge.worker_env import build_worker_env
 log = logging.getLogger(__name__)
 
 STDERR_TAIL_LIMIT = 16000
-AGY_ARGV_LIMIT = 32000
-
-
-def argv_too_long(cmd: list[str], *, platform: str = sys.platform) -> int | None:
-    """Return the serialized argv length when Windows would reject it."""
-    if not platform.startswith("win"):
-        return None
-    length = len(subprocess.list2cmdline(cmd))
-    if length > AGY_ARGV_LIMIT:
-        return length
-    return None
 _RESULT_STATUSES = {"SUCCESS", "ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING"}
 _TOOL_SCHEMA_MARKERS = (
     "invalid tool call error",
@@ -132,6 +121,16 @@ def is_agy_tool_schema_error(error: str | None) -> bool:
     return any(marker in text for marker in _TOOL_SCHEMA_MARKERS)
 
 
+def stream_json_prompt(message: str) -> bytes:
+    return (
+        json.dumps(
+            {"event": "user", "message": {"role": "user", "content": message}},
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def recovered_agy_tool_error(
     result: dict[str, Any],
     response: str,
@@ -214,7 +213,9 @@ class AgyAdapter(Adapter):
             cmd += ["--new-project"]
         cmd += [
             "-p",
-            task.message,
+            "",
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
             "--dangerously-skip-permissions",
@@ -239,15 +240,19 @@ class AgyAdapter(Adapter):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
             return tail
 
+    async def _write_prompt(self, proc: asyncio.subprocess.Process, message: str) -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(stream_json_prompt(message))
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            log.debug("agy closed stdin before reading the prompt for pid %s: %s", proc.pid, exc)
+        finally:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+                proc.stdin.close()
+
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         cmd = self._build_cmd(session, task)
-        length = argv_too_long(cmd)
-        if length is not None:
-            raise ValueError(
-                f"antigravity prompt is {len(task.message)} chars; agy takes the prompt "
-                f"on the command line and Windows caps it near 32K ({length} chars total). "
-                "Shorten the task or put the material in a file under cwd and reference it."
-            )
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
@@ -255,6 +260,7 @@ class AgyAdapter(Adapter):
         append_event(session.session_id, "prompt_sent", {"text": task.message, "cmd": cmd[:6]}, self.home)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -273,6 +279,7 @@ class AgyAdapter(Adapter):
                 process_image_name(proc.pid),
             )
         stderr_task = asyncio.create_task(self._drain_stderr(proc, session.session_id))
+        await self._write_prompt(proc, task.message)
         text_parts: list[str] = []
         conversation_id = session.native_session_id
         usage: dict[str, Any] = {}

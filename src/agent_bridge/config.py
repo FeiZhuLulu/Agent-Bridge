@@ -249,21 +249,9 @@ _NEXT_TABLE = re.compile(r"(?m)^\[")
 
 
 def _trim_trailing_blank_and_comment_lines(text: str, start: int, end: int) -> int:
-    block = text[start:end]
-    lines: list[str] = []
-    last = 0
-    for index, char in enumerate(block):
-        if char == "\n":
-            lines.append(block[last : index + 1])
-            last = index + 1
-    if last < len(block):
-        lines.append(block[last:])
-    while lines:
-        stripped = lines[-1].strip()
-        if stripped == "" or stripped.startswith("#"):
-            lines.pop()
-            continue
-        break
+    lines = text[start:end].splitlines(keepends=True)
+    while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
+        lines.pop()
     return start + sum(len(line) for line in lines)
 
 

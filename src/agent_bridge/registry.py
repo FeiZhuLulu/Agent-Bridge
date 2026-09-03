@@ -212,27 +212,17 @@ class Registry:
         disk = read_json(path, {})
         if not isinstance(disk, dict):
             disk = {}
-        mine_sessions = {
-            row["session_id"]: row
-            for row in own.get("sessions") or []
-            if isinstance(row, dict) and isinstance(row.get("session_id"), str)
-        }
-        mine_tasks = {
-            row["task_id"]: row
-            for row in own.get("tasks") or []
-            if isinstance(row, dict) and isinstance(row.get("task_id"), str)
-        }
         atomic_write_json(
             path,
             {
                 "sessions": self._merge_owned(
                     disk.get("sessions") or [],
-                    mine_sessions,
+                    {row["session_id"]: row for row in own["sessions"]},
                     "session_id",
                 ),
                 "tasks": self._merge_owned(
                     disk.get("tasks") or [],
-                    mine_tasks,
+                    {row["task_id"]: row for row in own["tasks"]},
                     "task_id",
                 ),
             },

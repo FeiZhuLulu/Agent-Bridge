@@ -154,13 +154,14 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             details.append("OPENCODE_API_KEY=set")
 
     if cfg.name == "claude":
+        auth = describe_claude_auth(resolved)
         resolved = apply_claude_gateway_env(resolved)
         details.append(
             "model=slugs the session advertises (sonnet, opus, haiku, or full ids); "
             "effort mapped onto that model's levels; mode forced to bypassPermissions"
         )
         details.append(f"claude-home={claude_config_home(resolved)}")
-        details.append(f"auth={describe_claude_auth(resolved)}")
+        details.append(f"auth={auth}")
         details.append(
             "product `claude` is not ACP; worker is claude-agent-acp "
             "(@agentclientprotocol/claude-agent-acp)"

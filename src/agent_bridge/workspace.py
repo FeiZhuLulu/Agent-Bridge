@@ -56,7 +56,7 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
         return {}
     found: dict[str, tuple[int, int]] = {}
     stack = [str(root)]
-    prefix_len = len(str(root)) + 1
+    prefix_len = _root_prefix_len(str(root))
     while stack:
         current = stack.pop()
         try:
@@ -134,9 +134,12 @@ def _relative_to_cwd(raw: str, root: Path) -> str | None:
     return rel
 
 
+def _root_prefix_len(root: str) -> int:
+    return len(root.rstrip(os.sep)) + 1
+
+
 def _ignored_rel(rel: str) -> bool:
-    first = rel.split("/", 1)[0]
-    return first in SKIP_DIR_NAMES
+    return any(part in SKIP_DIR_NAMES for part in rel.split("/")[:-1])
 
 
 def collect_update_paths(obj: object, into: set[str]) -> None:

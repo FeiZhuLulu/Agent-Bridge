@@ -1,8 +1,11 @@
+import os
 from pathlib import Path
 
 from agent_bridge.workspace import (
+    _root_prefix_len,
     collect_update_paths,
     merge_files_changed,
+    normalize_changed_paths,
     snapshot_workspace,
 )
 
@@ -59,6 +62,19 @@ def test_snapshot_skips_build_dirs_and_tracks_changes(tmp_path: Path):
     assert "nested/deep/b.txt" in changed
     assert "src/c.py" in changed
     assert "src/a.py" in changed
+
+
+def test_root_prefix_len_at_drive_root_and_normal_path(tmp_path: Path):
+    if os.sep == "\\":
+        assert _root_prefix_len("C:" + os.sep) == 3
+    assert _root_prefix_len(str(tmp_path)) == len(str(tmp_path)) + 1
+
+
+def test_normalize_ignores_skip_dirs_at_any_depth(tmp_path: Path):
+    assert normalize_changed_paths(
+        tmp_path,
+        ["src/dist/x.js", "src/build", "node_modules/a.js", "src/ok.py"],
+    ) == ["src/build", "src/ok.py"]
 
 
 def test_collect_nested_tool_paths():

@@ -805,13 +805,13 @@ class AcpAdapter(Adapter):
         ``devin acp`` starts every session in ``accept-edits`` regardless of
         ``DEVIN_PERMISSION_MODE``. Model ids already carry the level
         (``swe-1-7-medium``, ``claude-opus-5-high``); there is no effort
-        option, so a Bridge effort is reported as ignored.
+        option, so a Bridge effort is reported as ignored once per value.
         """
         if self.agent.name != "devin" or live.conn is None or not session.native_session_id:
             return
         await self._sync_bypass_mode(live, session, DEVIN_MODE_BYPASS)
         await self._sync_model_option(live, session)
-        if session.effort:
+        if session.effort and live.applied_effort != session.effort:
             message = (
                 f"devin has no effort option; effort={session.effort} ignored. "
                 "Pick a model id that carries the level instead "
@@ -819,6 +819,7 @@ class AcpAdapter(Adapter):
             )
             log.warning("%s", message)
             live.pending_warnings.append(message)
+            live.applied_effort = session.effort
 
     async def _sync_selection(self, live: _Live, session: Session) -> None:
         await self._sync_grok_model(live, session)

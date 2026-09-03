@@ -1,6 +1,6 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, and Devin can all act as the coordinator. Register the same stdio server in whichever host you use. Devin Desktop needs no entry of its own: Devin reads `~/.cursor/mcp.json` and the Cursor / Claude skill directories, so a Cursor setup is enough. The same product can also be a worker (Grok Build, Claude Code, Codex CLI, and Devin CLI are); those are different processes and different session roles.
+Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, and Devin can all act as the coordinator. Register the same stdio server in whichever host you use. Devin Desktop needs no entry of its own: Devin imports `~/.cursor/mcp.json` and the Cursor / Claude skill directories (`read_config_from.cursor`, on by default; `devin mcp list` shows what it picked up), so a Cursor setup is enough. The same product can also be a worker (Grok Build, Claude Code, Codex CLI, and Devin CLI are); those are different processes and different session roles.
 
 ## Install
 
@@ -464,7 +464,7 @@ devin auth login
 
 Auth is `devin auth login` on disk or `WINDSURF_API_KEY`. `list_agents` runs `devin auth status` and reports its first line as `auth=`. Bridge drops `ACP_BACKEND` from the worker environment: Devin Desktop stamps that variable on every child process, and with it set the CLI trusts only credentials the ACP host passes in and refuses `session/new` — so a Devin Desktop coordinator can still dispatch to a `devin` worker.
 
-`dispatch_task.model` is a model id the live session advertises (`devin models list`): the level is part of the id (`swe-1-7`, `swe-1-7-medium`, `claude-opus-5-high`), so there is no `effort` option — a Bridge `effort` is ignored with a warning. An unknown id fails the turn and lists the real options. Bridge forces `bypass` after `session/new` (a fresh session starts in `accept-edits`; `DEVIN_PERMISSION_MODE` is parsed but not applied to ACP sessions). Revive uses `session/load` — Devin has no `session/resume` — which replays the history as `session/update` notifications; mode and model survive the reload.
+`dispatch_task.model` is a model id the live session advertises (`devin models list`): the level is part of the id (`swe-1-7`, `swe-1-7-medium`, `claude-opus-5-high`), so there is no `effort` option — a Bridge `effort` is ignored with a warning. An unknown id fails the turn and lists the real options. Bridge forces `bypass` after `session/new` (a fresh session starts in `accept-edits`; `DEVIN_PERMISSION_MODE` is parsed but not applied to ACP sessions). Revive uses `session/load` — Devin has no `session/resume` — and Devin ignores `noReplay`, so the persisted history is replayed as `session/update` notifications before `load` answers. Bridge resets its turn state before prompting, so `get_result` and `files_changed` for the new turn are clean, but `get_transcript` will show the replayed history again after a revive; that is a side effect, not the way to fetch history. Mode and model survive the reload. A long session may take longer than the 60 s handshake timeout to replay; if that bites, lower `idle_unload_sec` for devin or open a new session.
 
 ## Permissions
 

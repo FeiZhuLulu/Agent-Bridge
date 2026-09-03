@@ -141,7 +141,11 @@ async def test_effort_is_reported_as_ignored_not_mapped():
     adapter, live, session = build(session_kwargs={"effort": "high"})
     await adapter._sync_devin_selection(live, session)
     assert not any(call[0] == "effort" for call in live.conn.calls)
-    assert any("effort=high ignored" in item for item in live.pending_warnings)
+    assert sum("effort=high ignored" in item for item in live.pending_warnings) == 1
+    # ensure_session runs the sync on every turn; the effort sticks to the
+    # session, so the warning must not repeat on follow-ups.
+    await adapter._sync_devin_selection(live, session)
+    assert sum("effort=high ignored" in item for item in live.pending_warnings) == 1
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -209,17 +210,20 @@ async def test_sibling_instances_do_not_clobber_state(bridge_home, tmp_path, mon
             assert sess_a not in b.sessions
             assert task_a not in b.tasks
             b.save()
+            await b.flush_state()
             payload = read_json(state_path(bridge_home), {})
             assert any(row["session_id"] == sess_a for row in payload["sessions"])
             assert any(row["task_id"] == task_a for row in payload["tasks"])
 
             other = await b.dispatch_task("fake", "other", cwd=cwd)
+            await b.flush_state()
             payload = read_json(state_path(bridge_home), {})
             session_ids = {row["session_id"] for row in payload["sessions"]}
             assert {sess_a, other["session_id"]} <= session_ids
             assert any(row["task_id"] == task_a for row in payload["tasks"])
 
             a.save()
+            await a.flush_state()
             payload = read_json(state_path(bridge_home), {})
             session_ids = {row["session_id"] for row in payload["sessions"]}
             assert {sess_a, other["session_id"]} <= session_ids
@@ -1171,6 +1175,7 @@ async def test_stall_watchdog_fails_silent_turn(bridge_home, tmp_path, monkeypat
             event.get("type") == "error" and (event.get("data") or {}).get("stalled") is True
             for event in events
         )
+        await registry.flush_state()
         payload = read_json(state_path(bridge_home), {})
         row = next(item for item in payload["tasks"] if item["task_id"] == dispatched["task_id"])
         assert row["status"] == "failed"
@@ -1287,6 +1292,84 @@ async def test_cancel_task_still_wins_over_stall(bridge_home, tmp_path, monkeypa
         assert cancelled["stop_reason"] == "cancelled"
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_save_writes_off_the_event_loop(bridge_home, tmp_path, monkeypatch):
+    writer_threads: list[int] = []
+
+    def spy(path, payload):
+        writer_threads.append(threading.get_ident())
+        return atomic_write_json(path, payload)
+
+    monkeypatch.setattr("agent_bridge.registry.atomic_write_json", spy)
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        await registry.flush_state()
+        main = threading.get_ident()
+        assert writer_threads
+        assert all(tid != main for tid in writer_threads)
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_save_coalesces_bursts(bridge_home, tmp_path, monkeypatch):
+    writes: list[object] = []
+
+    def spy(path, payload):
+        writes.append(payload)
+        return atomic_write_json(path, payload)
+
+    monkeypatch.setattr("agent_bridge.registry.atomic_write_json", spy)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        start_writes = len(writes)
+        registry.sessions["sess_burst"] = Session(
+            session_id="sess_burst",
+            agent="fake",
+            cwd=str(tmp_path),
+        )
+        for _ in range(20):
+            registry.save()
+        await registry.flush_state()
+        assert len(writes) - start_writes <= 2
+        payload = read_json(state_path(bridge_home), {})
+        assert any(row["session_id"] == "sess_burst" for row in payload["sessions"])
+    finally:
+        await registry.stop()
+
+
+def test_save_without_running_loop_writes_synchronously(bridge_home, tmp_path):
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_sync"] = Session(
+        session_id="sess_sync",
+        agent="fake",
+        cwd=str(tmp_path),
+    )
+    registry.save()
+    payload = read_json(state_path(bridge_home), {})
+    assert any(row["session_id"] == "sess_sync" for row in payload["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_stop_flushes_state(bridge_home, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+    await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+    await registry.stop()
+    payload = read_json(state_path(bridge_home), {})
+    row = next(item for item in payload["tasks"] if item["task_id"] == dispatched["task_id"])
+    assert row["status"] == "completed"
 
 
 @pytest.mark.asyncio

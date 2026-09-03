@@ -140,6 +140,8 @@ class Registry:
         self.dispatch_enabled = self.runtime_context == "coordinator"
         self._sibling_cache: tuple[float, int] | None = None
         self._stopping = False
+        self._pending_state: dict[str, list[dict]] | None = None
+        self._flush_task: asyncio.Task[None] | None = None
 
     @classmethod
     def create(
@@ -196,28 +198,73 @@ class Registry:
         merged.update(mine)
         return list(merged.values())
 
-    def save(self) -> None:
+    def _own_rows(self) -> dict[str, list[dict]]:
+        return {
+            "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
+            "tasks": [t.model_dump(mode="json") for t in self.tasks.values()],
+        }
+
+    def _write_state(self, own: dict[str, list[dict]]) -> None:
         # Live siblings may interleave a read-merge-write; each instance only
-        # rewrites its own records, so the next save converges.
+        # rewrites its own records, so the next save converges. Uses the
+        # snapshot in `own` plus owner identity, never self.sessions / self.tasks.
         path = state_path(self.home)
         disk = read_json(path, {})
         if not isinstance(disk, dict):
             disk = {}
+        mine_sessions = {
+            row["session_id"]: row
+            for row in own.get("sessions") or []
+            if isinstance(row, dict) and isinstance(row.get("session_id"), str)
+        }
+        mine_tasks = {
+            row["task_id"]: row
+            for row in own.get("tasks") or []
+            if isinstance(row, dict) and isinstance(row.get("task_id"), str)
+        }
         atomic_write_json(
             path,
             {
                 "sessions": self._merge_owned(
                     disk.get("sessions") or [],
-                    {session.session_id: session.model_dump(mode="json") for session in self.sessions.values()},
+                    mine_sessions,
                     "session_id",
                 ),
                 "tasks": self._merge_owned(
                     disk.get("tasks") or [],
-                    {task.task_id: task.model_dump(mode="json") for task in self.tasks.values()},
+                    mine_tasks,
                     "task_id",
                 ),
             },
         )
+
+    def save(self) -> None:
+        self._pending_state = self._own_rows()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            own, self._pending_state = self._pending_state, None
+            self._write_state(own)
+            return
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = loop.create_task(self._flush_state_loop(), name="state-flush")
+
+    async def _flush_state_loop(self) -> None:
+        # No await between seeing _pending_state is None and returning, so
+        # save() cannot observe a still-running flush task and skip creating
+        # a new one after this loop has already decided to exit.
+        while self._pending_state is not None:
+            own, self._pending_state = self._pending_state, None
+            try:
+                await asyncio.to_thread(self._write_state, own)
+            except OSError:
+                log.exception("could not write state.json")
+
+    async def flush_state(self) -> None:
+        """Wait until every save() so far is on disk."""
+        task = self._flush_task
+        if task is not None and not task.done():
+            await task
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -283,8 +330,10 @@ class Registry:
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
+        await self.flush_state()
         self._prune()
         self.save()
+        await self.flush_state()
         self.touch_activity()
         if self.config.server.idle_exit_sec > 0:
             self._watchdog = asyncio.create_task(
@@ -327,6 +376,7 @@ class Registry:
         except OSError:
             log.exception("could not flush transcripts during shutdown")
         self.save()
+        await self.flush_state()
 
     def _adapter_for(self, session: Session) -> Adapter:
         existing = self._adapters.get(session.session_id)

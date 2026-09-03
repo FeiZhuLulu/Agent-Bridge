@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.processes import (
     count_sibling_servers,
     drop_pid,
+    interrupt_then_reap,
     kill_tree,
     process_create_time,
     process_image_name,
@@ -408,3 +410,45 @@ def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("agent_bridge.processes.atomic_write_json", boom)
     record_pid(tmp_path, "sess_new", os.getpid(), 1.0, "python.exe")
     drop_pid(tmp_path, "sess_keep")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_escalates_at_once_when_signal_fails(monkeypatch):
+    async def never_wait():
+        await asyncio.sleep(10)
+
+    reaped: list[object] = []
+
+    async def fake_reap(proc, timeout=5.0):
+        reaped.append(proc)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("no console")
+
+    proc = SimpleNamespace(pid=4242, returncode=None, wait=never_wait, send_signal=boom)
+    monkeypatch.setattr("agent_bridge.processes.os.kill", boom)
+    monkeypatch.setattr("agent_bridge.processes.reap_subprocess", fake_reap)
+    started = time.monotonic()
+    await interrupt_then_reap(proc, timeout=3)
+    assert time.monotonic() - started < 1
+    assert reaped == [proc]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_skips_reap_when_wait_returns(monkeypatch):
+    async def immediate_wait():
+        return None
+
+    reaped: list[object] = []
+
+    async def fake_reap(proc, timeout=5.0):
+        reaped.append(proc)
+
+    def ok_signal(*_args, **_kwargs):
+        return None
+
+    proc = SimpleNamespace(pid=4242, returncode=None, wait=immediate_wait, send_signal=ok_signal)
+    monkeypatch.setattr("agent_bridge.processes.os.kill", ok_signal)
+    monkeypatch.setattr("agent_bridge.processes.reap_subprocess", fake_reap)
+    await interrupt_then_reap(proc, timeout=3)
+    assert reaped == []

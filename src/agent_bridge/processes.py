@@ -151,24 +151,29 @@ async def interrupt_then_reap(proc: Any | None, timeout: float = 3.0) -> None:
     ``CTRL_BREAK_EVENT`` first so Codex exec can run ``turn/interrupt``.
     Unix workers get ``SIGINT``. If that does not finish the process,
     ``reap_subprocess`` terminates then kills the tree.
+    If the interrupt cannot be delivered (no console on Windows), escalate at once.
     """
     if proc is None or getattr(proc, "returncode", None) is not None:
         return
     pid = getattr(proc, "pid", None)
+    signalled = False
     try:
         if sys.platform == "win32" and pid:
             os.kill(pid, signal.CTRL_BREAK_EVENT)
+            signalled = True
         elif hasattr(proc, "send_signal"):
             proc.send_signal(signal.SIGINT)
+            signalled = True
         else:
             kill_tree(pid, handle=proc)
-    except (ProcessLookupError, PermissionError, OSError, ValueError):
-        pass
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        return
-    except TimeoutError:
-        pass
+    except (ProcessLookupError, PermissionError, OSError, ValueError) as exc:
+        log.debug("graceful interrupt of pid %s failed (%s); terminating instead", pid, exc)
+    if signalled:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+            return
+        except TimeoutError:
+            pass
     await reap_subprocess(proc, timeout=timeout)
 
 

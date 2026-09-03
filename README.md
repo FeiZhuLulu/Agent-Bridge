@@ -171,7 +171,7 @@ uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 ```
 
-重启 Codex。协调者 skill 会在服务器第一次启动时自动写入。其它宿主和代理见 [SETUP.md](SETUP.md)。
+重启 Codex。协调者 skill 会在服务器第一次启动、以及升级后内容变化时自动写入；平时重启不会覆盖你的本地改动。其它宿主和代理见 [SETUP.md](SETUP.md)。
 
 ### 接到 Cursor
 

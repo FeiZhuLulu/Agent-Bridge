@@ -8,7 +8,7 @@ Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the 
 uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 ```
 
-That is the whole install. Then register the MCP server in the coordinator. The first time a top-level host starts Bridge, the coordinator skill is written automatically (skipped if Bridge was inherited inside a worker). Need [uv](https://docs.astral.sh/uv/) first.
+That is the whole install. Then register the MCP server in the coordinator. The first time a top-level host starts Bridge, the coordinator skill is written automatically (skipped if Bridge was inherited inside a worker); later starts rewrite it only after the bundled skill changed, so local edits survive restarts but not upgrades. Need [uv](https://docs.astral.sh/uv/) first.
 
 ## Resolve the Agent Bridge executable
 
@@ -338,7 +338,7 @@ Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200
 The coordinator learns how to drive the Bridge through three channels; [ORCHESTRATION.md](ORCHESTRATION.md) is the source of truth for all of them ([ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md) is the human-readable translation):
 
 1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
-2. **Skill — automatic.** The first MCP start (and `agent-bridge upgrade`) writes [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
+2. **Skill — automatic.** The first MCP start, any start after the bundled skill changed, and `agent-bridge upgrade` write [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
 3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, Kimi Code, ZCode, and Grok Build all read it there) or as `CLAUDE.md` for Claude Code, or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` / `%USERPROFILE%\.claude\CLAUDE.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the English file under 9500 characters (Grok may copy it as `AGENTS.md`) and under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
 Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.

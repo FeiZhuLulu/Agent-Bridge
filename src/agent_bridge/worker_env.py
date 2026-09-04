@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -211,7 +212,7 @@ def read_powershell_grok_proxy() -> dict[str, str]:
 
 
 def read_registry_environment(hive: int, subkey: str) -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -236,7 +237,7 @@ def read_registry_environment(hive: int, subkey: str) -> dict[str, str]:
 
 
 def read_windows_user_env() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -244,7 +245,7 @@ def read_windows_user_env() -> dict[str, str]:
 
 
 def read_windows_machine_env() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -263,7 +264,7 @@ def read_windows_machine_proxy() -> dict[str, str]:
 
 
 def read_internet_settings_proxy() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 

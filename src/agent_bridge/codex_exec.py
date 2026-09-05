@@ -145,12 +145,12 @@ def codex_command_problem(command: list[str]) -> str | None:
             _capability_cache[key] = problem
         return problem
     help_text = _run_text([command[0], "exec", "--help"])
-    problem = exec_help_problem(help_text)
-    if problem:
-        problem = f"{command[0]} {problem}"
+    help_problem = exec_help_problem(help_text)
+    if help_problem:
+        help_problem = f"{command[0]} {help_problem}"
     if key:
-        _capability_cache[key] = problem
-    return problem
+        _capability_cache[key] = help_problem
+    return help_problem
 
 
 def discovered_codex_commands(env: Mapping[str, str] | None = None) -> list[list[str]]:
@@ -348,8 +348,8 @@ def apply_codex_event(state: CodexTurnState, obj: Mapping[str, Any]) -> None:
         return
     if event_type == "turn.failed":
         state.turn_failed = True
-        message = _error_message(obj.get("error")) or "turn.failed"
-        state.errors.append(message)
+        failed_message = _error_message(obj.get("error")) or "turn.failed"
+        state.errors.append(failed_message)
         return
     if event_type == "error":
         message = _error_message(obj.get("message")) or _error_message(obj.get("error"))

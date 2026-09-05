@@ -48,7 +48,7 @@ async def main(cwd: Path, model: str | None) -> int:
             print("claude unavailable:", row)
             return 2
         print("probe:", row["version"], "|", row["detail"])
-        env = registry.env_status()
+        env = await registry.env_status()
         print("env.proxy:", env.get("proxy"), env.get("proxy_source"))
 
         first = await registry.dispatch_task(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from agent_bridge.paths import bundled_skill, ensure_home
+from agent_bridge.paths import bridge_home, bundled_skill, ensure_home
+from agent_bridge.persist import atomic_write_text
 from agent_bridge.processes import count_sibling_servers
 from agent_bridge.worker_env import is_worker_context
 
@@ -43,8 +45,9 @@ Install:
   uv tool install {GIT_SOURCE}
 
 Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, Grok
-Build, or Claude Code. Skill files are written automatically the first
-time a top-level coordinator starts the server.
+Build, or Claude Code (Devin reads the Cursor entry). Skill files are written when a top-level
+coordinator first starts the server and refreshed after each upgrade;
+ordinary restarts leave your local edits alone.
 
 Update:
   agent-bridge upgrade
@@ -104,6 +107,11 @@ def checkout_root(start: Path | None = None) -> Path | None:
     return None
 
 
+def skill_stamp_path(home: Path | None = None) -> Path:
+    root = bridge_home() if home is None else home / ".agent-bridge"
+    return root / "skill.sha256"
+
+
 def ensure_coordinator_skill(*, home: Path | None = None) -> list[Path]:
     """Drop the skill into host skill dirs. Fail-open; skip under pytest.
 
@@ -117,7 +125,19 @@ def ensure_coordinator_skill(*, home: Path | None = None) -> list[Path]:
     if os.environ.get("AGENT_BRIDGE_SKIP_SKILL") == "1":
         return []
     try:
-        return install_skill(home=home)
+        text = bundled_skill().read_text(encoding="utf-8")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        stamp = skill_stamp_path(home)
+        try:
+            current = stamp.read_text(encoding="utf-8").strip()
+        except OSError:
+            current = ""
+        if current == digest:
+            return []
+        written = install_skill(home=home)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(stamp, digest + "\n")
+        return written
     except OSError:
         log.warning("could not install coordinator skill", exc_info=True)
         return []
@@ -127,13 +147,13 @@ def install_skill(*, home: Path | None = None, only_existing: bool = False) -> l
     source = bundled_skill()
     if not source.is_file():
         raise FileNotFoundError(f"bundled skill not found at {source}")
-    text = source.read_text(encoding="utf-8")
+    content = source.read_bytes()
     written: list[Path] = []
     for dest in skill_destinations(home or Path.home()):
         if only_existing and not dest.is_file():
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+        dest.write_bytes(content)
         written.append(dest)
     return written
 

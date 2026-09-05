@@ -13,10 +13,10 @@
 
 ## English
 
-Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, and Codex CLI. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
+Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, or Devin — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, and Devin CLI. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
 ```text
-User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code)
+User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code / Devin)
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
@@ -24,6 +24,7 @@ User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude C
                           → OpenCode
                           → Claude Code
                           → Codex CLI
+                          → Devin CLI
 ```
 
 It does not drive GUIs. The user talks only to the coordinator.
@@ -57,6 +58,8 @@ Restart Codex. The coordinator skill is written the first time the server starts
   }
 }
 ```
+
+Devin (Desktop or CLI) reads this same `~/.cursor/mcp.json`, so it needs no entry of its own.
 
 ### Connect Kimi Code
 
@@ -103,11 +106,22 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 | `dispatch_task` | Start or resume a turn in the project `cwd` |
 | `wait_task` | Block up to `timeout_sec` (default 180) |
 | `check_task` | Non-blocking status |
-| `get_result` | Truncated result + changed files |
+| `get_result` | Complete final result in pages + changed files |
 | `get_transcript` | Paged session log |
 | `cancel_task` | Cancel the in-flight turn |
 | `list_sessions` | Known sessions |
 | `end_session` | Shut down a worker process |
+
+`get_result` returns up to 60,000 characters per call. Continue with
+`next_cursor` while `has_more` is true. Detailed work events remain available
+through `get_transcript` and `~/.agent-bridge/transcripts/`; sparse task
+lifecycle and error summaries use the rotating files in
+`~/.agent-bridge/logs/`. Transcript writes are buffered and reads do not flush
+them to disk. Buffered events reach disk after 64 KB or 30 s, or as soon as a
+turn ends; a normal stop flushes everything, so only a crash or a hard kill can
+lose that last window. A turn whose worker stays silent past `stall_timeout_sec`
+(default 1800 s, per worker) ends `failed` / `stalled`; `check_task` shows
+`silent_for_sec`.
 
 ### Coordinator mode
 
@@ -121,7 +135,7 @@ Change it in chat, or set `[coordinator] mode` in `~/.agent-bridge/agents.toml`.
 
 ### Orchestration rulebook
 
-[ORCHESTRATION.md](ORCHESTRATION.md) is the coordinator rulebook: when to dispatch, to whom, how to verify. The skill and MCP handshake instructions are projections of it. First start writes the skill; copy this file into a project as `AGENTS.md` only if a host has no skills. Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md). This repo's `AGENTS.md` is for developing Bridge, not for end users.
+[ORCHESTRATION.md](ORCHESTRATION.md) is the coordinator rulebook: when to dispatch, to whom, how to verify. The skill and MCP handshake instructions are projections of it. First start writes the skill automatically. Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md).
 
 ### Tests
 
@@ -133,10 +147,10 @@ uv run pytest
 
 ## 中文
 
-Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code、Codex CLI 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
+Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——Codex、Cursor、Kimi Code、ZCode、Grok Build、Claude Code 或 Devin——指挥 Antigravity CLI、Grok Build、Kimi Code、DeepSeek Harness、OpenCode、Claude Code、Codex CLI、Devin CLI 进行工作。同一个产品可以同时是协调者和 Worker，但那是不同进程。后续将推出更多 Agent 支持。
 
 ```text
-用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code）
+用户 → 协调者（Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code / Devin）
      → Agent Bridge (MCP) → Antigravity CLI
                           → Grok Build
                           → Kimi Code
@@ -144,6 +158,7 @@ Agent Bridge 是一个联通各个本地 Agent 的连接器。由协调者——
                           → OpenCode
                           → Claude Code
                           → Codex CLI
+                          → Devin CLI
 ```
 
 它不操作图形界面。用户只和协调者对话。
@@ -162,7 +177,7 @@ uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
 ```
 
-重启 Codex。协调者 skill 会在服务器第一次启动时自动写入。其它宿主和代理见 [SETUP.md](SETUP.md)。
+重启 Codex。协调者 skill 会在服务器第一次启动、以及升级后内容变化时自动写入；平时重启不会覆盖你的本地改动。其它宿主和代理见 [SETUP.md](SETUP.md)。
 
 ### 接到 Cursor
 
@@ -177,6 +192,8 @@ codex mcp add agent_bridge -- %USERPROFILE%\.local\bin\agent-bridge.exe
   }
 }
 ```
+
+Devin（Desktop 或 CLI）会直接读这份 `~/.cursor/mcp.json`，不需要单独配置。
 
 ### 接到 Kimi Code
 
@@ -223,11 +240,19 @@ revivable = true
 | `dispatch_task` | 在项目 `cwd` 里开始或续上一次回合 |
 | `wait_task` | 最多等待 `timeout_sec`（默认 180） |
 | `check_task` | 非阻塞状态查询 |
-| `get_result` | 截断后的结果 + 改过的文件 |
+| `get_result` | 分页读取完整结果 + 改过的文件 |
 | `get_transcript` | 分页会话日志 |
 | `cancel_task` | 取消进行中的回合 |
 | `list_sessions` | 已知会话 |
 | `end_session` | 关掉 worker 进程 |
+
+`get_result` 每次最多返回 60,000 个字符；`has_more` 为 true 时，用
+`next_cursor` 继续读取。详细工作事件仍可通过 `get_transcript` 和
+`~/.agent-bridge/transcripts/` 查询；任务生命周期及错误摘要写入
+`~/.agent-bridge/logs/` 下的轮转日志。转录采用缓冲批量写入，读取不会触发刷盘。
+缓冲事件在累计 64 KB、间隔 30 秒或一轮结束时落盘；正常停止会全部刷出，只有崩溃或被强杀才可能丢掉最后这一窗口。
+Worker 静默超过 `stall_timeout_sec`（默认 1800 秒，可按 Worker 设置）的一轮会以
+`failed` / `stalled` 结束；`check_task` 会给出 `silent_for_sec`。
 
 ### 协调者档位
 
@@ -241,7 +266,7 @@ revivable = true
 
 ### 协调规则书
 
-[ORCHESTRATION.md](ORCHESTRATION.md) 是给协调者的规则书：什么时候派、派给谁、怎么验收。skill 和 MCP 握手 instructions 是它的投影。第一次启动会写入 skill；只有宿主没有 skill 时，才需要把这份文件拷进项目并命名为 `AGENTS.md`。中文译本：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)。本仓库的 `AGENTS.md` 只约束开发 Bridge，不是给最终用户的。
+[ORCHESTRATION.md](ORCHESTRATION.md) 是给协调者的规则书：什么时候派、派给谁、怎么验收。skill 和 MCP 握手 instructions 是它的投影。第一次启动会自动写入 skill。中文译本：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)。
 
 ### 测试
 

@@ -1,5 +1,11 @@
+import sys
+from pathlib import Path
+
+import pytest
+
 from agent_bridge.adapters.antigravity import (
     AgyAdapter,
+    _scoped_usage,
     collect_tool_paths,
     conversation_id_of,
     is_agy_tool_schema_error,
@@ -11,6 +17,8 @@ from agent_bridge.adapters.antigravity import (
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task
+
+FAKE_AGY = Path(__file__).resolve().parent / "fake_agy.py"
 
 INIT = {
     "event": "init",
@@ -160,6 +168,9 @@ def test_agy_model_and_effort_precede_print(tmp_path, monkeypatch):
     assert cmd[cmd.index("--effort") + 1] == "low"
     assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path)
     assert "--conversation" not in cmd
+    assert "--input-format" in cmd
+    assert cmd[cmd.index("-p") + 1] == ""
+    assert task.message not in cmd
 
 
 def test_agy_follow_up_uses_conversation_not_new_project(tmp_path, monkeypatch):
@@ -188,3 +199,82 @@ def test_agy_follow_up_uses_conversation_not_new_project(tmp_path, monkeypatch):
     assert cmd.index("--conversation") < cmd.index("-p")
     assert cmd[cmd.index("--conversation") + 1] == "conv-1"
     assert "--new-project" not in cmd
+    assert "--input-format" in cmd
+    assert cmd[cmd.index("-p") + 1] == ""
+    assert task.message not in cmd
+
+
+def _agy_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgyAdapter:
+    monkeypatch.setattr(
+        "agent_bridge.adapters.antigravity.resolve_command",
+        lambda command, fallbacks=None: [sys.executable, str(FAKE_AGY)],
+    )
+    return AgyAdapter(
+        AgentConfig(name="antigravity", protocol="agy", command=["agy"]),
+        tmp_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_turn_sends_prompt_over_stdin(tmp_path, monkeypatch):
+    adapter = _agy_adapter(tmp_path, monkeypatch)
+    report = tmp_path / "len.txt"
+    monkeypatch.setenv("FAKE_AGY_REPORT", str(report))
+    session = Session(session_id="sess_stdin", agent="antigravity", cwd=str(tmp_path))
+    task = Task(
+        task_id="task_stdin",
+        session_id=session.session_id,
+        agent="antigravity",
+        message="x" * 50000,
+        cwd=str(tmp_path),
+    )
+    result = await adapter.run_turn(session, task)
+    assert result.stop_reason == "end_turn"
+    assert result.text.startswith("echo:")
+    assert report.read_text(encoding="utf-8") == "50000"
+    assert session.native_session_id == "conv-fake-agy"
+    assert result.usage["scope"] == "turn"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_labels_resumed_usage_as_conversation(tmp_path, monkeypatch):
+    adapter = _agy_adapter(tmp_path, monkeypatch)
+    session = Session(
+        session_id="sess_resume",
+        agent="antigravity",
+        cwd=str(tmp_path),
+        native_session_id="conv-1",
+    )
+    task = Task(
+        task_id="task_resume",
+        session_id=session.session_id,
+        agent="antigravity",
+        message="again",
+        cwd=str(tmp_path),
+    )
+    result = await adapter.run_turn(session, task)
+    assert result.stop_reason == "end_turn"
+    assert result.usage["scope"] == "conversation"
+
+
+def test_scoped_usage_leaves_empty_dict_alone():
+    assert _scoped_usage({}, True) == {}
+
+
+@pytest.mark.asyncio
+async def test_run_turn_early_exit_reports_stderr(tmp_path, monkeypatch):
+    adapter = _agy_adapter(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_AGY_MODE", "early_exit")
+    session = Session(session_id="sess_early", agent="antigravity", cwd=str(tmp_path))
+    task = Task(
+        task_id="task_early",
+        session_id=session.session_id,
+        agent="antigravity",
+        message="hello",
+        cwd=str(tmp_path),
+    )
+    result = await adapter.run_turn(session, task)
+    assert result.stop_reason == "error"
+    assert result.error is not None
+    assert "agy exit 3" in result.error
+    assert "fake agy refused to start" in result.error

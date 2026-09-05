@@ -22,6 +22,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Imported after sys.path injection so the script works outside the package.
 from agent_bridge.dsh_home import dsh_acp_install_dir, dsh_acp_packages
 
 

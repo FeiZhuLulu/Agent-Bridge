@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -32,10 +33,12 @@ from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
 
-STDERR_TAIL_LIMIT = 8000
+STDERR_TAIL_LIMIT = 16000
 
 
 class CodexAdapter(Adapter):
+    resident = False
+
     def __init__(self, agent, home: Path, env_config=None) -> None:
         super().__init__(agent, home, env_config)
         self._procs: dict[str, asyncio.subprocess.Process] = {}
@@ -71,7 +74,6 @@ class CodexAdapter(Adapter):
                     return tail
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[codex %s] %s", session_id, text)
                     tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
@@ -83,11 +85,15 @@ class CodexAdapter(Adapter):
         try:
             proc.stdin.write(message.encode("utf-8"))
             await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            log.debug(
+                "codex closed stdin before reading the prompt for pid %s: %s",
+                proc.pid,
+                exc,
+            )
         finally:
-            try:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
                 proc.stdin.close()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         env = self._worker_env()
@@ -149,7 +155,8 @@ class CodexAdapter(Adapter):
                 event = str(obj.get("type") or "")
                 event_type = "raw"
                 if event == "item.completed":
-                    item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                    raw_item = obj.get("item")
+                    item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
                     item_type = str(item.get("type") or "")
                     if item_type == "agent_message":
                         event_type = "message_chunk"
@@ -229,10 +236,8 @@ class CodexAdapter(Adapter):
         finally:
             if not stderr_task.done():
                 stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
-            except asyncio.CancelledError:
-                pass
             self._procs.pop(session.session_id, None)
             self._cancelled.discard(session.session_id)
             drop_pid(self.home, session.session_id)

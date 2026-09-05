@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(dt: datetime | None = None) -> str:
@@ -115,7 +115,10 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.queued
     stop_reason: str | None = None
     result_text: str = ""
+    result_chars: int = 0
     files_changed: list[str] = Field(default_factory=list)
+    files_changed_total: int = 0
+    files_changed_truncated: bool = False
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)

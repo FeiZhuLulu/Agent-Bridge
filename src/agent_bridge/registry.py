@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+import psutil
 
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
@@ -30,11 +33,22 @@ from agent_bridge.models import (
     iso,
     normalize_effort,
 )
-from agent_bridge.paths import ensure_home, state_path
-from agent_bridge.persist import atomic_write_json, read_json
+from agent_bridge.paths import ensure_home, result_path, state_path, transcript_path
+from agent_bridge.persist import atomic_write_json, atomic_write_text, read_json
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
-from agent_bridge.transcript import page_events, read_events, read_events_tail, recent_activity
+from agent_bridge.transcript import (
+    append_event,
+    flush_pending,
+    flush_session,
+    forget_worker_activity,
+    mark_worker_activity,
+    page_events,
+    read_events,
+    read_events_tail,
+    recent_activity,
+    worker_silence_sec,
+)
 from agent_bridge.worker_env import describe_env, install_host_env, is_worker_context
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
 
@@ -55,12 +69,20 @@ NESTED_END_SESSION_ERROR = (
 )
 
 RESULT_TAIL = 6000
-# result_text kept on the Task (and persisted in state.json). get_result only
-# ever returns the RESULT_TAIL suffix; the full log lives in the transcript.
+# Explicit get_result calls can read up to this many characters per page.
+RESULT_PAGE_MAX_CHARS = 60000
+# Retained only as a fallback if the one-time result artifact write fails.
 RESULT_STORE_MAX = 30000
 # Terminal tasks kept per session; older ones are pruned so state.json does
 # not grow without bound over a long-lived Bridge.
 TASK_KEEP_PER_SESSION = 20
+FILES_CHANGED_MAX = 200
+SESSION_KEEP_INACTIVE = 50
+SESSION_RETAIN_SEC = 14 * 86400
+TASK_KEEP_TOTAL = 200
+STOP_TASK_GRACE_SEC = 15
+STALL_POLL_SEC = 30
+STALL_CANCEL_GRACE_SEC = 15
 
 
 def _new_id(prefix: str) -> str:
@@ -73,6 +95,13 @@ def _resolve_runtime_context(runtime_context: RuntimeContext | None) -> RuntimeC
     if runtime_context not in ("coordinator", "worker"):
         raise ValueError(f"unknown runtime_context {runtime_context!r}; use coordinator or worker")
     return runtime_context
+
+
+def _session_last_active_ts(last_active_at: str) -> float:
+    try:
+        return datetime.fromisoformat(last_active_at).timestamp()
+    except (ValueError, TypeError, OSError, OverflowError):
+        return 0.0
 
 
 def _tail(text: str, limit: int = RESULT_TAIL) -> str:
@@ -109,6 +138,10 @@ class Registry:
         )
         self.runtime_context = _resolve_runtime_context(runtime_context)
         self.dispatch_enabled = self.runtime_context == "coordinator"
+        self._sibling_cache: tuple[float, int] | None = None
+        self._stopping = False
+        self._pending_state: dict[str, list[dict]] | None = None
+        self._flush_task: asyncio.Task[None] | None = None
 
     @classmethod
     def create(
@@ -165,9 +198,16 @@ class Registry:
         merged.update(mine)
         return list(merged.values())
 
-    def save(self) -> None:
+    def _own_rows(self) -> dict[str, list[dict]]:
+        return {
+            "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
+            "tasks": [t.model_dump(mode="json") for t in self.tasks.values()],
+        }
+
+    def _write_state(self, own: dict[str, list[dict]]) -> None:
         # Live siblings may interleave a read-merge-write; each instance only
-        # rewrites its own records, so the next save converges.
+        # rewrites its own records, so the next save converges. Uses the
+        # snapshot in `own` plus owner identity, never self.sessions / self.tasks.
         path = state_path(self.home)
         disk = read_json(path, {})
         if not isinstance(disk, dict):
@@ -177,16 +217,46 @@ class Registry:
             {
                 "sessions": self._merge_owned(
                     disk.get("sessions") or [],
-                    {session.session_id: session.model_dump(mode="json") for session in self.sessions.values()},
+                    {row["session_id"]: row for row in own["sessions"]},
                     "session_id",
                 ),
                 "tasks": self._merge_owned(
                     disk.get("tasks") or [],
-                    {task.task_id: task.model_dump(mode="json") for task in self.tasks.values()},
+                    {row["task_id"]: row for row in own["tasks"]},
                     "task_id",
                 ),
             },
         )
+
+    def save(self) -> None:
+        self._pending_state = self._own_rows()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            own, self._pending_state = self._pending_state, None
+            self._write_state(own)
+            return
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = loop.create_task(self._flush_state_loop(), name="state-flush")
+
+    async def _flush_state_loop(self) -> None:
+        # No await between seeing _pending_state is None and returning, so
+        # save() cannot observe a still-running flush task and skip creating
+        # a new one after this loop has already decided to exit.
+        while self._pending_state is not None:
+            own, self._pending_state = self._pending_state, None
+            try:
+                await asyncio.to_thread(self._write_state, own)
+            except Exception:
+                # A failed write must not kill the flush task: stop() awaits
+                # it, and the next save() has to be able to retry.
+                log.exception("could not write state.json")
+
+    async def flush_state(self) -> None:
+        """Wait until every save() so far is on disk."""
+        task = self._flush_task
+        if task is not None and not task.done():
+            await task
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -197,10 +267,9 @@ class Registry:
             return False
         if time.monotonic() - self._last_activity < idle_sec:
             return False
-        for task in self.tasks.values():
-            if task.status in {TaskStatus.queued, TaskStatus.running}:
-                return False
-        return True
+        return all(
+            task.status not in {TaskStatus.queued, TaskStatus.running} for task in self.tasks.values()
+        )
 
     async def _idle_exit_watchdog(self) -> None:
         try:
@@ -224,6 +293,7 @@ class Registry:
             raise
 
     async def start(self) -> None:
+        self._stopping = False
         install_host_env(self.config.env)
         reap_orphans(self.home)
         payload = read_json(state_path(self.home), {})
@@ -249,7 +319,13 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
+        # Stamp adopted owners onto disk first so a following prune is not
+        # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
+        await self.flush_state()
+        self._prune()
+        self.save()
+        await self.flush_state()
         self.touch_activity()
         if self.config.server.idle_exit_sec > 0:
             self._watchdog = asyncio.create_task(
@@ -258,14 +334,25 @@ class Registry:
             )
 
     async def stop(self) -> None:
+        self._stopping = True
         watchdog = self._watchdog
         self._watchdog = None
         if watchdog is not None:
             watchdog.cancel()
         for idle in list(self._idle.values()):
             idle.cancel()
-        for bg in list(self._bg.values()):
+        self._idle.clear()
+        bgs = [task for task in self._bg.values() if not task.done()]
+        for bg in bgs:
             bg.cancel()
+        if bgs:
+            _done, pending = await asyncio.wait(bgs, timeout=STOP_TASK_GRACE_SEC)
+            if pending:
+                log.warning(
+                    "%d task(s) did not finish cancelling within %ss",
+                    len(pending),
+                    STOP_TASK_GRACE_SEC,
+                )
         for session_id, adapter in list(self._adapters.items()):
             session = self.sessions.get(session_id)
             if session is not None:
@@ -276,7 +363,12 @@ class Registry:
                 if session.proc_state != ProcState.dead:
                     session.proc_state = ProcState.idle_unloaded
         self._adapters.clear()
+        try:
+            flush_pending(self.home)
+        except OSError:
+            log.exception("could not flush transcripts during shutdown")
         self.save()
+        await self.flush_state()
 
     def _adapter_for(self, session: Session) -> Adapter:
         existing = self._adapters.get(session.session_id)
@@ -296,11 +388,27 @@ class Registry:
         probes = [probe_agent(cfg, self.config.env) for cfg in self.config.agents.values()]
         return list(await asyncio.gather(*probes))
 
-    def env_status(self) -> dict:
+    SIBLING_CACHE_SEC = 60
+
+    async def _sibling_count(self) -> int:
+        now = time.monotonic()
+        if self._sibling_cache is not None:
+            cached_at, count = self._sibling_cache
+            if now - cached_at < self.SIBLING_CACHE_SEC:
+                return count
+        try:
+            count = await asyncio.to_thread(count_sibling_servers)
+        except (psutil.Error, OSError) as exc:
+            log.warning("could not count sibling agent-bridge servers: %s", exc)
+            count = 0
+        self._sibling_cache = (time.monotonic(), count)
+        return count
+
+    async def env_status(self) -> dict:
         status = describe_env(self.config.env)
         if self.config.warnings:
             status.setdefault("warnings", []).extend(self.config.warnings)
-        siblings = count_sibling_servers()
+        siblings = await self._sibling_count()
         if siblings > 0:
             warnings = status.setdefault("warnings", [])
             warnings.append(
@@ -376,7 +484,7 @@ class Registry:
         if not cwd_path.is_dir():
             raise ValueError(f"cwd is not a directory: {cwd_path}")
         effort = normalize_effort(effort)
-        cfg = self.config.get(agent)
+        self.config.get(agent)
         async with self._lock:
             if session_id:
                 session = self.sessions.get(session_id)
@@ -429,8 +537,14 @@ class Registry:
             self.tasks[task.task_id] = task
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)
-            self._prune_tasks()
+            self._prune()
             self.save()
+            log.info(
+                "task_dispatched task_id=%s session_id=%s agent=%s",
+                task.task_id,
+                session.session_id,
+                agent,
+            )
             self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
         return {
             "task_id": task.task_id,
@@ -441,6 +555,7 @@ class Registry:
         }
 
     async def _run_task(self, task_id: str) -> None:
+        started_monotonic = time.monotonic()
         task = self.tasks[task_id]
         session = self.sessions[task.session_id]
         adapter = self._adapter_for(session)
@@ -449,21 +564,46 @@ class Registry:
         session.proc_state = ProcState.busy
         session.last_active_at = iso()
         self.save()
+        watch = None
         try:
-            before = snapshot_workspace(task.cwd)
+            mark_worker_activity(session.session_id, self.home)
+            before = await asyncio.to_thread(snapshot_workspace, task.cwd)
+            limit = self.config.get(session.agent).stall_timeout_sec
+            watch = (
+                asyncio.create_task(
+                    self._stall_watch(task, session, adapter, limit),
+                    name=f"stall-{task_id}",
+                )
+                if limit > 0
+                else None
+            )
             result = await adapter.run_turn(session, task)
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
-            task.result_text = _tail(result.text, RESULT_STORE_MAX)
-            task.files_changed = merge_files_changed(task.cwd, result.files_changed, before)
-            task.usage = result.usage
+            task.result_chars = len(result.text)
             task.warnings = list(result.warnings)
+            try:
+                atomic_write_text(result_path(task.task_id, self.home), result.text)
+                task.result_text = _tail(result.text)
+            except OSError as exc:
+                task.result_text = _tail(result.text, RESULT_STORE_MAX)
+                task.warnings.append(
+                    f"full result persistence failed: {type(exc).__name__}: {exc}"
+                )
+                log.exception("could not persist full result for task %s", task.task_id)
+            full_changed = await asyncio.to_thread(
+                merge_files_changed, task.cwd, result.files_changed, before
+            )
+            task.files_changed_total = len(full_changed)
+            task.files_changed = full_changed[:FILES_CHANGED_MAX]
+            task.files_changed_truncated = len(full_changed) > FILES_CHANGED_MAX
+            task.usage = result.usage
             if session.agent == "grok":
-                observed = observe_grok_session(session.cwd, session.native_session_id)
+                observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
             elif session.agent == "kimi":
-                observed = observe_kimi_session(session.native_session_id)
+                observed = await asyncio.to_thread(observe_kimi_session, session.native_session_id)
                 task.observed_model = observed["model"]
                 task.observed_effort = observed["effort"]
                 if observed["failure"]:
@@ -500,15 +640,123 @@ class Registry:
                 task.error = str(exc)
                 task.stop_reason = "error"
         finally:
+            if watch is not None:
+                watch.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watch
             if task.finished_at is None:
                 task.finished_at = iso()
             session.last_active_at = iso()
             if session.proc_state != ProcState.dead:
-                session.proc_state = ProcState.ready
+                session.proc_state = ProcState.ready if adapter.resident else ProcState.idle_unloaded
+            try:
+                flush_session(session.session_id, self.home)
+            except OSError:
+                log.exception("could not flush transcript for task %s", task.task_id)
             self._done[task_id].set()
             self._bg.pop(task_id, None)
             self.save()
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            log_method = log.warning if task.status == TaskStatus.failed else log.info
+            log_method(
+                "task_finished task_id=%s session_id=%s agent=%s status=%s "
+                "duration_ms=%s stop_reason=%s error=%r",
+                task.task_id,
+                task.session_id,
+                task.agent,
+                task.status.value,
+                duration_ms,
+                task.stop_reason,
+                (task.error or "")[:500],
+            )
             self._schedule_idle(session.session_id)
+
+    async def _stall_watch(
+        self,
+        task: Task,
+        session: Session,
+        adapter: Adapter,
+        limit: int,
+    ) -> None:
+        while True:
+            silence = worker_silence_sec(session.session_id, self.home) or 0.0
+            remaining = limit - silence
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, STALL_POLL_SEC))
+        if task.status in TERMINAL_STATUSES:
+            return
+        log.warning(
+            "task %s stalled: no worker output for %ss; cancelling the turn",
+            task.task_id,
+            limit,
+        )
+        task.status = TaskStatus.failed
+        task.stop_reason = "stalled"
+        task.error = (
+            f"worker produced no output for {limit}s (stall_timeout_sec); "
+            "Bridge cancelled the turn"
+        )
+        append_event(
+            session.session_id,
+            "error",
+            {"error": task.error, "stalled": True, "stall_timeout_sec": limit},
+            self.home,
+        )
+        # The turn normally returns (and _run_task tears this watch down)
+        # while cancel() is still reaping the worker; shield so that
+        # cleanup runs to completion instead of dying with the watch.
+        await asyncio.shield(self._cancel_stalled(adapter, session, task.task_id))
+        try:
+            await asyncio.wait_for(self._done[task.task_id].wait(), timeout=STALL_CANCEL_GRACE_SEC)
+        except TimeoutError:
+            bg = self._bg.get(task.task_id)
+            if bg is not None:
+                bg.cancel()
+
+    async def _cancel_stalled(self, adapter: Adapter, session: Session, task_id: str) -> None:
+        try:
+            await adapter.cancel(session)
+        except Exception:
+            log.exception("stall cancel failed for task %s", task_id)
+
+    def _drop_task(self, task_id: str) -> None:
+        self.tasks.pop(task_id, None)
+        self._done.pop(task_id, None)
+        try:
+            result_path(task_id, self.home).unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not remove pruned result for task %s", task_id)
+
+    def _prune_sessions(self) -> None:
+        now = time.time()
+        candidates = [
+            session
+            for session in self.sessions.values()
+            if session.proc_state in {ProcState.dead, ProcState.idle_unloaded}
+            and session.session_id not in self._adapters
+            and self._busy_task(session.session_id) is None
+        ]
+        candidates.sort(key=lambda item: _session_last_active_ts(item.last_active_at), reverse=True)
+        drop = [
+            session
+            for index, session in enumerate(candidates)
+            if index >= SESSION_KEEP_INACTIVE
+            or now - _session_last_active_ts(session.last_active_at) > SESSION_RETAIN_SEC
+        ]
+        for session in drop:
+            session_id = session.session_id
+            self.sessions.pop(session_id, None)
+            forget_worker_activity(session_id, self.home)
+            self._cancel_idle(session_id)
+            for task in [item for item in self.tasks.values() if item.session_id == session_id]:
+                self._drop_task(task.task_id)
+            log.info(
+                "pruned session %s (%s, last active %s)",
+                session_id,
+                session.proc_state.value,
+                session.last_active_at,
+            )
 
     def _prune_tasks(self) -> None:
         by_session: dict[str, list[Task]] = {}
@@ -520,8 +768,17 @@ class Registry:
                 continue
             terminal.sort(key=lambda item: item.created_at)
             for old in terminal[: len(terminal) - TASK_KEEP_PER_SESSION]:
-                self.tasks.pop(old.task_id, None)
-                self._done.pop(old.task_id, None)
+                self._drop_task(old.task_id)
+        terminal_all = [task for task in self.tasks.values() if task.status in TERMINAL_STATUSES]
+        if len(terminal_all) <= TASK_KEEP_TOTAL:
+            return
+        terminal_all.sort(key=lambda item: item.created_at)
+        for old in terminal_all[: len(terminal_all) - TASK_KEEP_TOTAL]:
+            self._drop_task(old.task_id)
+
+    def _prune(self) -> None:
+        self._prune_sessions()
+        self._prune_tasks()
 
     def _cancel_idle(self, session_id: str) -> None:
         idle = self._idle.pop(session_id, None)
@@ -529,8 +786,13 @@ class Registry:
             idle.cancel()
 
     def _schedule_idle(self, session_id: str) -> None:
+        if self._stopping:
+            return
         session = self.sessions.get(session_id)
         if session is None:
+            return
+        adapter = self._adapters.get(session_id)
+        if adapter is not None and not adapter.resident:
             return
         try:
             cfg = self.config.get(session.agent)
@@ -562,9 +824,51 @@ class Registry:
             raise KeyError(f"unknown task {task_id}")
         return task
 
+    @staticmethod
+    def _result_hint(task: Task, prefix: str) -> str:
+        hint = prefix
+        if task.agent == "grok":
+            hint += (
+                " Grok system-prompt identity is not the selected model; "
+                "use observed_model from this payload."
+            )
+        if task.agent == "kimi":
+            hint += (
+                " Kimi reports a failed turn as end_turn with empty text; "
+                "an empty result is only clean if warnings is empty."
+            )
+        if task.agent == "opencode":
+            hint += (
+                " OpenCode observed_model/effort are the last values Bridge "
+                "successfully set on the session after mapping, not a live sampler."
+            )
+        if task.agent == "claude":
+            hint += (
+                " Claude Code observed_model/effort are the last values Bridge "
+                "successfully set on the session after mapping, not a live sampler."
+            )
+        if task.agent == "devin":
+            hint += (
+                " Devin observed_model is the last id Bridge set on the session; "
+                "observed_effort is always null because the level is part of the model id."
+            )
+        if task.files_changed_truncated:
+            hint += (
+                f" files_changed lists the first {FILES_CHANGED_MAX} of "
+                f"{task.files_changed_total} paths; run git status in cwd for the full set."
+            )
+        if task.stop_reason == "stalled":
+            hint += (
+                " The worker went silent for stall_timeout_sec and Bridge cancelled the turn; "
+                "read get_transcript for its last activity, then either dispatch a narrower "
+                f"task on the same session_id or raise [agents.{task.agent}] stall_timeout_sec "
+                "if that step was legitimately long."
+            )
+        return hint
+
     def _task_snapshot(self, task: Task, include_result: bool = False) -> dict:
         events = read_events_tail(task.session_id, self.home)
-        payload = {
+        payload: dict[str, Any] = {
             "task_id": task.task_id,
             "session_id": task.session_id,
             "agent": task.agent,
@@ -573,6 +877,8 @@ class Registry:
             "error": task.error,
             "warnings": task.warnings,
             "files_changed": task.files_changed,
+            "files_changed_total": task.files_changed_total,
+            "files_changed_truncated": task.files_changed_truncated,
             "model": task.model,
             "effort": task.effort,
             "observed_model": task.observed_model,
@@ -589,30 +895,24 @@ class Registry:
         else:
             payload["elapsed_sec"] = 0
         if include_result:
-            payload["result_text"] = _tail(task.result_text)
-            payload["result_truncated"] = len(task.result_text.encode("utf-8")) > RESULT_TAIL
+            preview = _tail(task.result_text)
+            total_chars = task.result_chars or len(task.result_text)
+            payload["result_text"] = preview
+            payload["result_total_chars"] = total_chars
+            payload["result_truncated"] = total_chars > len(preview)
             payload["usage"] = task.usage
-            payload["hint"] = "Use get_transcript for the full turn log."
-            if task.agent == "grok":
-                payload["hint"] += (
-                    " Grok system-prompt identity is not the selected model; "
-                    "use observed_model from this payload."
-                )
-            if task.agent == "kimi":
-                payload["hint"] += (
-                    " Kimi reports a failed turn as end_turn with empty text; "
-                    "an empty result is only clean if warnings is empty."
-                )
-            if task.agent == "opencode":
-                payload["hint"] += (
-                    " OpenCode observed_model/effort are the last values Bridge "
-                    "successfully set on the session after mapping, not a live sampler."
-                )
-            if task.agent == "claude":
-                payload["hint"] += (
-                    " Claude Code observed_model/effort are the last values Bridge "
-                    "successfully set on the session after mapping, not a live sampler."
-                )
+            payload["hint"] = self._result_hint(
+                task,
+                "Use get_result for the complete final result and get_transcript "
+                "for the detailed turn log.",
+            )
+        payload["silent_for_sec"] = (
+            int(worker_silence_sec(task.session_id, self.home) or 0)
+            if task.status == TaskStatus.running
+            else None
+        )
+        cfg = self.config.agents.get(task.agent)
+        payload["stall_timeout_sec"] = cfg.stall_timeout_sec if cfg is not None else None
         return payload
 
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:
@@ -628,11 +928,52 @@ class Registry:
     def check_task(self, task_id: str) -> dict:
         return self._task_snapshot(self._require_task(task_id))
 
-    def get_result(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id), include_result=True)
+    def get_result(
+        self,
+        task_id: str,
+        cursor: int = 0,
+        max_chars: int = RESULT_PAGE_MAX_CHARS,
+    ) -> dict:
+        if cursor < 0:
+            raise ValueError("cursor must be non-negative")
+        if not 1 <= max_chars <= RESULT_PAGE_MAX_CHARS:
+            raise ValueError(f"max_chars must be between 1 and {RESULT_PAGE_MAX_CHARS}")
+        task = self._require_task(task_id)
+        path = result_path(task.task_id, self.home)
+        artifact = path.is_file()
+        try:
+            text = path.read_text(encoding="utf-8") if artifact else task.result_text
+        except OSError as exc:
+            log.warning("could not read full result for task %s: %s", task.task_id, exc)
+            artifact = False
+            text = task.result_text
+        if cursor > len(text):
+            raise ValueError(f"cursor exceeds result length ({len(text)})")
+        end = min(len(text), cursor + max_chars)
+        has_more = end < len(text)
+        payload = self._task_snapshot(task)
+        payload.update(
+            {
+                "result_text": text[cursor:end],
+                "result_offset": cursor,
+                "result_total_chars": len(text) if artifact else (task.result_chars or len(text)),
+                "next_cursor": end if has_more else None,
+                "has_more": has_more,
+                "result_truncated": has_more,
+                "result_complete": artifact,
+                "result_source": "artifact" if artifact else "legacy_state",
+                "usage": task.usage,
+                "hint": self._result_hint(
+                    task,
+                    "Continue with next_cursor while has_more is true. "
+                    "Use get_transcript for the detailed turn log.",
+                ),
+            }
+        )
+        return payload
 
     def get_transcript(self, session_id: str, offset: int = 0, limit: int = 50, kinds: list[str] | None = None) -> dict:
-        if session_id not in self.sessions:
+        if session_id not in self.sessions and not transcript_path(session_id, self.home).is_file():
             raise KeyError(f"unknown session {session_id}")
         events = read_events(session_id, self.home)
         return page_events(events, offset=offset, limit=limit, kinds=kinds)
@@ -650,12 +991,19 @@ class Registry:
         bg = self._bg.get(task_id)
         if bg is not None:
             bg.cancel()
-        try:
-            await asyncio.wait_for(self._done[task_id].wait(), timeout=15)
-        except TimeoutError:
+            await asyncio.wait({bg}, timeout=15)
+        else:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._done[task_id].wait(), timeout=15)
+        if not self._done[task_id].is_set():
+            # _run_task never ran (cancelled before its first step) or did not
+            # finish in time; close the record here.
             task.status = TaskStatus.cancelled
             task.stop_reason = "cancelled"
             task.finished_at = iso()
+            if task.started_at is None and session.proc_state == ProcState.spawning:
+                session.proc_state = ProcState.idle_unloaded
+            self._bg.pop(task_id, None)
             self._done[task_id].set()
             self.save()
         return self._task_snapshot(self.tasks[task_id])
@@ -694,6 +1042,7 @@ class Registry:
         if adapter is not None:
             await adapter.shutdown(session)
         self._cancel_idle(session_id)
+        forget_worker_activity(session_id, self.home)
         session.proc_state = ProcState.dead
         session.pid = None
         self.save()

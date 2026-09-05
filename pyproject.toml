@@ -1,7 +1,7 @@
 [project]
 name = "agent-bridge"
 version = "0.1.0"
-description = "Connect local coding agents. Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code coordinates Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, and Codex CLI."
+description = "Connect local coding agents. Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, or Devin coordinates Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, and Devin CLI."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "FeiZhuLulu" }]
@@ -15,8 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.16.5",
 ]
 
 [project.urls]
@@ -44,3 +47,30 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
+timeout = 120
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+ignore = [
+    "E501",     # long lines: docstrings and tool descriptions are prose
+    "ASYNC109", # explicit timeout parameters are part of the adapter API
+    "ASYNC240", # sync pathlib in async code is tracked separately (state/transcript IO work)
+    "SIM112",   # Windows OneDrive env var is mixed-case; ONEDRIVE would misdocument it
+]
+
+[tool.ruff.lint.per-file-ignores]
+# These files inject sys.path before importing local helpers; the import cannot sit at the top.
+"scripts/install_dsh_acp.py" = ["E402"]
+"tests/test_setup_lab.py" = ["E402"]
+"tests/test_smoke_claude_coordinator.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/agent_bridge"]
+ignore_missing_imports = true
+warn_unused_ignores = true

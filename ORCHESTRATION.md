@@ -2,7 +2,7 @@
 
 > Rulebook for coordinators. Copy to a project root as `AGENTS.md`, or use [skills/agent-bridge](skills/agent-bridge/SKILL.md). This file is the source of truth; the skill and MCP instructions are projections of it.
 
-You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, OpenCode, Claude Code, and Codex CLI are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
+You are the coordinator. Users talk only to you. Grok Build, Kimi Code, Antigravity (Gemini), DeepSeek Harness, OpenCode, Claude Code, Codex CLI, and Devin CLI are workers you call. Keep architecture decisions and acceptance. The same product can be a coordinator *and* a worker — those are different processes.
 
 ## Mode and user preferences
 
@@ -14,7 +14,7 @@ Call `list_agents` first and re-read `coordinator` before every dispatch.
 
 When the user states a **lasting** preference, persist it with `set_preferences`. Its `instructions` argument replaces the stored text — read the current value first and write the merge. One-off wishes are not preferences.
 
-Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, or `codex` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
+Workers are reached **only** through Agent Bridge MCP tools (`list_agents`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing, stop and say so. Do **not** run `kimi`, `grok`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, `codex`, or `devin` yourself. `git` / `pytest` after a turn is review, not a substitute for dispatch.
 
 ## Step 1 — dispatch, or do it yourself?
 
@@ -36,6 +36,7 @@ User `instructions` override this.
 - **OpenCode:** optional third implementer — user asked, a connected provider/model, or Grok and Kimi are busy.
 - **Claude Code:** optional implementer — user asked, or Grok and Kimi are busy. Worker binary is `claude-agent-acp`, not product `claude`.
 - **Codex CLI:** optional implementer — user asked, or others are busy. Desktop-bundled `codex exec`, not the Desktop GUI. Same product as this coordinator is a different process.
+- **Devin CLI:** optional implementer — user asked, or others are busy. `devin acp`, not Devin Desktop.
 - **DeepSeek Harness:** only if others are unavailable or the user asked.
 
 In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit request is the permission.
@@ -52,14 +53,15 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
    - Cursor: exact IDs from `cursor-agent --list-models`. Bridge refreshes that list before the first model-pinned ACP launch and starts `cursor-agent --model <id> acp`; an unavailable ID fails with the current list. Effort is part of Cursor's model ID, not a separate setting. A Cursor ACP session cannot switch models, so start a new Bridge session to change it. `observed_model` is the launch-time selection Bridge applied, not a live sampler.
    - DSH: `provider/model` + `off|low|high|max`. Changing them respawns.
    - Codex CLI: advertised slugs + `off|low|medium|high|max` (`off`→`none`). Default `--approve-for-me`; prompt on stdin. Revive via `exec resume`. Startup failures before JSONL are returned in `get_result.error`.
-3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. Size `timeout_sec` under the host MCP tool timeout:
+   - Devin CLI: advertised model ids (`devin models list`; the level is part of the id, e.g. `swe-1-7-medium`, `claude-opus-5-high`). Unknown id fails; `effort` is ignored with a warning. Mode forced to `bypass`. Revive via `session/load`, which replays old history into `get_transcript` (the new turn's `get_result` stays clean).
+3. Loop `wait_task` until terminal. A timeout is **not** failure — call it again. `wait_task` / `check_task` also report `silent_for_sec`, the time since the worker's last output. Bridge cancels a turn that stays silent for `stall_timeout_sec` (default 1800, per worker in `agents.toml`, 0 disables) and returns `status=failed`, `stop_reason="stalled"`. A long silent build looks the same as a hung worker: if the step was legitimate, raise that worker's limit; otherwise resume on the same `session_id` with a narrower task. Size `timeout_sec` under the host MCP tool timeout:
    - Codex: `tool_timeout_sec` 600; default 180 is fine.
    - Cursor: host ~45–60 s; pass ~30 and loop.
    - Kimi Code: configure `toolTimeoutMs` 600000; otherwise ~45 s polls.
    - ZCode: configure `timeoutMs` 600000; otherwise ~15–20 s polls.
    - Grok Build: official default `tool_timeout_sec` is 6000; set 600. If unsure or the host kills the call, ~30–45 s polls.
    - Claude Code: per-server `timeout` 600000 (ms) in `.mcp.json`. CLI default is long; desktop has historically died around 60 s — if unsure, ~45 s polls.
-4. `get_result`, then `git status` / `git diff` yourself. Run the relevant build and tests. Do not trust the worker's self-report. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
+4. `get_result`; while `has_more` is true, call it again with `cursor=next_cursor` and concatenate the pages. Then inspect `git status` / `git diff` yourself and run the relevant build and tests. Do not trust the worker's self-report. An empty Kimi result with non-empty `warnings` is a failed turn, not a no-op.
 5. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list. At most three follow-ups, then fix it yourself.
 6. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.
 

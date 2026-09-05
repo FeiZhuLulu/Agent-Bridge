@@ -25,6 +25,10 @@ def main(argv: list[str]) -> int:
         print("unknown command", file=sys.stderr)
         return 2
 
+    if os.environ.get("FAKE_CODEX_EARLY_EXIT"):
+        print("error: unexpected argument '--bogus'", file=sys.stderr, flush=True)
+        return 2
+
     prompt = sys.stdin.read()
     dump = os.environ.get("FAKE_CODEX_DUMP")
     if dump:

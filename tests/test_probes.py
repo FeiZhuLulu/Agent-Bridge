@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+import time
 from pathlib import Path
 
 import pytest
@@ -11,11 +14,16 @@ def _fake_resolve(command, fallbacks=None):
     return list(command)
 
 
+def _patch_dsh_version(monkeypatch, version=None):
+    monkeypatch.setattr("agent_bridge.probes.installed_dsh_version", lambda: version)
+
+
 @pytest.mark.asyncio
 async def test_dsh_probe_does_not_require_official_api_key(monkeypatch):
     monkeypatch.setattr("agent_bridge.probes.resolve_dsh_command", _fake_resolve)
     monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: {})
     monkeypatch.setattr("agent_bridge.dsh_home.settings_text", lambda *args, **kwargs: "")
+    _patch_dsh_version(monkeypatch)
     row = await probe_agent(
         AgentConfig(name="dsh", protocol="acp", command=["dsh-acp-demo"]),
         EnvConfig(discover_proxy=False, inherit=[]),
@@ -39,12 +47,57 @@ agent-default-model:
         "agent_bridge.probes.build_worker_env",
         lambda *args, **kwargs: {"DSH_HOME": str(tmp_path)},
     )
+    _patch_dsh_version(monkeypatch)
     row = await probe_agent(
         AgentConfig(name="dsh", protocol="acp", command=["dsh-acp-demo"]),
         EnvConfig(discover_proxy=False, inherit=[]),
     )
     assert row["available"] is True
     assert "dsh-model=acme-gateway/acme-large" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_dsh_probe_reports_dsh_version_not_node(tmp_path: Path, monkeypatch):
+    bin_path = tmp_path / "dsh-acp-demo.js"
+    bin_path.write_text("// stub\n", encoding="utf-8")
+
+    async def fake_version(_exe):
+        return "v22.0.0"
+
+    monkeypatch.setattr(
+        "agent_bridge.probes.resolve_dsh_command",
+        lambda command, fallbacks=None: ["node", str(bin_path)],
+    )
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: {})
+    monkeypatch.setattr("agent_bridge.dsh_home.settings_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("agent_bridge.probes.shutil.which", lambda name: "node" if name == "node" else None)
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    _patch_dsh_version(monkeypatch, "0.1.0-rc.9")
+    row = await probe_agent(
+        AgentConfig(name="dsh", protocol="acp", command=["dsh-acp-demo"]),
+        EnvConfig(discover_proxy=False, inherit=[]),
+    )
+    assert row["available"] is True
+    assert row["version"] == "0.1.0-rc.9"
+    assert "node=v22.0.0" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_dsh_probe_keeps_node_version_when_dsh_package_is_missing(monkeypatch):
+    async def fake_version(_exe):
+        return "v22.0.0"
+
+    monkeypatch.setattr("agent_bridge.probes.resolve_dsh_command", _fake_resolve)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: {})
+    monkeypatch.setattr("agent_bridge.dsh_home.settings_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    _patch_dsh_version(monkeypatch)
+    row = await probe_agent(
+        AgentConfig(name="dsh", protocol="acp", command=["dsh-acp-demo"]),
+        EnvConfig(discover_proxy=False, inherit=[]),
+    )
+    assert row["available"] is True
+    assert row["version"] == "v22.0.0"
 
 
 async def _probe_kimi(monkeypatch, env):
@@ -188,6 +241,22 @@ async def test_claude_probe_maps_openrouter_key_as_gateway(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_claude_probe_reports_when_gateway_blanks_anthropic_api_key(tmp_path, monkeypatch):
+    row = await _probe_claude(
+        monkeypatch,
+        {
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-x",
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_API_KEY": "sk-ant-x",
+        },
+    )
+    assert row["available"] is True
+    assert "auth=gateway" in row["detail"]
+    assert "blanked" in row["detail"]
+
+
+@pytest.mark.asyncio
 async def test_claude_probe_keeps_direct_anthropic_key_when_openrouter_is_set(tmp_path, monkeypatch):
     row = await _probe_claude(
         monkeypatch,
@@ -212,3 +281,39 @@ async def test_claude_probe_does_not_treat_mcp_config_as_oauth(tmp_path, monkeyp
     assert row["available"] is True
     assert "auth=oauth" not in row["detail"]
     assert "auth=missing" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_probe_agent_resolves_command_off_loop(monkeypatch):
+    def slow_resolve(command, fallbacks=None):
+        time.sleep(0.3)
+        return ["fake-bin"]
+
+    async def fake_version(_exe):
+        return "v1"
+
+    monkeypatch.setattr("agent_bridge.probes.resolve_command", slow_resolve)
+    monkeypatch.setattr("agent_bridge.probes._version_string", fake_version)
+    monkeypatch.setattr("agent_bridge.probes.build_worker_env", lambda *args, **kwargs: {})
+    ticks = 0
+
+    async def counter() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    task = asyncio.create_task(counter())
+    try:
+        row = await probe_agent(
+            AgentConfig(name="grok", protocol="acp", command=["grok"]),
+            EnvConfig(discover_proxy=False, inherit=[]),
+        )
+        assert ticks >= 10
+        assert row["available"] is True
+        assert row["version"] == "v1"
+        assert "command=fake-bin" in row["detail"]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

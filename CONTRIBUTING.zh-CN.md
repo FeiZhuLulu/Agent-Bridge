@@ -9,6 +9,8 @@
 ```powershell
 uv sync --extra dev
 uv run pytest
+uv run ruff check .
+uv run mypy
 ```
 
 真实协调者联调只用本机 `lab/`（不进 git）。先跑 `uv run --no-sync python scripts/setup_lab.py`，再用宿主打开那个文件夹——不要开仓库根，也不要开 `tests/`。

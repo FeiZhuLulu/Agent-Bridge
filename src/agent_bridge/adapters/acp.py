@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from acp import PROTOCOL_VERSION, connect_to_agent, text_block
 from acp.schema import (
@@ -19,9 +20,19 @@ from acp.schema import (
     RequestPermissionResponse,
 )
 
+from agent_bridge.acp_config import config_option_values
 from agent_bridge.adapters.base import STDIO_LIMIT, Adapter
+from agent_bridge.claude_meta import (
+    CLAUDE_MODE_BYPASS,
+    apply_claude_gateway_env,
+    resolve_claude_effort,
+)
 from agent_bridge.config import AgentConfig
+from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
+from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
+from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
 from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
+from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.processes import (
     drop_pid,
     process_create_time,
@@ -31,17 +42,10 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
-from agent_bridge.dsh_home import prepare_dsh_launch, resolve_dsh_command
-from agent_bridge.acp_config import config_option_values
-from agent_bridge.claude_meta import (
-    CLAUDE_MODE_BYPASS,
-    apply_claude_gateway_env,
-    resolve_claude_effort,
-)
-from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
-from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
+
+STDERR_TAIL_LIMIT = 16000
 
 log = logging.getLogger(__name__)
 
@@ -49,8 +53,8 @@ GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
 # These workers' session/load replays persisted history as session/update
 # notifications. session/resume is advertised and skips that replay.
 _RESUME_AGENTS = frozenset({"kimi", "opencode", "claude"})
-_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude"})
-_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "cursor"})
+_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude", "devin"})
+_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "devin", "cursor"})
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
@@ -63,6 +67,14 @@ CURSOR_MODEL_LIST_TIMEOUT_SEC = 30.0
 # files the agent merely opened. Under-matching is safe: the disk snapshot
 # diff in merge_files_changed still catches every real write.
 MUTATING_TOOL_KINDS = {"edit", "delete", "move", "write", "create"}
+_TOOL_IO_LIMIT = 500
+
+
+def _tool_io_summary(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= _TOOL_IO_LIMIT else text[:_TOOL_IO_LIMIT] + "…"
 
 
 class RpcTimeoutError(RuntimeError):
@@ -127,7 +139,7 @@ def with_cursor_cli_model(command: list[str], model: str | None) -> list[str]:
         raise RuntimeError(
             "cursor model selection requires an 'acp' token in the configured command"
         ) from None
-    return cmd[:index] + ["--model", model] + cmd[index:]
+    return [*cmd[:index], "--model", model, *cmd[index:]]
 
 
 def cursor_list_models_command(command: list[str]) -> list[str]:
@@ -141,8 +153,8 @@ def cursor_list_models_command(command: list[str]) -> list[str]:
         ) from None
     executable = Path(cmd[0]).name.lower()
     if executable in {"agent", "agent.exe"}:
-        return cmd[:index] + ["models"]
-    return cmd[:index] + ["--list-models"]
+        return [*cmd[:index], "models"]
+    return [*cmd[:index], "--list-models"]
 
 
 def parse_cursor_models(output: str) -> list[str]:
@@ -258,7 +270,13 @@ class _BridgeClient:
         self.usage = {}
         self.tool_kinds = {}
 
-    async def request_permission(self, session_id, tool_call, options, **kwargs):
+    async def request_permission(
+        self,
+        session_id: str,
+        tool_call: Any,
+        options: list[Any] | None,
+        **kwargs: Any,
+    ) -> RequestPermissionResponse:
         option = _pick_permission_option(options or [])
         dumped = _dump(tool_call)
         if option is None:
@@ -279,7 +297,7 @@ class _BridgeClient:
             outcome=AllowedOutcome(option_id=option.option_id, outcome="selected")
         )
 
-    async def session_update(self, session_id, update, **kwargs):
+    async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         dumped = _dump(update)
         type_name = type(update).__name__
         text = ""
@@ -314,44 +332,77 @@ class _BridgeClient:
                 data["title"] = title
             if dumped.get("path"):
                 data["path"] = dumped["path"]
+        if event_type in {"tool_call", "tool_call_update"} and isinstance(dumped, dict):
+            for src, dst in (("toolCallId", "tool_call_id"), ("kind", "kind"), ("status", "status")):
+                if dumped.get(src) is not None:
+                    data[dst] = dumped[src]
+            locations = dumped.get("locations")
+            if isinstance(locations, list):
+                paths = [loc.get("path") for loc in locations if isinstance(loc, dict) and loc.get("path")]
+                if paths:
+                    data["locations"] = paths[:20]
+            if event_type == "tool_call":
+                summary = _tool_io_summary(dumped.get("rawInput"))
+                if summary is not None:
+                    data["input"] = summary
+            elif dumped.get("status") == "failed":
+                summary = _tool_io_summary(dumped.get("rawOutput"))
+                if summary is not None:
+                    data["output"] = summary
         append_event(self.session_id, event_type, data, self.home)
 
-    async def write_text_file(self, session_id, path, content, **kwargs):
+    async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("filesystem client methods are disabled")
 
-    async def read_text_file(self, session_id, path, line=None, limit=None, **kwargs):
+    async def read_text_file(
+        self,
+        session_id: str,
+        path: str,
+        line: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> NoReturn:
         raise RuntimeError("filesystem client methods are disabled")
 
-    async def create_terminal(self, session_id, command, args=None, env=None, cwd=None, output_byte_limit=None, **kwargs):
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[str] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def terminal_output(self, session_id, terminal_id, **kwargs):
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def release_terminal(self, session_id, terminal_id, **kwargs):
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> None:
         return None
 
-    async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
+    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> NoReturn:
         raise RuntimeError("terminal client methods are disabled")
 
-    async def kill_terminal(self, session_id, terminal_id, **kwargs):
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> None:
         return None
 
-    async def create_elicitation(self, message, mode, **kwargs):
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
         from acp.schema import DeclineElicitationResponse
 
         return DeclineElicitationResponse(action="decline")
 
-    async def complete_elicitation(self, elicitation_id, **kwargs):
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         return None
 
-    async def ext_method(self, method, params):
+    async def ext_method(self, method: str, params: Any) -> dict[str, Any]:
         return {}
 
-    async def ext_notification(self, method, params):
+    async def ext_notification(self, method: str, params: Any) -> None:
         return None
 
-    def on_connect(self, conn) -> None:
+    def on_connect(self, conn: Any) -> None:
         return None
 
 
@@ -361,6 +412,7 @@ class _Live:
         self.conn: Any = None
         self.client: _BridgeClient | None = None
         self.stderr_task: asyncio.Task[None] | None = None
+        self.stderr_tail = ""
         self.prompt_task: asyncio.Task[Any] | None = None
         self.applied_model: str | None = None
         self.applied_effort: str | None = None
@@ -383,9 +435,16 @@ class AcpAdapter(Adapter):
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         if self.agent.name == "claude":
             return apply_claude_gateway_env(env)
+        if self.agent.name == "devin":
+            return apply_devin_env(env)
         return env
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
+    async def _drain_stderr(
+        self,
+        proc: asyncio.subprocess.Process,
+        session_id: str,
+        live: _Live,
+    ) -> None:
         if proc.stderr is None:
             return
         try:
@@ -395,7 +454,7 @@ class AcpAdapter(Adapter):
                     return
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[%s %s] %s", self.agent.name, session_id, text)
+                    live.stderr_tail = f"{live.stderr_tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
 
@@ -410,12 +469,14 @@ class AcpAdapter(Adapter):
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
         except TimeoutError:
+            live = self._live.get(session.session_id)
             log.error(
-                "%s %s timed out after %ss for %s; killing worker",
+                "%s %s timed out after %ss for %s; killing worker stderr_tail=%r",
                 self.agent.name,
                 what,
                 timeout,
                 session.session_id,
+                live.stderr_tail if live else "",
             )
             await self.shutdown(session)
             raise RpcTimeoutError(
@@ -509,7 +570,9 @@ class AcpAdapter(Adapter):
         live.proc = proc
         live.client = _BridgeClient(session.session_id, self.home)
         live.conn = connect_to_agent(live.client, proc.stdin, proc.stdout)
-        live.stderr_task = asyncio.create_task(self._drain_stderr(proc, session.session_id))
+        live.stderr_task = asyncio.create_task(
+            self._drain_stderr(proc, session.session_id, live)
+        )
         self._live[session.session_id] = live
         session.pid = proc.pid
         session.pid_create_time = process_create_time(proc.pid) if proc.pid else None
@@ -648,14 +711,74 @@ class AcpAdapter(Adapter):
             live.applied_effort = None
         live.applied_model = model
 
-    async def _set_kimi_option(
-        self,
-        live: _Live,
-        session: Session,
-        config_id: str,
-        value: str,
-    ) -> None:
-        await self._set_config_option(live, session, config_id, value)
+    async def _sync_model_option(self, live: _Live, session: Session) -> None:
+        """Apply ``session.model`` through the typed ``model`` config option.
+
+        A model the coordinator named explicitly and that this session does
+        not offer must fail the turn, not silently run on the default. The
+        error names the real options.
+        """
+        if not session.model or session.model == live.applied_model:
+            return
+        current_model, _ = config_option_values(live.config_options, "model")
+        if session.model == current_model:
+            # Already the session's model (commonly the default a coordinator
+            # names explicitly).
+            self._remember_applied_model(live, session.model)
+            return
+        try:
+            await self._set_config_option(live, session, "model", session.model)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            _, offered = config_option_values(live.config_options, "model")
+            raise RuntimeError(
+                f"{self.agent.name} rejected model {session.model!r}; "
+                f"session advertises {offered or 'no models'}"
+            ) from exc
+        self._remember_applied_model(live, session.model)
+
+    async def _sync_bypass_mode(self, live: _Live, session: Session, mode_id: str) -> None:
+        """Switch a session that starts in a manual mode to ``mode_id``.
+
+        A missing or rejected mode only warns: ACP ``requestPermission``
+        still auto-allows every tool call, so the turn runs either way.
+        """
+        if live.applied_mode == mode_id:
+            return
+        current_mode, offered_modes = config_option_values(live.config_options, "mode")
+        if current_mode == mode_id:
+            live.applied_mode = mode_id
+            return
+        if offered_modes and mode_id not in offered_modes:
+            message = (
+                f"{self.agent.name} {mode_id} is not advertised "
+                f"(session offers mode {offered_modes}); "
+                "ACP requestPermission will auto-allow instead"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        try:
+            await self._rpc(
+                live.conn.set_session_mode(
+                    session_id=session.native_session_id,
+                    mode_id=mode_id,
+                ),
+                "session/set_mode",
+                session,
+            )
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            message = (
+                f"{self.agent.name} rejected mode={mode_id}: {exc}; "
+                "ACP requestPermission will auto-allow instead"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_mode = mode_id
 
     async def _sync_kimi_selection(self, live: _Live, session: Session) -> None:
         """Force yolo mode, then apply model and thinking for a Kimi session.
@@ -679,28 +802,7 @@ class AcpAdapter(Adapter):
                 session,
             )
             live.applied_mode = KIMI_MODE_YOLO
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                # Already the session's model (commonly the default a
-                # coordinator names explicitly); switching thinking below is
-                # the only thing left to do.
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_kimi_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    # A model the coordinator named explicitly and that this
-                    # session does not offer must fail the turn, not silently
-                    # run on the default. Name the real options in the error.
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"kimi rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_model_option(live, session)
         # Order matters: thinking vocabularies are per model, and the set above
         # refreshed the snapshot this reads.
         await self._sync_kimi_thinking(live, session)
@@ -723,7 +825,7 @@ class AcpAdapter(Adapter):
             live.applied_effort = level
             return
         try:
-            await self._set_kimi_option(live, session, "thinking", level)
+            await self._set_config_option(live, session, "thinking", level)
         except RpcTimeoutError:
             raise
         except Exception as exc:
@@ -745,22 +847,7 @@ class AcpAdapter(Adapter):
         """
         if self.agent.name != "opencode" or live.conn is None or not session.native_session_id:
             return
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_config_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"opencode rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_model_option(live, session)
         await self._sync_opencode_effort(live, session)
 
     async def _sync_opencode_effort(self, live: _Live, session: Session) -> None:
@@ -801,55 +888,38 @@ class AcpAdapter(Adapter):
         """
         if self.agent.name != "claude" or live.conn is None or not session.native_session_id:
             return
-        if live.applied_mode != CLAUDE_MODE_BYPASS:
-            current_mode, offered_modes = config_option_values(live.config_options, "mode")
-            if current_mode == CLAUDE_MODE_BYPASS:
-                live.applied_mode = CLAUDE_MODE_BYPASS
-            elif offered_modes and CLAUDE_MODE_BYPASS not in offered_modes:
-                message = (
-                    f"claude bypassPermissions is not advertised "
-                    f"(session offers mode {offered_modes}); "
-                    "ACP requestPermission will auto-allow instead"
-                )
-                log.warning("%s", message)
-                live.pending_warnings.append(message)
-            else:
-                try:
-                    await self._rpc(
-                        live.conn.set_session_mode(
-                            session_id=session.native_session_id,
-                            mode_id=CLAUDE_MODE_BYPASS,
-                        ),
-                        "session/set_mode",
-                        session,
-                    )
-                    live.applied_mode = CLAUDE_MODE_BYPASS
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    message = (
-                        f"claude rejected mode={CLAUDE_MODE_BYPASS}: {exc}; "
-                        "ACP requestPermission will auto-allow instead"
-                    )
-                    log.warning("%s", message)
-                    live.pending_warnings.append(message)
-        if session.model and session.model != live.applied_model:
-            current_model, _ = config_option_values(live.config_options, "model")
-            if session.model == current_model:
-                self._remember_applied_model(live, session.model)
-            else:
-                try:
-                    await self._set_config_option(live, session, "model", session.model)
-                except RpcTimeoutError:
-                    raise
-                except Exception as exc:
-                    _, offered = config_option_values(live.config_options, "model")
-                    raise RuntimeError(
-                        f"claude rejected model {session.model!r}; "
-                        f"session advertises {offered or 'no models'}"
-                    ) from exc
-                self._remember_applied_model(live, session.model)
+        await self._sync_bypass_mode(live, session, CLAUDE_MODE_BYPASS)
+        await self._sync_model_option(live, session)
         await self._sync_claude_effort(live, session)
+
+    async def _sync_devin_selection(self, live: _Live, session: Session) -> None:
+        """Force bypass, then apply the model for a Devin CLI session.
+
+        ``devin acp`` starts every session in ``accept-edits`` regardless of
+        ``DEVIN_PERMISSION_MODE``. Model ids already carry the level
+        (``swe-1-7-medium``, ``claude-opus-5-high``); there is no effort
+        option, so a Bridge effort is reported as ignored once per value.
+        """
+        if self.agent.name != "devin" or live.conn is None or not session.native_session_id:
+            return
+        await self._sync_bypass_mode(live, session, DEVIN_MODE_BYPASS)
+        await self._sync_model_option(live, session)
+        if session.effort and live.applied_effort != session.effort:
+            message = (
+                f"devin has no effort option; effort={session.effort} ignored. "
+                "Pick a model id that carries the level instead "
+                "(e.g. swe-1-7-medium, claude-opus-5-high)"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            live.applied_effort = session.effort
+
+    async def _sync_selection(self, live: _Live, session: Session) -> None:
+        await self._sync_grok_model(live, session)
+        await self._sync_kimi_selection(live, session)
+        await self._sync_opencode_selection(live, session)
+        await self._sync_claude_selection(live, session)
+        await self._sync_devin_selection(live, session)
 
     async def _sync_claude_effort(self, live: _Live, session: Session) -> None:
         if not session.effort:
@@ -904,10 +974,7 @@ class AcpAdapter(Adapter):
                 session.native_session_id = None
                 await self.shutdown(session)
             else:
-                await self._sync_grok_model(live, session)
-                await self._sync_kimi_selection(live, session)
-                await self._sync_opencode_selection(live, session)
-                await self._sync_claude_selection(live, session)
+                await self._sync_selection(live, session)
                 return
         live = await self._spawn(session)
         native = session.native_session_id
@@ -926,10 +993,7 @@ class AcpAdapter(Adapter):
                 log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
             else:
                 self._remember_config_options(live, revived)
-                await self._sync_grok_model(live, session)
-                await self._sync_kimi_selection(live, session)
-                await self._sync_opencode_selection(live, session)
-                await self._sync_claude_selection(live, session)
+                await self._sync_selection(live, session)
                 return
         created = await self._rpc(
             self._call_new_session(live.conn, session.cwd, self._new_session_meta(session)),
@@ -944,16 +1008,14 @@ class AcpAdapter(Adapter):
             # effort-only dispatch does not raise a spurious warning, and let
             # _sync_grok_model switch the model via session/setModel.
             live.applied_effort = grok_effort(session.effort)
-        await self._sync_grok_model(live, session)
-        await self._sync_kimi_selection(live, session)
-        await self._sync_opencode_selection(live, session)
-        await self._sync_claude_selection(live, session)
+        await self._sync_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         await self.ensure_session(session)
         live = self._live[session.session_id]
         assert live.conn is not None and live.client is not None
         live.client.reset_turn()
+        live.stderr_tail = ""
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
         if self.agent.name == "cursor" and task.effort:
@@ -984,6 +1046,15 @@ class AcpAdapter(Adapter):
                 observed_model=live.applied_model,
                 observed_effort=live.applied_effort,
             )
+        except Exception:
+            if live.stderr_tail:
+                log.warning(
+                    "%s prompt failed for %s stderr_tail=%r",
+                    self.agent.name,
+                    session.session_id,
+                    live.stderr_tail,
+                )
+            raise
         finally:
             live.prompt_task = None
         stop = getattr(response, "stop_reason", None) or "end_turn"
@@ -1034,18 +1105,14 @@ class AcpAdapter(Adapter):
             session.pid = None
             return
         if live.conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(live.conn.close(), timeout=2)
-            except Exception:
-                pass
         if live.proc is not None:
             await reap_subprocess(live.proc)
         if live.stderr_task is not None:
             if not live.stderr_task.done():
                 live.stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await live.stderr_task
-            except asyncio.CancelledError:
-                pass
         drop_pid(self.home, session.session_id)
         session.pid = None

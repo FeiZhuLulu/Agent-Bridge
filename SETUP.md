@@ -1,6 +1,6 @@
 # Coordinator setup for Agent Bridge
 
-Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the coordinator. Register the same stdio server in whichever host you use. The same product can also be a worker (Grok Build, Claude Code, and Codex CLI are); those are different processes and different session roles.
+Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, and Devin can all act as the coordinator. Register the same stdio server in whichever host you use. Devin Desktop needs no entry of its own: Devin imports `~/.cursor/mcp.json` and the Cursor / Claude skill directories (`read_config_from.cursor`, on by default; `devin mcp list` shows what it picked up), so a Cursor setup is enough. The same product can also be a worker (Grok Build, Claude Code, Codex CLI, and Devin CLI are); those are different processes and different session roles.
 
 ## Install
 
@@ -8,7 +8,7 @@ Codex, Cursor, Kimi Code, ZCode, Grok Build, and Claude Code can all act as the 
 uv tool install git+https://github.com/FeiZhuLulu/Agent-Bridge.git
 ```
 
-That is the whole install. Then register the MCP server in the coordinator. The first time a top-level host starts Bridge, the coordinator skill is written automatically (skipped if Bridge was inherited inside a worker). Need [uv](https://docs.astral.sh/uv/) first.
+That is the whole install. Then register the MCP server in the coordinator. The first time a top-level host starts Bridge, the coordinator skill is written automatically (skipped if Bridge was inherited inside a worker); later starts rewrite it only after the bundled skill changed, so local edits survive restarts but not upgrades. Need [uv](https://docs.astral.sh/uv/) first.
 
 ## Resolve the Agent Bridge executable
 
@@ -62,7 +62,7 @@ npm install -g @deepseek-ai/dsh-acp-demo
 .\.venv\Scripts\python.exe scripts\install_dsh_acp.py
 ```
 
-The helper writes `$AGENT_BRIDGE_HOME/dsh-acp` (default `~/.agent-bridge/dsh-acp`) and installs the ACP peers the cordis file imports. Bridge copies that cordis file next to the chosen `node_modules` so ESM can resolve plugins. An unbuilt checkout `src/bin.ts` is ignored unless `tsx` is installed. DSH persistence is `$AGENT_BRIDGE_HOME/dsh-sessions/<session_id>` so a user project does not get `./.sessions`. `get_result.files_changed` is a turn-scoped workspace diff, not only ACP tool_call events (DSH often sends none).
+The helper writes `$AGENT_BRIDGE_HOME/dsh-acp` (default `~/.agent-bridge/dsh-acp`) and installs the ACP peers the cordis file imports. Bridge copies that cordis file next to the chosen `node_modules` so ESM can resolve plugins. An unbuilt checkout `src/bin.ts` is ignored unless `tsx` is installed. DSH persistence is `$AGENT_BRIDGE_HOME/dsh-sessions/<session_id>` so a user project does not get `./.sessions`. `get_result.files_changed` is a turn-scoped workspace diff, not only ACP tool_call events (DSH often sends none). It is capped at 200 paths; `files_changed_total` / `files_changed_truncated` tell you when to fall back to `git status`.
 
 Restart Codex after editing `config.toml`.
 
@@ -271,7 +271,7 @@ Live coordinator loop (product `claude` as host, OpenCode as worker): `uv run py
 
 ## Environment and proxy
 
-Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code, Codex) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
+Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code, Codex, Devin) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
 2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` / `claude-agent-acp` directly, so PowerShell functions that wrap those CLIs never run.
@@ -338,7 +338,7 @@ Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200
 The coordinator learns how to drive the Bridge through three channels; [ORCHESTRATION.md](ORCHESTRATION.md) is the source of truth for all of them ([ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md) is the human-readable translation):
 
 1. **MCP instructions — automatic.** The server sends its hard rules (tools-only access, `cwd` semantics, timeout-is-not-failure, verify-yourself) in the MCP handshake. Nothing to install, but hosts vary in how prominently they surface it, so don't rely on it alone.
-2. **Skill — automatic.** The first MCP start (and `agent-bridge upgrade`) writes [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
+2. **Skill — automatic.** The first MCP start, any start after the bundled skill changed, and `agent-bridge upgrade` write [skills/agent-bridge/SKILL.md](skills/agent-bridge/SKILL.md) into the host skill directories. It loads on demand when the coordinator is about to dispatch.
 3. **Rules file — fallback for hosts without skills.** Copy [ORCHESTRATION.md](ORCHESTRATION.md) to the target repository root as `AGENTS.md` (Codex, Cursor, Kimi Code, ZCode, and Grok Build all read it there) or as `CLAUDE.md` for Claude Code, or to `%USERPROFILE%\.codex\AGENTS.md` / `%USERPROFILE%\.kimi-code\AGENTS.md` / `%USERPROFILE%\.claude\CLAUDE.md` for a host-global default; the Cursor-global equivalent is User Rules in Cursor settings. Keep the English file under 9500 characters (Grok may copy it as `AGENTS.md`) and under 32 KiB — Codex concatenates the home file with per-directory `AGENTS.md` files from the git root down to cwd; Kimi Code does the same and warns past 32 KiB.
 
 Your own project's `AGENTS.md` stays yours: if you use the skill or the MCP instructions, the rulebook takes no `AGENTS.md` slot at all.
@@ -384,7 +384,7 @@ The coordinator can pin a worker model and thinking intensity on `dispatch_task`
 dispatch_task(agent="antigravity", model="gemini-3.7-flash", effort="low", ...)
 ```
 
-`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process. Claude Code accepts a slug the session advertises (`sonnet`, `opus`, `haiku`, or a full id) plus `effort=off|low|medium|high|max` mapped onto that model's levels (`off` → `default`, `max` → `xhigh` unless the session lists `max`). Codex CLI accepts a Codex slug plus `effort=off|low|medium|high|max` (`off` → `none`). Bridge runs `codex exec --json` with the prompt on stdin and `--approve-for-me` by default.
+`agy models` lists slugs such as `gemini-3.7-flash-low`. Either pass that full slug, or pass the family plus `effort=low|medium|high`. New agy sessions get `--new-project` and `--add-dir <cwd>` so work stays in the requested repo, not `~\.gemini\antigravity-cli\scratch`. Grok accepts a `grok models` slug plus `effort=off|low|medium|high|max` (`off` maps to Grok `none`, `max` to Grok `xhigh`). Grok `/new` still starts on the campaign default (currently grok-4.6 xhigh); Bridge calls `session/setModel` after the session exists. Accept Grok model selection from `get_result.observed_model` (Grok `turn_started.model_id`), not from the worker quoting `You are Grok 4.6`. Kimi accepts one of the slugs its own session advertises (`kimi-code/k3`, `kimi-code/k3-256k`, `kimi-code/kimi-for-coding`, ...) plus `effort=off|low|medium|high|max`. OpenCode accepts a `provider/model` slug the session advertises plus the same five effort tokens mapped onto that model's variants. DSH accepts `model="deepseek-official/deepseek-v4-flash"` and `effort=low|high|max`. Changing DSH model/effort on an existing session respawns the process. Claude Code accepts a slug the session advertises (`sonnet`, `opus`, `haiku`, or a full id) plus `effort=off|low|medium|high|max` mapped onto that model's levels (`off` → `default`, `max` → `xhigh` unless the session lists `max`). Codex CLI accepts a Codex slug plus `effort=off|low|medium|high|max` (`off` → `none`). Bridge runs `codex exec --json` with the prompt on stdin and `--approve-for-me` by default. Devin CLI accepts a model id the session advertises (`swe-1-7-medium`, `claude-opus-5-high`, …); the level is part of the id and `effort` is ignored with a warning.
 
 ## Worker: Kimi Code
 
@@ -452,6 +452,19 @@ $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
 If `OPENROUTER_API_KEY` is set and `ANTHROPIC_AUTH_TOKEN` is not, Bridge copies it and defaults the base URL to OpenRouter **only when** `ANTHROPIC_API_KEY` is also unset. A machine that uses OpenRouter for OpenCode and a direct Anthropic key for Claude keeps the Anthropic key. Set `ANTHROPIC_BASE_URL` yourself if you want that Anthropic key treated as a gateway conflict (Bridge then blanks it once a token and base URL are both present).
 
 `dispatch_task.model` is a slug the live session advertises (`sonnet`, `opus`, `haiku`, or a full id). `effort` maps onto that model's levels (`default|low|medium|high|xhigh` is common; Bridge `off` → `default`, `max` → `xhigh` unless the session lists `max`). An unknown slug fails the turn and lists the real options; a model with no effort option, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set after that mapping. Switching model on a live session re-applies effort. Bridge forces `bypassPermissions` after `session/new` (a fresh session starts in manual `default` mode); if that mode is not advertised — for example when the process is root — ACP `requestPermission` still auto-picks `allow-always`. Revive uses `session/resume`: `session/load` replays the whole history.
+
+## Worker: Devin CLI
+
+`devin acp` is the Devin CLI's own ACP server — the same binary Devin Desktop, Zed and JetBrains launch. Install the standalone CLI (it puts `devin` on PATH; the copy bundled inside Devin Desktop is not) and log in once:
+
+```powershell
+irm https://static.devin.ai/cli/setup.ps1 | iex
+devin auth login
+```
+
+Auth is `devin auth login` on disk or `WINDSURF_API_KEY`. `list_agents` runs `devin auth status` and reports its first line as `auth=`. Bridge drops `ACP_BACKEND` from the worker environment: Devin Desktop stamps that variable on every child process, and with it set the CLI trusts only credentials the ACP host passes in and refuses `session/new` — so a Devin Desktop coordinator can still dispatch to a `devin` worker.
+
+`dispatch_task.model` is a model id the live session advertises (`devin models list`): the level is part of the id (`swe-1-7`, `swe-1-7-medium`, `claude-opus-5-high`), so there is no `effort` option — a Bridge `effort` is ignored with a warning. An unknown id fails the turn and lists the real options. Bridge forces `bypass` after `session/new` (a fresh session starts in `accept-edits`; `DEVIN_PERMISSION_MODE` is parsed but not applied to ACP sessions). Revive uses `session/load` — Devin has no `session/resume` — and Devin ignores `noReplay`, so the persisted history is replayed as `session/update` notifications before `load` answers. Bridge resets its turn state before prompting, so `get_result` and `files_changed` for the new turn are clean, but `get_transcript` will show the replayed history again after a revive; that is a side effect, not the way to fetch history. Mode and model survive the reload. A long session may take longer than the 60 s handshake timeout to replay; if that bites, lower `idle_unload_sec` for devin or open a new session.
 
 ## Permissions
 

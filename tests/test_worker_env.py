@@ -12,7 +12,6 @@ from agent_bridge.worker_env import (
     resolve_env,
 )
 
-
 GROK_PROFILE = """
 function grok {
     $local:old_http = $env:HTTP_PROXY

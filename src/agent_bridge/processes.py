@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -137,12 +138,10 @@ def _wait_and_kill_tree(pid: int, timeout: float = 5.0) -> None:
     tree = _process_tree(pid)
     if not tree:
         return
-    gone, alive = psutil.wait_procs(tree, timeout=timeout)
+    _gone, alive = psutil.wait_procs(tree, timeout=timeout)
     for leftover in alive:
-        try:
+        with contextlib.suppress(psutil.Error):
             leftover.kill()
-        except psutil.Error:
-            pass
 
 
 async def interrupt_then_reap(proc: Any | None, timeout: float = 3.0) -> None:
@@ -152,24 +151,29 @@ async def interrupt_then_reap(proc: Any | None, timeout: float = 3.0) -> None:
     ``CTRL_BREAK_EVENT`` first so Codex exec can run ``turn/interrupt``.
     Unix workers get ``SIGINT``. If that does not finish the process,
     ``reap_subprocess`` terminates then kills the tree.
+    If the interrupt cannot be delivered (no console on Windows), escalate at once.
     """
     if proc is None or getattr(proc, "returncode", None) is not None:
         return
     pid = getattr(proc, "pid", None)
+    signalled = False
     try:
         if sys.platform == "win32" and pid:
             os.kill(pid, signal.CTRL_BREAK_EVENT)
+            signalled = True
         elif hasattr(proc, "send_signal"):
             proc.send_signal(signal.SIGINT)
+            signalled = True
         else:
             kill_tree(pid, handle=proc)
-    except (ProcessLookupError, PermissionError, OSError, ValueError):
-        pass
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        return
-    except TimeoutError:
-        pass
+    except (ProcessLookupError, PermissionError, OSError, ValueError) as exc:
+        log.debug("graceful interrupt of pid %s failed (%s); terminating instead", pid, exc)
+    if signalled:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+            return
+        except TimeoutError:
+            pass
     await reap_subprocess(proc, timeout=timeout)
 
 
@@ -186,10 +190,8 @@ async def reap_subprocess(proc: Any | None, timeout: float = 5.0) -> None:
     except TimeoutError:
         pass
     kill_tree(pid, handle=proc, force=True)
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=2)
-    except TimeoutError:
-        pass
 
 
 def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
@@ -446,10 +448,8 @@ def count_sibling_servers(
         me = psutil.Process()
         my_pid = me.pid
         ancestors: set[int] = set()
-        try:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             ancestors.update(parent.pid for parent in me.parents())
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
 
         if processes is None:
             proc_iter: Iterable[Any] = psutil.process_iter(["pid", "ppid", "name", "cmdline"])

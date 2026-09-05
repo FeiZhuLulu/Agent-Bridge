@@ -9,6 +9,8 @@ This is the source checkout. End users install with `uv tool install git+https:/
 ```powershell
 uv sync --extra dev
 uv run pytest
+uv run ruff check .
+uv run mypy
 ```
 
 Live coordinator drills use a local `lab/` folder (not in git). Run `uv run --no-sync python scripts/setup_lab.py`, then open that folder in the host — not the repo root and not `tests/`.

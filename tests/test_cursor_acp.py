@@ -16,7 +16,6 @@ from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task
 from agent_bridge.processes import reap_subprocess
 
-
 CURSOR_AGENT = Path(__file__).with_name("cursor_agent.py")
 
 

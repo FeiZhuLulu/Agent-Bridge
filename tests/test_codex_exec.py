@@ -11,6 +11,7 @@ import pytest
 from agent_bridge.adapters.codex import CodexAdapter
 from agent_bridge.codex_exec import (
     CodexTurnState,
+    _codex_exe_name,
     apply_codex_event,
     build_codex_exec_argv,
     codex_command_problem,
@@ -21,7 +22,6 @@ from agent_bridge.codex_exec import (
     read_codex_cli_path,
     resolve_codex_command,
     yolo_requested,
-    _codex_exe_name,
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session, Task
@@ -316,6 +316,51 @@ async def test_adapter_surfaces_stderr_when_codex_exits_before_jsonl(tmp_path: P
     assert result.stop_reason == "error"
     assert result.error == "codex startup failed: invalid config"
     assert result.warnings == ["codex exited with code 2"]
+
+
+@pytest.mark.asyncio
+async def test_early_exit_surfaces_stderr(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_EARLY_EXIT", "1")
+    monkeypatch.setattr(
+        "agent_bridge.adapters.codex.resolve_codex_command",
+        lambda *args, **kwargs: [sys.executable, str(FAKE)],
+    )
+    adapter = CodexAdapter(
+        AgentConfig(name="codex", protocol="codex", command=["codex"]),
+        tmp_path,
+    )
+    session = Session(session_id="s-early", agent="codex", cwd=str(tmp_path))
+    result = await adapter.run_turn(
+        session,
+        Task(
+            task_id="t-early",
+            session_id=session.session_id,
+            agent="codex",
+            message="x" * 2_000_000,
+            cwd=str(tmp_path),
+        ),
+    )
+    assert result.stop_reason == "error"
+    assert "unexpected argument" in (result.error or "")
+    assert "codex exited with code 2" in result.warnings
+
+
+@pytest.mark.asyncio
+async def test_write_prompt_after_process_exit_does_not_raise(tmp_path: Path):
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(3)",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.wait()
+    adapter = CodexAdapter(
+        AgentConfig(name="codex", protocol="codex", command=["codex"]),
+        tmp_path,
+    )
+    await adapter._write_prompt(proc, "hello")
 
 
 @pytest.mark.asyncio

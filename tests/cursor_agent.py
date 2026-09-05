@@ -9,7 +9,6 @@ from pathlib import Path
 
 from echo_agent import _main as echo_main
 
-
 MODELS = ("cursor-model-a", "cursor-model-b")
 
 

@@ -363,10 +363,7 @@ def _node_module_roots(command: list[str]) -> list[Path]:
 
 
 def command_has_config(command: list[str]) -> bool:
-    for arg in command:
-        if arg in {"--config", "-c"} or arg.startswith("--config="):
-            return True
-    return False
+    return any(arg in {"--config", "-c"} or arg.startswith("--config=") for arg in command)
 
 
 def launch_prefix_for_command(command: list[str]) -> Path | None:

@@ -2,8 +2,54 @@ import json
 
 import pytest
 
+from agent_bridge import transcript
 from agent_bridge.paths import transcript_path
-from agent_bridge.transcript import append_event, page_events, read_events, read_events_tail
+from agent_bridge.transcript import (
+    append_event,
+    flush_session,
+    forget_worker_activity,
+    mark_worker_activity,
+    page_events,
+    read_events,
+    read_events_tail,
+    worker_silence_sec,
+)
+
+
+def test_small_events_stay_buffered_but_are_readable(bridge_home):
+    append_event("sess_buffered", "message_chunk", {"text": "hi"}, bridge_home)
+    path = transcript_path("sess_buffered", bridge_home)
+    assert not path.exists()
+    assert read_events("sess_buffered", bridge_home)[0]["data"]["text"] == "hi"
+    assert read_events_tail("sess_buffered", bridge_home)[0]["data"]["text"] == "hi"
+
+    append_event("sess_buffered", "turn_end", {"stop_reason": "end_turn"}, bridge_home)
+    assert path.is_file()
+    assert [event["type"] for event in read_events("sess_buffered", bridge_home)] == [
+        "message_chunk",
+        "turn_end",
+    ]
+
+
+def test_transcript_queries_do_not_flush(bridge_home, monkeypatch):
+    writes: list[str] = []
+    monkeypatch.setattr(transcript, "_append_batch", lambda path, text: writes.append(text))
+    append_event("sess_read_only", "message_chunk", {"text": "pending"}, bridge_home)
+    assert read_events("sess_read_only", bridge_home)
+    assert read_events_tail("sess_read_only", bridge_home)
+    assert writes == []
+    append_event("sess_read_only", "turn_end", {}, bridge_home)
+    assert len(writes) == 1
+
+
+def test_many_chunks_are_written_in_batches(bridge_home, monkeypatch):
+    writes: list[str] = []
+    monkeypatch.setattr(transcript, "_append_batch", lambda path, text: writes.append(text))
+    for index in range(10_000):
+        append_event("sess_many", "message_chunk", {"text": f"chunk-{index}"}, bridge_home)
+    append_event("sess_many", "turn_end", {}, bridge_home)
+    assert 1 < len(writes) < 100
+    assert sum(text.count("\n") for text in writes) == 10_001
 
 
 def test_append_and_page(bridge_home):
@@ -64,3 +110,52 @@ def test_page_events_rejects_invalid_paging_parameters():
         page_events(events, offset=-1)
     with pytest.raises(ValueError, match="limit"):
         page_events(events, limit=0)
+
+
+def test_read_events_reuses_parse_between_pages(bridge_home):
+    for text in ("one", "two", "three"):
+        append_event("sess_cache", "message_chunk", {"text": text}, bridge_home)
+    flush_session("sess_cache", bridge_home)
+    first = read_events("sess_cache", bridge_home)
+    second = read_events("sess_cache", bridge_home)
+    assert first is second
+    assert len(first) == 3
+
+
+def test_read_events_cache_invalidates_on_append(bridge_home):
+    for text in ("one", "two", "three"):
+        append_event("sess_inval", "message_chunk", {"text": text}, bridge_home)
+    flush_session("sess_inval", bridge_home)
+    first = read_events("sess_inval", bridge_home)
+    append_event("sess_inval", "message_chunk", {"text": "four"}, bridge_home)
+    buffered = read_events("sess_inval", bridge_home)
+    assert buffered is not first
+    assert len(buffered) == 4
+    flush_session("sess_inval", bridge_home)
+    flushed = read_events("sess_inval", bridge_home)
+    assert len(flushed) == 4
+    assert flushed is not buffered
+
+
+def test_worker_activity_clock(bridge_home):
+    assert worker_silence_sec("sess_never", bridge_home) is None
+    mark_worker_activity("sess_act", bridge_home)
+    silence = worker_silence_sec("sess_act", bridge_home)
+    assert silence is not None
+    assert silence == pytest.approx(0, abs=0.5)
+    append_event("sess_act", "message_chunk", {"text": "hi"}, bridge_home)
+    refreshed = worker_silence_sec("sess_act", bridge_home)
+    assert refreshed is not None
+    assert refreshed == pytest.approx(0, abs=0.5)
+    forget_worker_activity("sess_act", bridge_home)
+    assert worker_silence_sec("sess_act", bridge_home) is None
+
+
+def test_parse_cache_is_bounded(bridge_home):
+    transcript._parse_cache.clear()
+    for index in range(6):
+        session_id = f"sess_bound_{index}"
+        append_event(session_id, "message_chunk", {"text": str(index)}, bridge_home)
+        flush_session(session_id, bridge_home)
+        read_events(session_id, bridge_home)
+    assert len(transcript._parse_cache) <= 4

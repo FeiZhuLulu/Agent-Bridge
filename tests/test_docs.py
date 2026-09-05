@@ -116,6 +116,8 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
             "dispatch_enabled",
             "runtime_context",
             "git diff",
+            "stall_timeout_sec",
+            "silent_for_sec",
         ):
             assert token in text
     assert "timeout" in en.lower()
@@ -129,3 +131,10 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
     assert "cancel_task" in en
     assert "nested/" in en
     assert "nested/" in zh
+
+
+def test_skill_mentions_stall_watchdog():
+    skill = _read("skills/agent-bridge/SKILL.md")
+    assert "stall_timeout_sec" in skill
+    assert "silent_for_sec" in skill
+    assert _read("README.md").count("stall_timeout_sec") >= 2

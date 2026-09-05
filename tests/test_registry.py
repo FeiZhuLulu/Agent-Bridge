@@ -57,6 +57,15 @@ async def test_dispatch_records_model_and_effort(bridge_home, tmp_path):
         await registry.stop()
 
 
+def test_session_scope_is_explicit(bridge_home, monkeypatch):
+    registry = Registry.create(bridge_home)
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", lambda: 3)
+    assert registry.session_scope() == {
+        "scope": "current_instance",
+        "other_live_instances": 3,
+    }
+
+
 @pytest.mark.asyncio
 async def test_dispatch_wait_fake(bridge_home, tmp_path):
     work = tmp_path / "work"

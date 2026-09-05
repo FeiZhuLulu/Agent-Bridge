@@ -142,6 +142,7 @@ class AppConfig(BaseModel):
     env: EnvConfig = Field(default_factory=EnvConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
+    warnings: list[str] = Field(default_factory=list)
 
     def get(self, name: str) -> AgentConfig:
         if name not in self.agents:
@@ -369,6 +370,13 @@ def load_config(home: Path | None = None) -> AppConfig:
             f"{overlay_path} is not valid TOML: {exc}. "
             "Fix or delete the file, then restart the Bridge."
         ) from exc
+    supported_sections = {"agents", "env", "server", "coordinator"}
+    unsupported = sorted(set(overlay_raw) - supported_sections)
+    warnings = []
+    if unsupported:
+        warnings.append(
+            "unsupported agents.toml section(s) ignored: " + ", ".join(unsupported)
+        )
     bundled = _raw_agents(bundled_raw)
     overlay = _raw_agents(overlay_raw)
     merged: dict[str, dict[str, Any]] = {name: dict(spec) for name, spec in bundled.items()}
@@ -398,4 +406,10 @@ def load_config(home: Path | None = None) -> AppConfig:
         coord_raw["mode"] = env_mode
     coord_raw["mode"] = normalize_coordinator_mode(coord_raw.get("mode"))
     coordinator = CoordinatorConfig.model_validate(coord_raw)
-    return AppConfig(agents=agents, env=env, server=server, coordinator=coordinator)
+    return AppConfig(
+        agents=agents,
+        env=env,
+        server=server,
+        coordinator=coordinator,
+        warnings=warnings,
+    )

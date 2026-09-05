@@ -146,6 +146,15 @@ idle_exit_sec = 30
     assert cfg.server.idle_exit_sec == 30
 
 
+def test_unknown_top_level_section_is_reported(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        "[scheduler]\nglobal_limit = 9\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.warnings == ["unsupported agents.toml section(s) ignored: scheduler"]
+
+
 def test_server_idle_exit_disabled(tmp_path):
     (tmp_path / "agents.toml").write_text(
         """

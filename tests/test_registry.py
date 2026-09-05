@@ -57,6 +57,13 @@ async def test_dispatch_records_model_and_effort(bridge_home, tmp_path):
         await registry.stop()
 
 
+async def test_env_status_includes_config_warnings(bridge_home, monkeypatch):
+    registry = Registry.create(bridge_home)
+    registry.config.warnings = ["unsupported agents.toml section(s) ignored: scheduler"]
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", lambda: 0)
+    assert (await registry.env_status())["warnings"] == registry.config.warnings
+
+
 @pytest.mark.asyncio
 async def test_dispatch_wait_fake(bridge_home, tmp_path):
     work = tmp_path / "work"

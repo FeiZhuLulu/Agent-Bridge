@@ -406,6 +406,8 @@ class Registry:
 
     async def env_status(self) -> dict:
         status = describe_env(self.config.env)
+        if self.config.warnings:
+            status.setdefault("warnings", []).extend(self.config.warnings)
         siblings = await self._sibling_count()
         if siblings > 0:
             warnings = status.setdefault("warnings", [])

@@ -66,4 +66,4 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
 
 Do not drive worker GUIs or CLIs. Session resume is Bridge's job.
 
-For retries, pass an optional UUID `request_id` to `dispatch_task`: identical arguments reuse the task (`reused=true`); different arguments are rejected. Deduplication lasts only in the same Bridge instance while the task is retained. Normal dispatch validation still applies. Restarting Bridge, switching instances, or pruning the task loses the binding; worker side effects are not exactly-once.
+For optional retry deduplication, generate a UUID `request_id` before the first `dispatch_task` call and include it on that call. Retry with the same ID and original arguments; if `session_id` was omitted, keep it omitted. Adding an ID only on retry cannot deduplicate the first call. Identical arguments reuse the task (`reused=true`); different arguments are rejected. Deduplication lasts only in the same Bridge instance while the task is retained. Normal dispatch validation still applies. Restarting Bridge, switching instances, or pruning the task loses the binding; worker side effects are not exactly-once.

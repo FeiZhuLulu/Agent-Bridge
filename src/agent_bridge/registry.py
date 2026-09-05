@@ -125,6 +125,7 @@ class Registry:
         self.config = config
         self.sessions: dict[str, Session] = {}
         self.tasks: dict[str, Task] = {}
+        self._requests: dict[str, tuple[tuple, str]] = {}
         self._adapters: dict[str, Adapter] = {}
         self._done: dict[str, asyncio.Event] = {}
         self._idle: dict[str, asyncio.Task[None]] = {}
@@ -467,6 +468,7 @@ class Registry:
         effort: str | None = None,
         title: str | None = None,
         user_requested: bool = False,
+        request_id: str | None = None,
     ) -> dict:
         if not self.dispatch_enabled:
             raise RuntimeError(NESTED_DISPATCH_ERROR)
@@ -476,6 +478,11 @@ class Registry:
                 "asked for a worker on this task. If they did, retry with "
                 "user_requested=true; otherwise do the work yourself."
             )
+        if request_id is not None:
+            try:
+                request_id = str(uuid.UUID(request_id))
+            except ValueError:
+                raise ValueError("request_id must be a UUID") from None
         cwd_path = Path(cwd)
         if not cwd_path.is_absolute():
             raise ValueError("cwd must be an absolute path")
@@ -485,7 +492,23 @@ class Registry:
             raise ValueError(f"cwd is not a directory: {cwd_path}")
         effort = normalize_effort(effort)
         self.config.get(agent)
+        # Compare supplied arguments, not selections inherited from a mutable session.
+        request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested)
         async with self._lock:
+            if request_id is not None and request_id in self._requests:
+                previous, task_id = self._requests[request_id]
+                if previous != request:
+                    raise ValueError("request_id is already bound to a different dispatch request")
+                task = self.tasks[task_id]
+                return {
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "agent": task.agent,
+                    "model": task.model,
+                    "effort": task.effort,
+                    "request_id": request_id,
+                    "reused": True,
+                }
             if session_id:
                 session = self.sessions.get(session_id)
                 if session is None:
@@ -535,6 +558,8 @@ class Registry:
             )
             self._stamp_owner(task)
             self.tasks[task.task_id] = task
+            if request_id is not None:
+                self._requests[request_id] = (request, task.task_id)
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)
             self._prune()
@@ -552,6 +577,7 @@ class Registry:
             "agent": agent,
             "model": session.model,
             "effort": session.effort,
+            **({"request_id": request_id, "reused": False} if request_id is not None else {}),
         }
 
     async def _run_task(self, task_id: str) -> None:
@@ -722,6 +748,9 @@ class Registry:
 
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
+        self._requests = {
+            key: binding for key, binding in self._requests.items() if binding[1] != task_id
+        }
         self._done.pop(task_id, None)
         try:
             result_path(task_id, self.home).unlink(missing_ok=True)

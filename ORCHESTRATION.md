@@ -65,3 +65,5 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
 6. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.
 
 Do not drive worker GUIs or CLIs. Session resume is Bridge's job.
+
+For retries, pass an optional UUID `request_id` to `dispatch_task`: identical arguments reuse the task (`reused=true`); different arguments are rejected. Deduplication lasts only in the same Bridge instance while the task is retained. Normal dispatch validation still applies. Restarting Bridge, switching instances, or pruning the task loses the binding; worker side effects are not exactly-once.

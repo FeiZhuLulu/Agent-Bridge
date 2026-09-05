@@ -71,3 +71,5 @@ Worker **只能**通过 Agent Bridge 的 MCP 工具调用（`list_agents`、`dis
 6. 结束后总结 diff、剩余风险、用了哪个 Worker。不再需要时调用 `end_session`。
 
 不要去操作 Worker 的图形界面。已经打开的 Grok TUI 不会跟着 ACP 回合实时刷新；用户重启 Grok Build 即可看到同一会话。会话续上是 Bridge 的事。
+
+重试 `dispatch_task` 时可传 UUID `request_id`：相同参数复用原任务（`reused=true`），不同参数直接拒绝。去重只在同一 Bridge 实例内、原任务仍保留时有效，仍须通过正常派发校验。重启 Bridge、切换实例或清理原任务后不再保留绑定；Worker 的外部副作用不保证 exactly-once。

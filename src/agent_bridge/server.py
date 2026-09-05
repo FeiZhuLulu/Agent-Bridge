@@ -110,8 +110,9 @@ async def dispatch_task(
     effort: str | None = None,
     title: str | None = None,
     user_requested: bool = False,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode/claude/devin: session/set_config_option after new/resume, devin has no effort; dsh: spawn env, respawn if they change; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/opencode/claude/devin: session/set_config_option after new/resume, devin has no effort; dsh: spawn env, respawn if they change; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. Optional UUID request_id deduplicates identical retries in this Bridge instance while the task is retained; different arguments are rejected. Normal dispatch validation still applies. Bindings are lost on restart and are not shared with other instances. Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,
@@ -122,6 +123,7 @@ async def dispatch_task(
             effort=effort,
             title=title,
             user_requested=user_requested,
+            request_id=request_id,
         )
         return {"ok": True, **result}
     except Exception as exc:

@@ -54,12 +54,13 @@ GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
 # notifications. session/resume is advertised and skips that replay.
 _RESUME_AGENTS = frozenset({"kimi", "opencode", "claude"})
 _CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude", "devin"})
-_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "devin"})
+_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "devin", "cursor"})
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
 # otherwise hang dispatch forever; prompt itself stays unbounded by design.
 RPC_TIMEOUT_SEC = 60.0
+CURSOR_MODEL_LIST_TIMEOUT_SEC = 30.0
 
 # ACP ToolKind values that can change the workspace. Read-only kinds (read,
 # search, fetch, think, ...) also carry locations; counting them would report
@@ -125,6 +126,45 @@ def with_grok_cli_selection(
             index = cmd.index(token)
             return cmd[:index] + extras + cmd[index:]
     return cmd + extras
+
+
+def with_cursor_cli_model(command: list[str], model: str | None) -> list[str]:
+    """Pin Cursor's model before its ACP subcommand."""
+    cmd = list(command)
+    if not model:
+        return cmd
+    try:
+        index = cmd.index("acp")
+    except ValueError:
+        raise RuntimeError(
+            "cursor model selection requires an 'acp' token in the configured command"
+        ) from None
+    return [*cmd[:index], "--model", model, *cmd[index:]]
+
+
+def cursor_list_models_command(command: list[str]) -> list[str]:
+    """Build the matching Cursor CLI model-discovery command."""
+    cmd = list(command)
+    try:
+        index = cmd.index("acp")
+    except ValueError:
+        raise RuntimeError(
+            "cursor model discovery requires an 'acp' token in the configured command"
+        ) from None
+    executable = Path(cmd[0]).name.lower()
+    if executable in {"agent", "agent.exe"}:
+        return [*cmd[:index], "models"]
+    return [*cmd[:index], "--list-models"]
+
+
+def parse_cursor_models(output: str) -> list[str]:
+    """Parse the stable ``<id> - <label>`` rows from ``--list-models``."""
+    models: list[str] = []
+    for raw_line in output.splitlines():
+        model, separator, _label = raw_line.strip().partition(" - ")
+        if separator and model and not any(char.isspace() for char in model):
+            models.append(model)
+    return models
 
 
 def dsh_needs_respawn(
@@ -443,6 +483,45 @@ class AcpAdapter(Adapter):
                 f"{self.agent.name} {what} timed out after {int(timeout)}s"
             ) from None
 
+    async def _cursor_models(
+        self,
+        command: list[str],
+        env: dict[str, str],
+        cwd: str | None,
+    ) -> list[str]:
+        model_cmd = cursor_list_models_command(command)
+        proc = await asyncio.create_subprocess_exec(
+            *model_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=CURSOR_MODEL_LIST_TIMEOUT_SEC
+            )
+        except asyncio.CancelledError:
+            await reap_subprocess(proc)
+            raise
+        except TimeoutError:
+            await reap_subprocess(proc)
+            raise RuntimeError(
+                "cursor model discovery timed out; run 'cursor-agent --list-models' "
+                "to check the current account"
+            ) from None
+        if proc.returncode:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            suffix = f": {detail[-1000:]}" if detail else ""
+            raise RuntimeError(f"cursor model discovery failed{suffix}")
+        models = parse_cursor_models(stdout.decode("utf-8", errors="replace"))
+        if not models:
+            raise RuntimeError(
+                "cursor model discovery returned no model IDs; run "
+                "'cursor-agent --list-models' to check the current account"
+            )
+        return models
+
     async def _spawn(self, session: Session) -> _Live:
         await self.shutdown(session)
         if self.agent.name == "dsh":
@@ -460,6 +539,18 @@ class AcpAdapter(Adapter):
             )
         elif self.agent.name == "grok":
             cmd = with_grok_cli_selection(cmd, session.model, session.effort)
+        elif self.agent.name == "cursor" and session.model:
+            models = await self._cursor_models(
+                cmd,
+                env,
+                self.agent.cwd or session.cwd or None,
+            )
+            if session.model not in models:
+                raise ValueError(
+                    f"cursor model {session.model!r} is not available for the current account; "
+                    f"available model IDs: {', '.join(models)}"
+                )
+            cmd = with_cursor_cli_model(cmd, session.model)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -500,6 +591,8 @@ class AcpAdapter(Adapter):
         if self.agent.name == "dsh":
             live.applied_model = session.model
             live.applied_effort = dsh_effort(session.effort)
+        elif self.agent.name == "cursor":
+            live.applied_model = session.model
         return live
 
     def _new_session_meta(self, session: Session) -> dict[str, Any]:
@@ -925,7 +1018,12 @@ class AcpAdapter(Adapter):
         live.stderr_tail = ""
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
-        if self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
+        if self.agent.name == "cursor" and task.effort:
+            warnings.append(
+                "cursor has no separate effort setting; select the exact model ID "
+                f"that includes the desired effort; effort={task.effort!r} was ignored"
+            )
+        elif self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
             warnings.append(
                 f"{self.agent.name} has no model/effort selection; "
                 f"model={task.model!r} effort={task.effort!r} were ignored"

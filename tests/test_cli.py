@@ -53,7 +53,7 @@ def test_install_skill_writes_host_dirs(tmp_path):
     assert zcode.is_file()
     for dest in expected:
         assert dest.is_file()
-        assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+        assert dest.read_bytes() == bundled_skill().read_bytes()
 
 
 def test_install_skill_only_existing(tmp_path):
@@ -62,7 +62,7 @@ def test_install_skill_only_existing(tmp_path):
     dest.write_text("old", encoding="utf-8")
     written = install_skill(home=tmp_path, only_existing=True)
     assert written == [dest]
-    assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+    assert dest.read_bytes() == bundled_skill().read_bytes()
     assert not (tmp_path / ".codex" / "skills" / "agent-bridge" / "SKILL.md").exists()
 
 
@@ -85,7 +85,7 @@ def test_upgrade_uv_tool(monkeypatch, tmp_path):
 
     notes = upgrade(kind="uv-tool", siblings=0, run=fake_run)
     assert calls == [["/bin/uv", "tool", "upgrade", "agent-bridge"]]
-    assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+    assert dest.read_bytes() == bundled_skill().read_bytes()
     assert any("uv tool upgrade" in note for note in notes)
 
 

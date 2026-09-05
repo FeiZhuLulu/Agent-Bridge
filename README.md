@@ -135,7 +135,7 @@ Change it in chat, or set `[coordinator] mode` in `~/.agent-bridge/agents.toml`.
 
 ### Orchestration rulebook
 
-[ORCHESTRATION.md](ORCHESTRATION.md) is the coordinator rulebook: when to dispatch, to whom, how to verify. The skill and MCP handshake instructions are projections of it. First start writes the skill; copy this file into a project as `AGENTS.md` only if a host has no skills. Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md). This repo's `AGENTS.md` is for developing Bridge, not for end users.
+[ORCHESTRATION.md](ORCHESTRATION.md) is the coordinator rulebook: when to dispatch, to whom, how to verify. The skill and MCP handshake instructions are projections of it. First start writes the skill automatically. Chinese: [ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md).
 
 ### Tests
 
@@ -266,7 +266,7 @@ Worker 静默超过 `stall_timeout_sec`（默认 1800 秒，可按 Worker 设置
 
 ### 协调规则书
 
-[ORCHESTRATION.md](ORCHESTRATION.md) 是给协调者的规则书：什么时候派、派给谁、怎么验收。skill 和 MCP 握手 instructions 是它的投影。第一次启动会写入 skill；只有宿主没有 skill 时，才需要把这份文件拷进项目并命名为 `AGENTS.md`。中文译本：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)。本仓库的 `AGENTS.md` 只约束开发 Bridge，不是给最终用户的。
+[ORCHESTRATION.md](ORCHESTRATION.md) 是给协调者的规则书：什么时候派、派给谁、怎么验收。skill 和 MCP 握手 instructions 是它的投影。第一次启动会自动写入 skill。中文译本：[ORCHESTRATION.zh-CN.md](ORCHESTRATION.zh-CN.md)。
 
 ### 测试
 

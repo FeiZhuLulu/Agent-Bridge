@@ -90,6 +90,26 @@ def test_auth_reports_gateway_without_hiding_availability(tmp_path):
     assert claude_config_home(env) == tmp_path
 
 
+def test_auth_reports_when_gateway_blanks_anthropic_api_key(tmp_path):
+    text = describe_claude_auth(
+        {
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-x",
+            "ANTHROPIC_BASE_URL": OPENROUTER_ANTHROPIC_BASE,
+            "ANTHROPIC_API_KEY": "sk-ant-x",
+        }
+    )
+    assert text.startswith("gateway (")
+    assert "ANTHROPIC_API_KEY blanked" in text
+
+
+def test_auth_reports_when_gateway_borrows_openrouter_key(tmp_path):
+    text = describe_claude_auth(
+        {"CLAUDE_CONFIG_DIR": str(tmp_path), "OPENROUTER_API_KEY": "sk-or-x"}
+    )
+    assert "OPENROUTER_API_KEY" in text
+
+
 def test_auth_reports_missing_without_a_login(tmp_path):
     assert "missing" in describe_claude_auth({"CLAUDE_CONFIG_DIR": str(tmp_path)})
 

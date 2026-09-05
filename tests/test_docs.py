@@ -116,16 +116,14 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
             "dispatch_enabled",
             "runtime_context",
             "git diff",
+            "stall_timeout_sec",
+            "silent_for_sec",
         ):
             assert token in text
     assert "timeout" in en.lower()
     assert "超时" in zh
     assert "same `session_id`" in en
     assert "同一个 `session_id`" in zh
-    assert "request_id" in en
-    assert "request_id" in zh
-    assert "not exactly-once" in en
-    assert "不保证 Worker 的外部副作用 exactly-once" in zh
     assert "three follow-up" in en
     assert "跟进三轮" in zh
     assert "empty Kimi" in en
@@ -133,3 +131,10 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
     assert "cancel_task" in en
     assert "nested/" in en
     assert "nested/" in zh
+
+
+def test_skill_mentions_stall_watchdog():
+    skill = _read("skills/agent-bridge/SKILL.md")
+    assert "stall_timeout_sec" in skill
+    assert "silent_for_sec" in skill
+    assert _read("README.md").count("stall_timeout_sec") >= 2

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
 from pathlib import Path
 
 from agent_bridge.config import AgentConfig, EnvConfig
@@ -14,6 +13,15 @@ STDIO_LIMIT = 16 * 1024 * 1024
 
 
 class Adapter(ABC):
+    """Worker process adapter.
+
+    ``resident`` is True when the worker process stays alive between turns
+    (ACP). One-shot exec adapters set it False so a finished turn is not
+    reported as an active ``ready`` session.
+    """
+
+    resident: bool = True
+
     def __init__(self, agent: AgentConfig, home: Path, env_config: EnvConfig | None = None) -> None:
         self.agent = agent
         self.home = home

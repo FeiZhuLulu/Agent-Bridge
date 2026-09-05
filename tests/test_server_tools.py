@@ -1,4 +1,9 @@
-from agent_bridge.server import INSTRUCTIONS, mcp
+import types
+
+import pytest
+
+from agent_bridge.registry import Registry
+from agent_bridge.server import INSTRUCTIONS, _error, _registry, mcp
 
 
 def test_ten_tools_registered():
@@ -25,8 +30,36 @@ def test_handshake_instructions_carry_hard_rules():
         "coordinator.mode",
         "dispatch_enabled",
         "runtime_context",
-        "request_id",
         "cancel_task",
         "end_session",
     ):
         assert phrase in INSTRUCTIONS
+
+
+def test_error_exposes_exception_type():
+    assert _error(ValueError("bad cwd")) == {
+        "ok": False,
+        "error": "ValueError: bad cwd",
+        "error_type": "ValueError",
+    }
+
+
+def test_registry_from_lifespan_context_touches_activity(bridge_home):
+    registry = Registry.create(bridge_home)
+    registry._last_activity = registry._last_activity - 1
+    before = registry._last_activity
+    ctx = types.SimpleNamespace(
+        request_context=types.SimpleNamespace(lifespan_context=registry)
+    )
+    got = _registry(ctx)
+    assert got is registry
+    assert registry._last_activity > before
+
+
+def test_registry_rejects_dict_lifespan(bridge_home):
+    registry = Registry.create(bridge_home)
+    ctx = types.SimpleNamespace(
+        request_context=types.SimpleNamespace(lifespan_context={"registry": registry})
+    )
+    with pytest.raises(RuntimeError, match="not available"):
+        _registry(ctx)

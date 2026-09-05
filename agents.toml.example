@@ -12,6 +12,12 @@
 # [server]
 # idle_exit_sec = 7200
 
+# Cancel a turn whose worker has produced no output for this long (seconds).
+# Default 1800; 0 disables. Raise it for a worker that runs long silent
+# builds or test suites. The task then ends failed / stop_reason "stalled".
+# [agents.grok]
+# stall_timeout_sec = 3600
+
 # Dispatch policy: mode = manual | auto | eager (default auto).
 # instructions is free text the coordinator reads via list_agents; it
 # overrides the default worker split and persists across sessions.

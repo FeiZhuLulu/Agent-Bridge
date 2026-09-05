@@ -5,10 +5,17 @@ import logging
 import shutil
 from pathlib import Path
 
-from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.codex_exec import resolve_codex_command
-from agent_bridge.dsh_home import apply_dsh_worker_env, default_model, dsh_home, resolve_dsh_command
+from agent_bridge.config import AgentConfig, EnvConfig
+from agent_bridge.devin_meta import apply_devin_env
+from agent_bridge.dsh_home import (
+    apply_dsh_worker_env,
+    default_model,
+    dsh_home,
+    installed_dsh_version,
+    resolve_dsh_command,
+)
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.processes import reap_subprocess, resolve_command
 from agent_bridge.worker_env import build_worker_env
@@ -37,6 +44,31 @@ async def _version_string(executable: str) -> str:
         if text:
             return text.splitlines()[0][:200]
     return ""
+
+
+async def _devin_auth(executable: str, env: dict[str, str]) -> str:
+    """First line of ``devin auth status``: ``Logged in (via Devin).`` or ``Not logged in.``
+
+    The CLI reports "Not logged in" whenever ``ACP_BACKEND`` is present, so
+    the probe runs with the same env the worker will get.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            executable,
+            "auth",
+            "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except OSError:
+        return "unknown"
+    except TimeoutError:
+        await reap_subprocess(proc)
+        return "unknown"
+    first = (out or b"").decode("utf-8", errors="replace").strip().splitlines()
+    return first[0][:80] if first else "unknown"
 
 
 def _kimi_home(env: dict[str, str]) -> Path:
@@ -71,13 +103,15 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         config=env_config,
         log_fill=False,
     )
-    try:
+    def _resolve_probe_command() -> list[str]:
         if cfg.name == "dsh":
-            command = resolve_dsh_command(cfg.command, cfg.fallback_commands)
-        elif cfg.protocol == "codex":
-            command = resolve_codex_command(cfg.command, cfg.fallback_commands, env=resolved)
-        else:
-            command = resolve_command(cfg.command, cfg.fallback_commands)
+            return resolve_dsh_command(cfg.command, cfg.fallback_commands)
+        if cfg.protocol == "codex":
+            return resolve_codex_command(cfg.command, cfg.fallback_commands, env=resolved)
+        return resolve_command(cfg.command, cfg.fallback_commands)
+
+    try:
+        command = await asyncio.to_thread(_resolve_probe_command)
     except FileNotFoundError as exc:
         return {"agent": cfg.name, "available": False, "version": None, "detail": str(exc)}
 
@@ -101,6 +135,9 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
                 return {"agent": cfg.name, "available": False, "version": None, "detail": "node not found"}
             node_ver = await _version_string(node)
             details.append(f"node={node_ver or 'unknown'}")
+        dsh_version = await asyncio.to_thread(installed_dsh_version)
+        if dsh_version:
+            version = dsh_version
         dsh_env = apply_dsh_worker_env(resolved, command=command)
         home = dsh_home(dsh_env)
         details.append(f"dsh-home={home}")
@@ -113,6 +150,7 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
 
     if cfg.name == "antigravity":
         details.append("model=agy models slugs e.g. gemini-3.7-flash; effort=low|medium|high")
+        details.append("prompt via stdin (stream-json)")
 
     if cfg.name == "grok":
         details.append(
@@ -142,17 +180,28 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             details.append("OPENCODE_API_KEY=set")
 
     if cfg.name == "claude":
+        auth = describe_claude_auth(resolved)
         resolved = apply_claude_gateway_env(resolved)
         details.append(
             "model=slugs the session advertises (sonnet, opus, haiku, or full ids); "
             "effort mapped onto that model's levels; mode forced to bypassPermissions"
         )
         details.append(f"claude-home={claude_config_home(resolved)}")
-        details.append(f"auth={describe_claude_auth(resolved)}")
+        details.append(f"auth={auth}")
         details.append(
             "product `claude` is not ACP; worker is claude-agent-acp "
             "(@agentclientprotocol/claude-agent-acp)"
         )
+
+    if cfg.name == "devin":
+        resolved = apply_devin_env(resolved)
+        details.append(
+            "model=ids the session advertises (`devin models list`), level is part of the id "
+            "e.g. swe-1-7-medium, claude-opus-5-high; no effort option; mode forced to bypass"
+        )
+        details.append(f"auth={await _devin_auth(command[0], resolved)}")
+        if resolved.get("WINDSURF_API_KEY"):
+            details.append("WINDSURF_API_KEY=set")
 
     if cfg.protocol == "codex":
         details.append(

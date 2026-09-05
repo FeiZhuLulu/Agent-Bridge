@@ -15,8 +15,9 @@ blanks it when a gateway token and base URL are both present.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 CLAUDE_MODE_BYPASS = "bypassPermissions"
 
@@ -93,11 +94,21 @@ def describe_claude_auth(env: Mapping[str, str] | None = None) -> str:
     A missing login only fails on the first prompt. The probe answers "is
     the command present", not "will a turn succeed".
     """
-    resolved = apply_claude_gateway_env(env or {})
+    raw = env or {}
+    resolved = apply_claude_gateway_env(raw)
     if (resolved.get("ANTHROPIC_AUTH_TOKEN") or "").strip() and (
         resolved.get("ANTHROPIC_BASE_URL") or ""
     ).strip():
-        return "gateway"
+        notes: list[str] = []
+        if (raw.get("ANTHROPIC_API_KEY") or "").strip() and not (
+            resolved.get("ANTHROPIC_API_KEY") or ""
+        ).strip():
+            notes.append("ANTHROPIC_API_KEY blanked for the worker")
+        if not (raw.get("ANTHROPIC_AUTH_TOKEN") or "").strip() and (
+            resolved.get("ANTHROPIC_AUTH_TOKEN") or ""
+        ).strip():
+            notes.append("token borrowed from OPENROUTER_API_KEY")
+        return "gateway" if not notes else f"gateway ({'; '.join(notes)})"
     if (resolved.get("ANTHROPIC_API_KEY") or "").strip():
         return "api-key"
     if (resolved.get("ANTHROPIC_AUTH_TOKEN") or "").strip():

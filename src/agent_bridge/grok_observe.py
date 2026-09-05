@@ -59,13 +59,22 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+_EVENTS_TAIL_BYTES = 1024 * 1024
+
+
 def _last_turn_model(events_path: Path) -> str | None:
     try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
+        size = events_path.stat().st_size
+        with events_path.open("rb") as handle:
+            if size > _EVENTS_TAIL_BYTES:
+                handle.seek(size - _EVENTS_TAIL_BYTES)
+            blob = handle.read()
     except OSError:
         return None
-    model: str | None = None
-    for line in lines:
+    lines = blob.decode("utf-8", errors="replace").splitlines()
+    if size > _EVENTS_TAIL_BYTES and lines:
+        lines = lines[1:]  # window start is almost always mid-line; drop that half-line
+    for line in reversed(lines):
         if '"turn_started"' not in line:
             continue
         try:
@@ -76,8 +85,8 @@ def _last_turn_model(events_path: Path) -> str | None:
             continue
         value = event.get("model_id")
         if isinstance(value, str) and value:
-            model = value
-    return model
+            return value
+    return None
 
 
 def _summary_model(path: Path) -> str | None:

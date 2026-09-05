@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -24,6 +25,7 @@ from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
 
+STDERR_TAIL_LIMIT = 16000
 _RESULT_STATUSES = {"SUCCESS", "ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING"}
 _TOOL_SCHEMA_MARKERS = (
     "invalid tool call error",
@@ -31,6 +33,12 @@ _TOOL_SCHEMA_MARKERS = (
     "codecontent is a required parameter",
     "convert tool call for permissions",
 )
+
+
+def _scoped_usage(usage: dict[str, Any], resumed: bool) -> dict[str, Any]:
+    if not usage:
+        return usage
+    return {**usage, "scope": "conversation" if resumed else "turn"}
 
 
 def conversation_id_of(obj: dict[str, Any]) -> str | None:
@@ -52,9 +60,7 @@ def is_result_event(obj: dict[str, Any]) -> bool:
         return True
     if obj.get("type") in {"result", "final", "turn_complete", "completed"}:
         return True
-    if obj.get("status") in _RESULT_STATUSES and ("response" in obj or "error" in obj):
-        return True
-    return False
+    return obj.get("status") in _RESULT_STATUSES and ("response" in obj or "error" in obj)
 
 
 def unwrap_result(obj: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +127,16 @@ def is_agy_tool_schema_error(error: str | None) -> bool:
     return any(marker in text for marker in _TOOL_SCHEMA_MARKERS)
 
 
+def stream_json_prompt(message: str) -> bytes:
+    return (
+        json.dumps(
+            {"event": "user", "message": {"role": "user", "content": message}},
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def recovered_agy_tool_error(
     result: dict[str, Any],
     response: str,
@@ -171,6 +187,8 @@ def collect_tool_paths(obj: dict[str, Any], into: set[str]) -> None:
 
 
 class AgyAdapter(Adapter):
+    resident = False
+
     def __init__(self, agent: AgentConfig, home: Path, env_config=None) -> None:
         super().__init__(agent, home, env_config)
         self._procs: dict[str, asyncio.subprocess.Process] = {}
@@ -201,7 +219,9 @@ class AgyAdapter(Adapter):
             cmd += ["--new-project"]
         cmd += [
             "-p",
-            task.message,
+            "",
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
             "--dangerously-skip-permissions",
@@ -210,21 +230,39 @@ class AgyAdapter(Adapter):
         ]
         return cmd
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> None:
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, session_id: str) -> str:
         if proc.stderr is None:
-            return
+            return ""
+        tail = ""
         try:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
-                    return
+                    return tail
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    log.info("[antigravity %s] %s", session_id, text)
+                    tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+            return tail
+
+    async def _write_prompt(self, proc: asyncio.subprocess.Process, message: str) -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(stream_json_prompt(message))
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            log.debug("agy closed stdin before reading the prompt for pid %s: %s", proc.pid, exc)
+        finally:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+                proc.stdin.close()
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
+        """Drive one agy turn.
+
+        ``usage.scope`` is ``conversation`` when this turn resumes an existing
+        conversation (those counters cover every turn so far); otherwise ``turn``.
+        """
         cmd = self._build_cmd(session, task)
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
         kwargs: dict[str, Any] = {}
@@ -233,6 +271,7 @@ class AgyAdapter(Adapter):
         append_event(session.session_id, "prompt_sent", {"text": task.message, "cmd": cmd[:6]}, self.home)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -251,8 +290,10 @@ class AgyAdapter(Adapter):
                 process_image_name(proc.pid),
             )
         stderr_task = asyncio.create_task(self._drain_stderr(proc, session.session_id))
+        await self._write_prompt(proc, task.message)
         text_parts: list[str] = []
         conversation_id = session.native_session_id
+        resumed = bool(session.native_session_id)
         usage: dict[str, Any] = {}
         files: set[str] = set()
         last_result: dict[str, Any] | None = None
@@ -278,7 +319,8 @@ class AgyAdapter(Adapter):
                 if cid:
                     conversation_id = cid
                 event = str(obj.get("event") or obj.get("type") or "")
-                step = obj.get("step_update") if isinstance(obj.get("step_update"), dict) else {}
+                raw_step = obj.get("step_update")
+                step: dict[str, Any] = raw_step if isinstance(raw_step, dict) else {}
                 step_type = str(step.get("step_type") or "")
                 chunk = text_delta_of(obj)
                 event_type = "raw"
@@ -311,6 +353,7 @@ class AgyAdapter(Adapter):
             except TimeoutError:
                 log.warning("agy stdout closed but process lingered; killing %s", proc.pid)
                 await reap_subprocess(proc)
+            stderr_tail = await stderr_task
             if session.session_id in self._cancelled:
                 append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
                 return TurnResult(
@@ -342,7 +385,7 @@ class AgyAdapter(Adapter):
                             text=result_text,
                             files_changed=sorted(files),
                             stop_reason="end_turn",
-                            usage=usage,
+                            usage=_scoped_usage(usage, resumed),
                             native_session_id=cid,
                             warnings=[err, *exit_warnings],
                         )
@@ -352,7 +395,7 @@ class AgyAdapter(Adapter):
                         files_changed=sorted(files),
                         stop_reason="error",
                         error=err,
-                        usage=usage,
+                        usage=_scoped_usage(usage, resumed),
                         native_session_id=cid,
                     )
                 append_event(session.session_id, "turn_end", {"stop_reason": "end_turn"}, self.home)
@@ -360,19 +403,23 @@ class AgyAdapter(Adapter):
                     text=result_text,
                     files_changed=sorted(files),
                     stop_reason="end_turn",
-                    usage=usage,
+                    usage=_scoped_usage(usage, resumed),
                     native_session_id=cid,
                     warnings=exit_warnings,
                 )
             if proc.returncode not in (0, None) and not text_parts:
-                return TurnResult(text="", stop_reason="error", error=f"agy exit {proc.returncode}")
+                detail = stderr_tail.strip()
+                error = f"agy exit {proc.returncode}"
+                if detail:
+                    error += f": {detail}"
+                return TurnResult(text="", stop_reason="error", error=error)
             session.native_session_id = conversation_id
             append_event(session.session_id, "turn_end", {"stop_reason": "end_turn"}, self.home)
             return TurnResult(
                 text="".join(text_parts),
                 files_changed=sorted(files),
                 stop_reason="end_turn",
-                usage=usage,
+                usage=_scoped_usage(usage, resumed),
                 native_session_id=conversation_id,
                 warnings=exit_warnings,
             )
@@ -393,10 +440,8 @@ class AgyAdapter(Adapter):
         finally:
             if not stderr_task.done():
                 stderr_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
-            except asyncio.CancelledError:
-                pass
             self._procs.pop(session.session_id, None)
             self._cancelled.discard(session.session_id)
             drop_pid(self.home, session.session_id)

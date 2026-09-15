@@ -66,6 +66,28 @@ async def test_env_status_includes_config_warnings(bridge_home, monkeypatch):
     assert (await registry.env_status())["warnings"] == registry.config.warnings
 
 
+async def test_session_scope_is_explicit(bridge_home, monkeypatch):
+    registry = Registry.create(bridge_home)
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", lambda: 3)
+    assert await registry.session_scope() == {
+        "scope": "current_instance",
+        "other_live_instances": 3,
+    }
+
+
+async def test_session_scope_refreshes_cached_sibling_count(bridge_home, monkeypatch):
+    counts = iter((1, 3))
+    monkeypatch.setattr("agent_bridge.registry.count_sibling_servers", lambda: next(counts))
+    registry = Registry.create(bridge_home)
+
+    await registry.env_status()
+
+    assert await registry.session_scope() == {
+        "scope": "current_instance",
+        "other_live_instances": 3,
+    }
+
+
 @pytest.mark.asyncio
 async def test_dispatch_wait_fake(bridge_home, tmp_path):
     work = tmp_path / "work"

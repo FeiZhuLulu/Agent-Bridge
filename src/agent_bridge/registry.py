@@ -419,9 +419,9 @@ class Registry:
 
     SIBLING_CACHE_SEC = 60
 
-    async def _sibling_count(self) -> int:
+    async def _sibling_count(self, *, refresh: bool = False) -> int:
         now = time.monotonic()
-        if self._sibling_cache is not None:
+        if not refresh and self._sibling_cache is not None:
             cached_at, count = self._sibling_cache
             if now - cached_at < self.SIBLING_CACHE_SEC:
                 return count
@@ -1097,6 +1097,12 @@ class Registry:
                 }
             )
         return rows
+
+    async def session_scope(self) -> dict:
+        return {
+            "scope": "current_instance",
+            "other_live_instances": await self._sibling_count(refresh=True),
+        }
 
     async def end_session(self, session_id: str) -> dict:
         if not self.dispatch_enabled:

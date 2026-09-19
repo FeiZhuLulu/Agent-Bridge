@@ -18,7 +18,7 @@ class FileLockTimeout(TimeoutError):
 def _try_lock(handle: BinaryIO) -> bool:
     handle.seek(0)
     if os.name == "nt":
-        import msvcrt
+        msvcrt = importlib.import_module("msvcrt")
 
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -38,7 +38,7 @@ def _try_lock(handle: BinaryIO) -> bool:
 def _unlock(handle: BinaryIO) -> None:
     handle.seek(0)
     if os.name == "nt":
-        import msvcrt
+        msvcrt = importlib.import_module("msvcrt")
 
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         return

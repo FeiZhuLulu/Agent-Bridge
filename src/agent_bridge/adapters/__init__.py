@@ -4,11 +4,15 @@ from agent_bridge.adapters.acp import AcpAdapter
 from agent_bridge.adapters.antigravity import AgyAdapter
 from agent_bridge.adapters.base import Adapter
 from agent_bridge.adapters.codex import CodexAdapter
+from agent_bridge.adapters.dsh_desktop import DesktopAdapter
 from agent_bridge.adapters.fake import FakeAdapter
 from agent_bridge.config import AgentConfig, EnvConfig
 
 
-def build_adapter(cfg: AgentConfig, home: Path, env_config: EnvConfig | None = None) -> Adapter:
+def build_adapter(cfg: AgentConfig, home: Path, env_config: EnvConfig | None = None,
+                  *, backend: str | None = None) -> Adapter:
+    if cfg.name == "dsh" and backend == "desktop":
+        return DesktopAdapter(cfg, home, env_config)
     if cfg.protocol == "fake":
         return FakeAdapter(cfg, home, env_config)
     if cfg.protocol == "agy":

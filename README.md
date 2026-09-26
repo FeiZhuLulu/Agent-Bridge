@@ -104,6 +104,9 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 | `list_agents` | Probe workers, report remaining quota, proxy/env + coordinator policy |
 | `set_preferences` | Persist coordinator mode / routing preferences |
 | `dispatch_task` | Start or resume a turn in the project `cwd` |
+| `create_baseline` | Save a named, immutable DSH fork point from a completed session |
+| `list_baselines` | Find saved fork points and the project default |
+| `set_default_baseline` | Select or clear the default for new DSH sessions |
 | `wait_task` | Block up to `timeout_sec` (default 180) |
 | `check_task` | Non-blocking status |
 | `get_result` | Complete final result in pages + changed files |
@@ -111,6 +114,20 @@ Close coordinators that are holding Bridge, then `agent-bridge upgrade`, then re
 | `cancel_task` | Cancel the in-flight turn |
 | `list_sessions` | Known sessions |
 | `end_session` | Shut down a worker process |
+
+For DSH, finish the shared investigation in one session, then call
+`create_baseline(session_id, name)` to save that point. Its returned
+`baseline_id` is stable; `name` labels the fork point. Set it as the default
+with `set_default_baseline(cwd, baseline_id)`. A new `dispatch_task` can override
+this once with `baseline=<baseline_id>`, or use `baseline="empty"` to start
+without history. Give each new branch a `fork_label`; `list_sessions` and task
+results show both the branch label and its baseline. Passing `session_id`
+continues that branch. Clearing the default with
+`set_default_baseline(cwd, null)` keeps saved baselines available. Forking
+requires the official DSH Desktop connector and a reachable Desktop Host.
+`list_agents` reports `desktop.connected` and `desktop.fork_available`.
+When Desktop is unavailable, new ordinary DSH tasks use ACP; fork requests fail
+clearly. Existing sessions stay on their original backend.
 
 `get_result` returns up to 60,000 characters per call. Continue with
 `next_cursor` while `has_more` is true. Detailed work events remain available
@@ -255,6 +272,9 @@ revivable = true
 | `list_agents` | 探测 worker，报告剩余额度、代理 / 环境 + 协调者策略 |
 | `set_preferences` | 持久化协调者模式 / 路由偏好 |
 | `dispatch_task` | 在项目 `cwd` 里开始或续上一次回合 |
+| `create_baseline` | 从已完成的 DSH 会话保存带名称的不可变分叉点 |
+| `list_baselines` | 查找已保存的分叉点与项目默认基线 |
+| `set_default_baseline` | 为新 DSH 会话设置或清空默认基线 |
 | `wait_task` | 最多等待 `timeout_sec`（默认 180） |
 | `check_task` | 非阻塞状态查询 |
 | `get_result` | 分页读取完整结果 + 改过的文件 |
@@ -262,6 +282,17 @@ revivable = true
 | `cancel_task` | 取消进行中的回合 |
 | `list_sessions` | 已知会话 |
 | `end_session` | 关掉 worker 进程 |
+
+使用 DSH 时，先在一个会话中完成共同排查，再调用
+`create_baseline(session_id, name)` 保存分叉点。返回的 `baseline_id` 是稳定标识，
+`name` 是方便查找的标签。`set_default_baseline(cwd, baseline_id)` 将它设为项目默认基线。
+新任务可用 `baseline=<baseline_id>` 临时指定其他版本，或用 `baseline="empty"`
+从空白开始；用 `fork_label` 给每条新分支命名。`list_sessions` 和任务结果会同时显示
+分支标签及来源基线。传入 `session_id` 会继续已有分支。
+`set_default_baseline(cwd, null)` 只清空默认选择，不删除已保存的版本。
+分叉需要安装官方 DSH Desktop 连接插件并保持桌面 Host 连通。
+`list_agents` 会显示 `desktop.connected` 和 `desktop.fork_available`。
+桌面断连时，新建普通 DSH 任务回退 ACP，分叉会明确报错；已有会话沿用原后端。
 
 `get_result` 每次最多返回 60,000 个字符；`has_more` 为 true 时，用
 `next_cursor` 继续读取。详细工作事件仍可通过 `get_transcript` 和

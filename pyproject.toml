@@ -10,6 +10,8 @@ dependencies = [
     "mcp>=2.0.0",
     "agent-client-protocol>=0.12.0",
     "httpx2>=2.5.0",
+    "httpx>=0.28",
+    "websockets>=14",
     "pydantic>=2.7",
     "psutil>=6.0",
 ]

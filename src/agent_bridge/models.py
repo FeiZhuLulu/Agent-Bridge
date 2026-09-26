@@ -86,8 +86,13 @@ def grok_effort(effort: str | None) -> str | None:
 class Session(BaseModel):
     session_id: str
     agent: str
+    backend: str | None = None
     cwd: str
     native_session_id: str | None = None
+    fork_source_id: str | None = None
+    baseline_id: str | None = None
+    is_baseline: bool = False
+    fork_label: str | None = None
     proc_state: ProcState = ProcState.idle_unloaded
     model: str | None = None
     effort: str | None = None
@@ -108,6 +113,8 @@ class Task(BaseModel):
     agent: str
     message: str
     cwd: str
+    baseline_id: str | None = None
+    fork_label: str | None = None
     model: str | None = None
     effort: str | None = None
     observed_model: str | None = None

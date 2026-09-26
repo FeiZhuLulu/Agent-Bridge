@@ -62,7 +62,10 @@ INSTRUCTIONS = (
     "process — do not call dispatch_task, set_preferences, cancel_task, "
     "or end_session. When "
     "dispatch_enabled is true and the user states a lasting preference, "
-    "persist it with set_preferences."
+    "persist it with set_preferences. New DSH sessions automatically use the saved project baseline. "
+    "Use create_baseline, list_baselines and set_default_baseline to manage immutable versions. "
+    "dispatch_task baseline=empty starts blank once; baseline=<ID> overrides once; omitted follows default. "
+    "Clearing the default retains saved versions. fork_label names a new branch; list_sessions and results identify its saved baseline. Existing session_id continuation keeps its history."
 )
 
 mcp = MCPServer[Registry]("agent-bridge", instructions=INSTRUCTIONS, lifespan=lifespan)
@@ -122,8 +125,10 @@ async def dispatch_task(
     title: str | None = None,
     user_requested: bool = False,
     request_id: str | None = None,
+    baseline: str | None = None,
+    fork_label: str | None = None,
 ) -> dict[str, Any]:
-    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/cursor/opencode/claude/devin: session/set_config_option after new/resume, devin has no effort; dsh: legacy demo spawn env + respawn on change, native --profile acp session/set_config_option; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. For optional retry deduplication, supply a UUID request_id on the first call and replay the same ID and original arguments on retries; keep session_id omitted if it was originally omitted. Adding an ID only on retry cannot deduplicate the first call. Identical retries reuse the task in this Bridge instance while it is retained; different arguments are rejected. Normal dispatch validation still applies. Bindings are lost on restart and are not shared with other instances. Returns immediately."""
+    """Start a worker turn. cwd is this coordinator conversation's project (absolute). model/effort are optional coordinator choices (agy: --model/--effort/--new-project; grok: session/setModel after /new; kimi/cursor/opencode/claude/devin: session/set_config_option after new/resume, devin has no effort; dsh: Desktop Session Controller when connected, otherwise ACP; codex: exec -m / -c model_reasoning_effort, off->none). Pass session_id to continue. For new sessions, baseline omitted/null or "default" follows the saved project/worker default; "empty" starts blank; otherwise pass a baseline ID. Explicit baseline/empty cannot accompany session_id. Only DSH Desktop forks are supported; Desktop disconnection disables forks while ordinary new tasks use ACP. fork_label names a new branch for list_sessions and results; saved baseline name identifies its source point. Set user_requested=true only when the user explicitly asked for a worker (required in manual mode). Rejected when coordinator.dispatch_enabled is false, even with user_requested=true. For optional retry deduplication, supply a UUID request_id on the first call and replay the same ID and original arguments on retries; keep session_id omitted if it was originally omitted. Adding an ID only on retry cannot deduplicate the first call. Identical retries reuse the task in this Bridge instance while it is retained; different arguments are rejected. Normal dispatch validation still applies. Bindings are lost on restart and are not shared with other instances. Returns immediately."""
     try:
         result = await _registry(ctx).dispatch_task(
             agent=agent,
@@ -135,8 +140,44 @@ async def dispatch_task(
             title=title,
             user_requested=user_requested,
             request_id=request_id,
+            baseline=baseline,
+            fork_label=fork_label,
         )
         return {"ok": True, **result}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+async def create_baseline(
+    ctx: Context, session_id: str, name: str, description: str | None = None,
+    user_requested: bool = False,
+) -> dict[str, Any]:
+    """Save an immutable DSH baseline from an idle completed Desktop session. Does not change the default. Requires a reachable Desktop Host. user_requested follows coordinator manual-mode rules."""
+    try:
+        return {"ok": True, **await _registry(ctx).create_baseline(
+            session_id, name, description, user_requested=user_requested,
+        )}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_baselines(ctx: Context, cwd: str, agent: str = "dsh") -> dict[str, Any]:
+    """List saved baseline versions and the persistent default for this project and worker."""
+    try:
+        return {"ok": True, **_registry(ctx).list_baselines(cwd, agent)}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+async def set_default_baseline(
+    ctx: Context, cwd: str, baseline_id: str | None, agent: str = "dsh",
+) -> dict[str, Any]:
+    """Select a persistent default for new sessions. null clears the default without deleting saved versions. Existing sessions and accepted tasks keep their history."""
+    try:
+        return {"ok": True, **await _registry(ctx).set_default_baseline(cwd, agent, baseline_id)}
     except Exception as exc:
         return _error(exc)
 

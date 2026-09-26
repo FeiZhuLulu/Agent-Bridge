@@ -14,6 +14,8 @@ import psutil
 
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.base import Adapter
+from agent_bridge.adapters.dsh_desktop import DesktopUnavailable, desktop_available
+from agent_bridge.baselines import Baseline, BaselineStore
 from agent_bridge.config import (
     COORDINATOR_MODE_HINTS,
     AgentConfig,
@@ -125,6 +127,7 @@ class Registry:
     ) -> None:
         self.home = home
         self.config = config
+        self.baselines = BaselineStore(home)
         self.sessions: dict[str, Session] = {}
         self.tasks: dict[str, Task] = {}
         self._requests: dict[str, tuple[tuple, str]] = {}
@@ -379,7 +382,8 @@ class Registry:
         existing = self._adapters.get(session.session_id)
         if existing is not None:
             return existing
-        adapter = build_adapter(self.config.get(session.agent), self.home, self.config.env)
+        adapter = build_adapter(self.config.get(session.agent), self.home, self.config.env,
+                                backend=session.backend)
         self._adapters[session.session_id] = adapter
         return adapter
 
@@ -392,6 +396,11 @@ class Registry:
     async def list_agents(self) -> list[dict]:
         async def describe(cfg: AgentConfig) -> dict:
             row = await probe_agent(cfg, self.config.env)
+            if cfg.name == "dsh":
+                connected = await desktop_available(self.home)
+                row["desktop"] = {"connected": connected, "fork_available": connected,
+                                  "new_task_backend": "desktop" if connected else "acp"}
+                row["available"] = bool(row.get("available")) or connected
             row["quota"] = await self._quota_for(cfg, available=bool(row.get("available")))
             return row
 
@@ -486,6 +495,110 @@ class Registry:
             )
         return {"coordinator": self.coordinator_status(), "path": str(path), "notes": notes}
 
+    def _baseline_scope(self, cwd: str, agent: str) -> str:
+        self.config.get(agent)
+        path = Path(cwd)
+        if not path.is_absolute() or not path.is_dir():
+            raise ValueError("cwd must be an existing absolute project directory")
+        return str(path.resolve())
+
+    def _resolve_baseline(self, cwd: str, agent: str, selection: str | None) -> Baseline | None:
+        if selection == "empty":
+            return None
+        baseline_id = self.baselines.get_default(cwd, agent) if selection in (None, "default") else selection
+        if baseline_id is None:
+            return None
+        record = self.baselines.get(baseline_id)
+        if record.agent != agent or Path(record.cwd).resolve() != Path(cwd).resolve():
+            raise ValueError("baseline belongs to a different project or worker")
+        if agent != "dsh":
+            raise ValueError("baseline forks are currently supported only for dsh")
+        return record
+
+    def list_baselines(self, cwd: str, agent: str = "dsh") -> dict:
+        cwd = self._baseline_scope(cwd, agent)
+        return {
+            "cwd": cwd, "agent": agent,
+            "default_baseline_id": self.baselines.get_default(cwd, agent),
+            "baselines": [record.model_dump(mode="json") for record in self.baselines.list(cwd, agent)],
+        }
+
+    async def set_default_baseline(self, cwd: str, agent: str, baseline_id: str | None) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_PREFERENCES_ERROR)
+        cwd = self._baseline_scope(cwd, agent)
+        async with self._lock:
+            if baseline_id is not None:
+                self._resolve_baseline(cwd, agent, baseline_id)
+            self.baselines.set_default(cwd, agent, baseline_id)
+        return {"cwd": cwd, "agent": agent, "default_baseline_id": baseline_id}
+
+    async def create_baseline(
+        self, session_id: str, name: str, description: str | None = None, *, user_requested: bool = False,
+    ) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_DISPATCH_ERROR)
+        if self.config.coordinator.mode == "manual" and not user_requested:
+            raise RuntimeError("coordinator mode is manual: baseline creation requires user_requested=true")
+        if not name.strip():
+            raise ValueError("baseline name must not be empty")
+        async with self._lock:
+            source = self.sessions.get(session_id)
+            if source is None:
+                raise KeyError(f"unknown session {session_id}")
+            if source.agent != "dsh":
+                raise ValueError("baseline forks are currently supported only for dsh")
+            if source.backend != "desktop":
+                raise ValueError("Desktop connection is required to create a DSH baseline")
+            if self._busy_task(session_id) is not None:
+                raise RuntimeError("source session is busy; wait_task before creating a baseline")
+            if not source.native_session_id or source.turns == 0:
+                raise ValueError("baseline source must have a completed turn")
+            source_tasks = [task for task in self.tasks.values() if task.session_id == session_id]
+            latest = max(source_tasks, key=lambda task: task.created_at, default=None)
+            if latest is None or latest.status != TaskStatus.completed:
+                raise ValueError("baseline source must end with a successfully completed task")
+            baseline_id = _new_id("base")
+            child = Session(
+                session_id=_new_id("sess"), agent=source.agent, cwd=source.cwd,
+                backend=source.backend,
+                fork_source_id=source.native_session_id, baseline_id=baseline_id,
+                is_baseline=True, model=source.model or latest.observed_model,
+                effort=source.effort or latest.observed_effort,
+                title=name.strip(), proc_state=ProcState.spawning,
+            )
+            self._stamp_owner(child)
+            adapter = self._adapter_for(child)
+            saved = False
+            try:
+                if not adapter.can_fork():
+                    raise ValueError("configured worker does not support baseline forks")
+                self.sessions[child.session_id] = child
+                await adapter.ensure_session(child)
+                if not child.native_session_id:
+                    raise RuntimeError("fork returned no native session id")
+                await adapter.shutdown(child)
+                record = Baseline(
+                    baseline_id=baseline_id, name=name.strip(), description=description,
+                    agent=child.agent, backend=child.backend, cwd=child.cwd,
+                    native_session_id=child.native_session_id,
+                    source_session_id=source.session_id, model=child.model, effort=child.effort,
+                )
+                self.baselines.add(record)
+                saved = True
+                child.proc_state = ProcState.idle_unloaded
+                child.pid = None
+                return {"baseline": record.model_dump(mode="json"), "session_id": child.session_id}
+            finally:
+                self._adapters.pop(child.session_id, None)
+                if not saved:
+                    try:
+                        await adapter.shutdown(child)
+                    finally:
+                        self.sessions.pop(child.session_id, None)
+                self.save()
+                await self.flush_state()
+
     async def dispatch_task(
         self,
         agent: str,
@@ -497,6 +610,8 @@ class Registry:
         title: str | None = None,
         user_requested: bool = False,
         request_id: str | None = None,
+        baseline: str | None = None,
+        fork_label: str | None = None,
     ) -> dict:
         if not self.dispatch_enabled:
             raise RuntimeError(NESTED_DISPATCH_ERROR)
@@ -521,7 +636,14 @@ class Registry:
         effort = normalize_effort(effort)
         self.config.get(agent)
         # Compare supplied arguments, not selections inherited from a mutable session.
-        request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested)
+        if session_id and baseline not in (None, "default"):
+            raise ValueError("baseline cannot be selected when continuing session_id")
+        if session_id and fork_label is not None:
+            raise ValueError("fork_label can only be supplied when creating a new session")
+        if fork_label is not None and not fork_label.strip():
+            raise ValueError("fork_label must not be empty")
+        request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested, baseline, fork_label)
+        desktop_connected = await desktop_available(self.home) if agent == "dsh" and session_id is None else False
         async with self._lock:
             if request_id is not None and request_id in self._requests:
                 previous, task_id = self._requests[request_id]
@@ -532,8 +654,11 @@ class Registry:
                     "task_id": task.task_id,
                     "session_id": task.session_id,
                     "agent": task.agent,
+                    "backend": (self.sessions[task.session_id].backend or "acp") if task.agent == "dsh" else None,
                     "model": task.model,
                     "effort": task.effort,
+                    "baseline_id": task.baseline_id,
+                    "fork_label": task.fork_label,
                     "request_id": request_id,
                     "reused": True,
                 }
@@ -541,6 +666,8 @@ class Registry:
                 session = self.sessions.get(session_id)
                 if session is None:
                     raise KeyError(f"unknown session {session_id}")
+                if session.is_baseline:
+                    raise ValueError("a saved baseline is immutable; dispatch a new session from its baseline_id")
                 if session.agent != agent:
                     raise ValueError(f"session {session_id} belongs to agent {session.agent}, not {agent}")
                 if Path(session.cwd).resolve() != cwd_path.resolve():
@@ -554,12 +681,28 @@ class Registry:
                         f"session {session.session_id} is busy with {busy.task_id}; call wait_task first"
                     )
             else:
+                selected = self._resolve_baseline(str(cwd_path.resolve()), agent, baseline)
+                if fork_label is not None and selected is None:
+                    raise ValueError("fork_label requires a selected baseline")
+                if selected is not None:
+                    if selected.backend != "desktop":
+                        raise ValueError("This baseline was created via ACP; create a new Desktop baseline")
+                    if not desktop_connected:
+                        raise ValueError("DeepSeek Harness Desktop is disconnected; fork is unavailable")
+                    if model is not None and model != selected.model:
+                        raise ValueError("baseline tasks must use the baseline model")
+                    if effort is not None and effort != selected.effort:
+                        raise ValueError("baseline tasks must use the baseline effort")
                 session = Session(
                     session_id=_new_id("sess"),
                     agent=agent,
+                    backend=selected.backend if selected else ("desktop" if desktop_connected else None),
                     cwd=str(cwd_path.resolve()),
-                    model=model,
-                    effort=effort,
+                    model=selected.model if selected else model,
+                    effort=selected.effort if selected else effort,
+                    fork_source_id=selected.native_session_id if selected else None,
+                    baseline_id=selected.baseline_id if selected else None,
+                    fork_label=(fork_label.strip() if fork_label else title or f"{selected.name} · {message[:48]}") if selected else None,
                     title=title,
                     proc_state=ProcState.spawning,
                 )
@@ -580,6 +723,8 @@ class Registry:
                 agent=agent,
                 message=message,
                 cwd=session.cwd,
+                baseline_id=session.baseline_id,
+                fork_label=session.fork_label,
                 model=model or session.model,
                 effort=effort or session.effort,
                 status=TaskStatus.queued,
@@ -603,8 +748,11 @@ class Registry:
             "task_id": task.task_id,
             "session_id": session.session_id,
             "agent": agent,
+            "backend": (session.backend or "acp") if agent == "dsh" else None,
             "model": session.model,
             "effort": session.effort,
+            "baseline_id": session.baseline_id,
+            "fork_label": session.fork_label,
             **({"request_id": request_id, "reused": False} if request_id is not None else {}),
         }
 
@@ -631,7 +779,19 @@ class Registry:
                 if limit > 0
                 else None
             )
-            result = await adapter.run_turn(session, task)
+            try:
+                result = await adapter.run_turn(session, task)
+            except DesktopUnavailable:
+                if session.backend != "desktop" or session.native_session_id or session.fork_source_id:
+                    raise
+                # Host disappeared after dispatch probing but before creating a
+                # native Session. This task has no Desktop state to preserve.
+                await adapter.shutdown(session)
+                self._adapters.pop(session.session_id, None)
+                session.backend = None
+                adapter = self._adapter_for(session)
+                result = await adapter.run_turn(session, task)
+                result.warnings.append("Desktop Host disconnected before session creation; used ACP")
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
             task.result_chars = len(result.text)
@@ -709,6 +869,12 @@ class Registry:
             session.last_active_at = iso()
             if session.proc_state != ProcState.dead:
                 session.proc_state = ProcState.ready if adapter.resident else ProcState.idle_unloaded
+            if session.backend == "desktop":
+                try:
+                    await adapter.shutdown(session)
+                except Exception:
+                    log.exception("could not close Desktop connection for %s", session.session_id)
+                self._adapters.pop(session.session_id, None)
             try:
                 flush_session(session.session_id, self.home)
             except OSError:
@@ -941,6 +1107,7 @@ class Registry:
             "task_id": task.task_id,
             "session_id": task.session_id,
             "agent": task.agent,
+            "backend": (self.sessions[task.session_id].backend or "acp") if task.agent == "dsh" else None,
             "status": task.status.value,
             "stop_reason": task.stop_reason,
             "error": task.error,
@@ -952,6 +1119,9 @@ class Registry:
             "effort": task.effort,
             "observed_model": task.observed_model,
             "observed_effort": task.observed_effort,
+            "baseline_id": task.baseline_id,
+            "baseline_name": self.baselines.get(task.baseline_id).name if task.baseline_id else None,
+            "fork_label": task.fork_label,
             "created_at": task.created_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at,
@@ -1086,8 +1256,16 @@ class Registry:
                 {
                     "session_id": session.session_id,
                     "agent": session.agent,
+                    "backend": (session.backend or "acp") if session.agent == "dsh" else None,
                     "cwd": session.cwd,
                     "native_session_id": session.native_session_id,
+                    "baseline_id": session.baseline_id,
+                    "fork_source_id": session.fork_source_id,
+                    "fork_label": session.fork_label,
+                    "baseline_name": (
+                        self.baselines.get(session.baseline_id).name if session.baseline_id else None
+                    ),
+                    "is_baseline": session.is_baseline,
                     "proc_state": session.proc_state.value,
                     "turns": session.turns,
                     "title": session.title,

@@ -165,7 +165,11 @@ class DesktopAdapter(Adapter):
         latest_turn: int | None = None
         append_event(session.session_id, "prompt_sent", {"text": task.message}, self.home)
         try:
-            async with websockets.connect(uri, additional_headers={"Cookie": client.cookie}) as socket:
+            # Follow snapshots replay the whole session history in one frame; a forked
+            # long session exceeds the 1 MiB default and would be closed with 1009.
+            async with websockets.connect(
+                uri, additional_headers={"Cookie": client.cookie}, max_size=None,
+            ) as socket:
                 await socket.send(json.dumps({"type": "open", "streamId": stream_id,
                                              "endpoint": "session/follow",
                                              "payload": {"args": {"request": {

@@ -78,7 +78,13 @@ async def test_desktop_turn_uses_official_create_follow_prompt(monkeypatch, tmp_
             return await queue.get()
 
     socket = Socket()
-    monkeypatch.setattr(dsh_desktop.websockets, "connect", lambda *_args, **_kwargs: socket)
+    connect_kwargs = {}
+
+    def fake_connect(*_args, **kwargs):
+        connect_kwargs.update(kwargs)
+        return socket
+
+    monkeypatch.setattr(dsh_desktop.websockets, "connect", fake_connect)
     adapter = dsh_desktop.DesktopAdapter(SimpleNamespace(name="dsh"), tmp_path)
     adapter._client = Client()
     session = Session(session_id="bridge-1", agent="dsh", backend="desktop", cwd=str(tmp_path))
@@ -87,6 +93,8 @@ async def test_desktop_turn_uses_official_create_follow_prompt(monkeypatch, tmp_
     assert result.text == "done"
     assert result.native_session_id == "native-1"
     assert [name for name, _ in calls] == ["session/create", "session/prompt"]
+    # Forked sessions replay >1 MiB of history in the first follow frame.
+    assert "max_size" in connect_kwargs and connect_kwargs["max_size"] is None
 
 
 @pytest.mark.asyncio

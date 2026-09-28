@@ -69,6 +69,18 @@
 # OPENROUTER_API_KEY is also inherited; if ANTHROPIC_AUTH_TOKEN is unset,
 # Bridge copies it and defaults the base URL to OpenRouter.
 
+# ZCode: product `zcode` is not ACP. Install the adapter and sign in via the app:
+#   npm install -g zcode-acp-server
+# Optional when the CLI is not on PATH:
+# [env.set]
+# ZCODE_BIN = "C:/Program Files/ZCode/resources/glm/zcode.cjs"
+# ZCODE_HOME = "D:/zcode-home"
+
+# MiniMax Code: `mcode acp`. Auth is `mcode login` under ~/.minimax.
+#   npm install -g @minimax-ai/code
+# [env.set]
+# MINIMAX_DATA_DIR = "D:/minimax"
+
 # DSH: do not put a personal checkout path in the repo agents.toml.
 # Optional overrides live here or in the process environment:
 # DSH_ACP_BIN = "C:/path/to/dsh-acp-demo/lib/bin.js"

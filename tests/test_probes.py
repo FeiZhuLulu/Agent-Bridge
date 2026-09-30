@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.config import AgentConfig, EnvConfig
-from agent_bridge.probes import command_exists, probe_agent
+from agent_bridge.probes import _version_string, command_exists, probe_agent
 from agent_bridge.worker_env import WORKER_CONTEXT_ENV, WORKER_CONTEXT_VALUE
 
 
@@ -16,6 +16,62 @@ def _fake_resolve(command, fallbacks=None):
 
 def _patch_dsh_version(monkeypatch, version=None):
     monkeypatch.setattr("agent_bridge.probes.installed_dsh_version", lambda: version)
+
+
+class VersionProcess:
+    def __init__(self, returncode: int, out: bytes = b"", err: bytes = b"") -> None:
+        self.returncode = returncode
+        self._out = out
+        self._err = err
+
+    async def communicate(self):
+        return self._out, self._err
+
+
+@pytest.mark.asyncio
+async def test_version_probe_rejects_failed_command_output(monkeypatch):
+    processes = iter(
+        (
+            VersionProcess(2, err=b"error: unknown option '-V'"),
+            VersionProcess(0, out=b"cursor-agent 1.2.3\n"),
+        )
+    )
+
+    async def spawn(*args, **kwargs):
+        return next(processes)
+
+    monkeypatch.setattr("agent_bridge.probes.asyncio.create_subprocess_exec", spawn)
+
+    assert await _version_string("cursor-agent") == "cursor-agent 1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_version_probe_skips_banner_and_strips_ansi(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+    banner = b"  ___  ____\n\x1b[32mOpenCode 0.9.4-beta.1\x1b[0m\n"
+
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return VersionProcess(0, out=banner)
+
+    monkeypatch.setattr("agent_bridge.probes.asyncio.create_subprocess_exec", spawn)
+
+    assert await _version_string("opencode") == "OpenCode 0.9.4-beta.1"
+    assert calls == [("opencode", "--version")]
+
+
+@pytest.mark.asyncio
+async def test_version_probe_does_not_accept_or_launch_unknown_banner(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return VersionProcess(0, out=b"  ___  ____\ninteractive startup\n")
+
+    monkeypatch.setattr("agent_bridge.probes.asyncio.create_subprocess_exec", spawn)
+
+    assert await _version_string("opencode") == ""
+    assert calls == [("opencode", "--version"), ("opencode", "-V")]
 
 
 @pytest.mark.asyncio

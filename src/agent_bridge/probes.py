@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -23,9 +24,24 @@ from agent_bridge.worker_env import build_worker_env
 
 log = logging.getLogger(__name__)
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9])v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?",
+    re.IGNORECASE,
+)
+
+
+def _recognized_version(output: bytes) -> str:
+    text = output.decode("utf-8", errors="replace")
+    for raw in text.splitlines():
+        line = ANSI_ESCAPE_RE.sub("", raw).strip()
+        if line and VERSION_RE.search(line):
+            return line[:200]
+    return ""
+
 
 async def _version_string(executable: str) -> str:
-    for args in ([executable, "--version"], [executable, "-V"], [executable, "version"]):
+    for args in ([executable, "--version"], [executable, "-V"]):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -39,11 +55,11 @@ async def _version_string(executable: str) -> str:
         except TimeoutError:
             await reap_subprocess(proc)
             continue
-        text = (out or b"").decode("utf-8", errors="replace").strip() or (
-            err or b""
-        ).decode("utf-8", errors="replace").strip()
-        if text:
-            return text.splitlines()[0][:200]
+        if proc.returncode != 0:
+            continue
+        version = _recognized_version(b"\n".join((out or b"", err or b"")))
+        if version:
+            return version
     return ""
 
 

@@ -1258,7 +1258,7 @@ class AcpAdapter(Adapter):
     async def _sync_zcode_model(self, live: _Live, session: Session) -> None:
         if not session.model or session.model == live.applied_model:
             return
-        _current, offered = config_option_values(live.config_options, "model")
+        current, offered = config_option_values(live.config_options, "model")
         target = resolve_zcode_model(session.model, offered)
         if target is None:
             matches = zcode_model_candidates(session.model, offered)
@@ -1271,7 +1271,6 @@ class AcpAdapter(Adapter):
                 f"zcode rejected model {session.model!r}; "
                 f"session advertises {offered or 'no models'}"
             )
-        current, _offered = config_option_values(live.config_options, "model")
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)
@@ -1317,14 +1316,13 @@ class AcpAdapter(Adapter):
     async def _sync_minimax_model(self, live: _Live, session: Session) -> None:
         if not session.model or session.model == live.applied_model:
             return
-        _current, offered = config_option_values(live.config_options, "model")
+        current, offered = config_option_values(live.config_options, "model")
         target = resolve_minimax_model(session.model, offered)
         if target is None:
             raise RuntimeError(
                 f"minimax rejected model {session.model!r}; "
                 f"session advertises {minimax_model_labels(offered) or 'no models'}"
             )
-        current, _offered = config_option_values(live.config_options, "model")
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)

@@ -54,6 +54,10 @@ async def main(cwd: Path) -> int:
         if not (cwd / "smoke.txt").is_file():
             print("missing smoke.txt")
             return 1
+        native_first = registry.sessions[first["session_id"]].native_session_id
+        if not native_first:
+            print("turn1 recorded no native session id")
+            return 1
 
         second = await registry.dispatch_task(
             "zcode",
@@ -67,6 +71,13 @@ async def main(cwd: Path) -> int:
         print("session", first["session_id"], second["session_id"])
         if first["session_id"] != second["session_id"]:
             print("turn2 opened a new session")
+            return 1
+        # The Bridge session id staying the same is not enough: a worker that
+        # silently spawns a fresh native session also passes that check while
+        # losing the history resume is supposed to preserve.
+        native_second = registry.sessions[second["session_id"]].native_session_id
+        if native_second != native_first:
+            print("turn2 replaced the native session", native_first, "->", native_second)
             return 1
         print("smoke.txt:", (cwd / "smoke.txt").read_text(encoding="utf-8", errors="replace"))
 

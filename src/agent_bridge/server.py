@@ -36,7 +36,8 @@ async def lifespan(_server: MCPServer[Registry]) -> AsyncIterator[Registry]:
 # channel that needs no copied rules file and no skill install.
 INSTRUCTIONS = (
     "Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, "
-    "Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI) and keeps their "
+    "Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI, "
+    "Cursor, ZCode, MiniMax Code) and keeps their "
     "sessions resumable.\n"
     "Hard rules: workers are reached only through these tools — never drive the "
     "worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's "

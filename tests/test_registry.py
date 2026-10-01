@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import logging
@@ -23,7 +24,7 @@ from agent_bridge.models import (
     iso,
 )
 from agent_bridge.paths import result_path, state_path, transcript_path
-from agent_bridge.persist import atomic_write_json, read_json
+from agent_bridge.persist import atomic_write_json, read_json, read_json_strict
 from agent_bridge.registry import (
     NESTED_CANCEL_ERROR,
     NESTED_DISPATCH_ERROR,
@@ -338,6 +339,178 @@ async def test_sibling_instances_do_not_clobber_state(bridge_home, tmp_path, mon
             await b.stop()
     finally:
         await a.stop()
+
+
+def test_sibling_state_updates_are_serialized(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    original_read = read_json_strict
+    first_read = threading.Event()
+    release_first = threading.Event()
+    reads = 0
+    reads_lock = threading.Lock()
+
+    def blocked_read(*args, **kwargs):
+        nonlocal reads
+        with reads_lock:
+            reads += 1
+            current = reads
+        if current == 1:
+            first_read.set()
+            assert release_first.wait(timeout=5)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr("agent_bridge.registry.read_json_strict", blocked_read)
+    a = Registry.create(bridge_home, owner_pid=1001, owner_create_time=11.0)
+    b = Registry.create(bridge_home, owner_pid=2002, owner_create_time=22.0)
+    a.sessions["sess_a"] = Session(session_id="sess_a", agent="fake", cwd=str(tmp_path))
+    b.sessions["sess_b"] = Session(session_id="sess_b", agent="fake", cwd=str(tmp_path))
+    a._stamp_owner(a.sessions["sess_a"])
+    b._stamp_owner(b.sessions["sess_b"])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(a._write_state, a._own_rows())
+        assert first_read.wait(timeout=5)
+        second = pool.submit(b._write_state, b._own_rows())
+        time.sleep(0.1)
+        assert reads == 1
+        release_first.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+
+    payload = read_json(state_path(bridge_home), {})
+    assert {row["session_id"] for row in payload["sessions"]} == {"sess_a", "sess_b"}
+
+
+@pytest.mark.asyncio
+async def test_failed_state_flush_keeps_snapshot_and_reports_failure(
+    bridge_home, tmp_path, monkeypatch
+):
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_retry"] = Session(
+        session_id="sess_retry",
+        agent="fake",
+        cwd=str(tmp_path),
+    )
+    original_write = registry._write_state
+    attempts = 0
+
+    def fail_once(own):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError(5, "synthetic sharing/access failure")
+        original_write(own)
+
+    monkeypatch.setattr(registry, "_write_state", fail_once)
+    registry.save()
+
+    with pytest.raises(RuntimeError, match=r"could not persist state\.json"):
+        await registry.flush_state()
+    assert registry._pending_state is not None
+
+    await registry.flush_state()
+    assert registry._pending_state is None
+    payload = read_json(state_path(bridge_home), {})
+    assert {row["session_id"] for row in payload["sessions"]} == {"sess_retry"}
+
+
+def test_state_write_retries_bounded_permission_errors(bridge_home, monkeypatch):
+    registry = Registry.create(bridge_home)
+    original_write = atomic_write_json
+    attempts = 0
+
+    def fail_twice(path, payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "synthetic sharing/access failure")
+        original_write(path, payload)
+
+    monkeypatch.setattr("agent_bridge.registry.atomic_write_json", fail_twice)
+    monkeypatch.setattr("agent_bridge.registry.STATE_WRITE_RETRY_BASE_SEC", 0)
+    registry._write_state(registry._own_rows())
+
+    assert attempts == 3
+
+
+def test_state_write_does_not_replace_invalid_json(bridge_home):
+    path = state_path(bridge_home)
+    path.write_text("{not valid json", encoding="utf-8")
+    registry = Registry.create(bridge_home)
+
+    with pytest.raises(json.JSONDecodeError):
+        registry._write_state(registry._own_rows())
+
+    assert path.read_text(encoding="utf-8") == "{not valid json"
+
+
+@pytest.mark.asyncio
+async def test_start_quarantines_corrupt_state(bridge_home, tmp_path):
+    """A corrupt state.json must not lock every later startup out of working.
+
+    _write_state keeps refusing to overwrite it, so start() has to move it aside
+    or flush_state() would fail forever and the bridge could never boot again.
+    """
+    path = state_path(bridge_home)
+    path.write_text("{not valid json", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+
+    await registry.start()
+    try:
+        quarantined = sorted(bridge_home.glob("state.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == "{not valid json"
+        assert isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
+    finally:
+        await registry.stop()
+
+    # The rewritten file is valid, so a second boot must not fail either.
+    second = Registry.create(bridge_home)
+    await second.start()
+    await second.stop()
+    assert len(sorted(bridge_home.glob("state.json.corrupt-*"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_corruptions_in_one_second_keep_both_copies(bridge_home, monkeypatch):
+    """A second quarantine must not replace the first recovery copy.
+
+    The state lock serialises concurrent writers, not two starts that each find
+    a corrupt file within the same wall-clock second, so the copy name has to
+    carry its own uniqueness.
+    """
+    monkeypatch.setattr("agent_bridge.registry.time.strftime", lambda *_args: "20261001-120000")
+
+    for _ in range(2):
+        state_path(bridge_home).write_text("{not valid json", encoding="utf-8")
+        registry = Registry.create(bridge_home)
+        await registry.start()
+        await registry.stop()
+
+    quarantined = sorted(bridge_home.glob("state.json.corrupt-*"))
+    assert len(quarantined) == 2
+    assert all(item.read_text(encoding="utf-8") == "{not valid json" for item in quarantined)
+
+
+@pytest.mark.asyncio
+async def test_start_survives_non_object_state(bridge_home, tmp_path):
+    """Valid JSON of the wrong shape must not raise out of payload.get()."""
+    state_path(bridge_home).write_text("[1, 2, 3]", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_shape"] = Session(
+        session_id="sess_shape", agent="fake", cwd=str(work.resolve())
+    )
+
+    await registry.start()
+    try:
+        payload = read_json(state_path(bridge_home), {})
+        assert {row["session_id"] for row in payload["sessions"]} == {"sess_shape"}
+    finally:
+        await registry.stop()
 
 
 @pytest.mark.asyncio

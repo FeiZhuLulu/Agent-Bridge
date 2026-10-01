@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -36,7 +37,12 @@ from agent_bridge.models import (
     normalize_effort,
 )
 from agent_bridge.paths import ensure_home, result_path, state_path, transcript_path
-from agent_bridge.persist import atomic_write_json, atomic_write_text, read_json
+from agent_bridge.persist import (
+    atomic_write_json,
+    atomic_write_text,
+    file_lock,
+    read_json_strict,
+)
 from agent_bridge.probes import probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
 from agent_bridge.quota import QuotaCache, fetch_quota, looks_like_quota_error, provider_table, unknown_quota
@@ -86,6 +92,9 @@ TASK_KEEP_TOTAL = 200
 STOP_TASK_GRACE_SEC = 15
 STALL_POLL_SEC = 30
 STALL_CANCEL_GRACE_SEC = 15
+STATE_WRITE_ATTEMPTS = 5
+STATE_WRITE_RETRY_BASE_SEC = 0.05
+STATE_LOCK_TIMEOUT_SEC = 5.0
 
 
 def _new_id(prefix: str) -> str:
@@ -147,6 +156,7 @@ class Registry:
         self._stopping = False
         self._pending_state: dict[str, list[dict]] | None = None
         self._flush_task: asyncio.Task[None] | None = None
+        self._state_error: Exception | None = None
 
     @classmethod
     def create(
@@ -210,28 +220,36 @@ class Registry:
         }
 
     def _write_state(self, own: dict[str, list[dict]]) -> None:
-        # Live siblings may interleave a read-merge-write; each instance only
-        # rewrites its own records, so the next save converges. Uses the
-        # snapshot in `own` plus owner identity, never self.sessions / self.tasks.
+        # The lock covers the complete read-merge-write transaction. Atomic
+        # replacement alone prevents partial JSON, but not sibling lost updates.
         path = state_path(self.home)
-        disk = read_json(path, {})
-        if not isinstance(disk, dict):
-            disk = {}
-        atomic_write_json(
-            path,
-            {
-                "sessions": self._merge_owned(
-                    disk.get("sessions") or [],
-                    {row["session_id"]: row for row in own["sessions"]},
-                    "session_id",
-                ),
-                "tasks": self._merge_owned(
-                    disk.get("tasks") or [],
-                    {row["task_id"]: row for row in own["tasks"]},
-                    "task_id",
-                ),
-            },
-        )
+        lock_path = path.with_name(f"{path.name}.lock")
+        for attempt in range(STATE_WRITE_ATTEMPTS):
+            try:
+                with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+                    disk = read_json_strict(path, {})
+                    if not isinstance(disk, dict):
+                        disk = {}
+                    atomic_write_json(
+                        path,
+                        {
+                            "sessions": self._merge_owned(
+                                disk.get("sessions") or [],
+                                {row["session_id"]: row for row in own["sessions"]},
+                                "session_id",
+                            ),
+                            "tasks": self._merge_owned(
+                                disk.get("tasks") or [],
+                                {row["task_id"]: row for row in own["tasks"]},
+                                "task_id",
+                            ),
+                        },
+                    )
+                return
+            except PermissionError:
+                if attempt + 1 == STATE_WRITE_ATTEMPTS:
+                    raise
+                time.sleep(STATE_WRITE_RETRY_BASE_SEC * (2**attempt))
 
     def save(self) -> None:
         self._pending_state = self._own_rows()
@@ -239,7 +257,13 @@ class Registry:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             own, self._pending_state = self._pending_state, None
-            self._write_state(own)
+            try:
+                self._write_state(own)
+            except Exception as exc:
+                self._pending_state = own
+                self._state_error = exc
+                raise
+            self._state_error = None
             return
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = loop.create_task(self._flush_state_loop(), name="state-flush")
@@ -252,16 +276,25 @@ class Registry:
             own, self._pending_state = self._pending_state, None
             try:
                 await asyncio.to_thread(self._write_state, own)
-            except Exception:
-                # A failed write must not kill the flush task: stop() awaits
-                # it, and the next save() has to be able to retry.
+            except Exception as exc:
+                # Keep the newest snapshot. A later save or flush can retry it.
+                if self._pending_state is None:
+                    self._pending_state = own
+                self._state_error = exc
                 log.exception("could not write state.json")
+                return
+            self._state_error = None
 
     async def flush_state(self) -> None:
         """Wait until every save() so far is on disk."""
         task = self._flush_task
+        if self._pending_state is not None and (task is None or task.done()):
+            task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
+            self._flush_task = task
         if task is not None and not task.done():
             await task
+        if self._pending_state is not None:
+            raise RuntimeError("could not persist state.json") from self._state_error
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -297,11 +330,40 @@ class Registry:
         except asyncio.CancelledError:
             raise
 
+    def _load_state(self) -> dict[str, Any]:
+        """Read state.json, isolating unparsable data instead of deadlocking on it.
+
+        _write_state refuses to treat invalid JSON as empty, so a corrupt file is
+        never overwritten. Left in place it also fails every later write, so the
+        process would never start again without deleting the file by hand.
+        Renaming keeps the evidence and lets startup continue from empty state.
+        """
+        path = state_path(self.home)
+        lock_path = path.with_name(f"{path.name}.lock")
+        with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+            try:
+                payload = read_json_strict(path, {})
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # The lock only serialises concurrent writers, not a later start
+                # that finds a fresh state.json corrupt again within the same
+                # second, so the name needs a unique suffix of its own.
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                quarantine = path.with_name(
+                    f"{path.name}.corrupt-{stamp}-{uuid.uuid4().hex[:8]}"
+                )
+                os.replace(path, quarantine)
+                log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
+                return {}
+        if not isinstance(payload, dict):
+            log.warning("ignoring non-object %s; starting from empty state", path)
+            return {}
+        return payload
+
     async def start(self) -> None:
         self._stopping = False
         install_host_env(self.config.env)
         reap_orphans(self.home)
-        payload = read_json(state_path(self.home), {})
+        payload = self._load_state()
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
             if self._foreign_live(session.owner_pid, session.owner_create_time):

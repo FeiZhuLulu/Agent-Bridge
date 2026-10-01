@@ -1062,6 +1062,92 @@ async def test_files_changed_uncapped_when_under_limit(bridge_home, tmp_path):
         await registry.stop()
 
 
+@pytest.mark.asyncio
+async def test_running_files_changed_is_pending_until_collection(
+    bridge_home, tmp_path, monkeypatch
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    wrote = asyncio.Event()
+    release = asyncio.Event()
+
+    async def write_then_wait(self, session, task):
+        (Path(task.cwd) / "created.txt").write_text("done\n", encoding="utf-8")
+        wrote.set()
+        await release.wait()
+        return TurnResult(text="done")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", write_then_wait)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "write", cwd=str(work.resolve()))
+        await asyncio.wait_for(wrote.wait(), timeout=5)
+
+        running = registry.check_task(dispatched["task_id"])
+        assert running["status"] == "running"
+        assert running["files_changed"] == []
+        assert running["files_changed_total"] == 0
+        assert running["files_changed_state"] == "pending"
+
+        release.set()
+        finished = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert finished["files_changed"] == ["created.txt"]
+        assert finished["files_changed_total"] == 1
+        assert finished["files_changed_state"] == "collected"
+    finally:
+        release.set()
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_collects_workspace_changes(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def write_then_fail(self, session, task):
+        (Path(task.cwd) / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("synthetic turn failure")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", write_then_fail)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "fail", cwd=str(work.resolve()))
+        finished = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert finished["status"] == "failed"
+        assert finished["files_changed"] == ["partial.txt"]
+        assert finished["files_changed_state"] == "collected"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_collects_workspace_changes(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    wrote = asyncio.Event()
+
+    async def write_until_cancelled(self, session, task):
+        (Path(task.cwd) / "cancelled.txt").write_text("partial\n", encoding="utf-8")
+        wrote.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", write_until_cancelled)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "cancel", cwd=str(work.resolve()))
+        await asyncio.wait_for(wrote.wait(), timeout=5)
+        cancelled = await registry.cancel_task(dispatched["task_id"])
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["files_changed"] == ["cancelled.txt"]
+        assert cancelled["files_changed_state"] == "collected"
+    finally:
+        await registry.stop()
+
+
 def _dead_session(session_id: str, cwd: str, last_active_at: str, proc_state: ProcState = ProcState.dead) -> Session:
     return Session(
         session_id=session_id,

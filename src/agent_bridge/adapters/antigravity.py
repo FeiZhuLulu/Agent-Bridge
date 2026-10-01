@@ -4,10 +4,13 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from agent_bridge.adapters.base import STDIO_LIMIT, Adapter
 from agent_bridge.config import AgentConfig
@@ -167,6 +170,45 @@ _MUTATING_TOOL_MARKERS = (
 )
 
 
+def agy_projects_dir() -> Path:
+    return Path.home() / ".gemini" / "config" / "projects"
+
+
+def _uri_path(value: str) -> str:
+    p = unquote(value.removeprefix("file:")).replace("\\", "/")
+    p = p.lstrip("/") if re.match(r"^/*[A-Za-z]:", p) else "/" + p.lstrip("/")
+    return os.path.normcase(os.path.normpath(p))
+
+
+def find_agy_project(cwd: str, projects_dir: Path) -> str | None:
+    """Id of the agy project whose folderUri points at ``cwd``, if one exists."""
+    if not projects_dir.is_dir():
+        return None
+    target = _uri_path(cwd)
+    for file in sorted(projects_dir.glob("*.json")):
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        project_id = data.get("id")
+        resources = data.get("projectResources")
+        entries = resources.get("resources") if isinstance(resources, dict) else None
+        if not isinstance(project_id, str) or not isinstance(entries, list):
+            continue
+        for resource in entries:
+            if not isinstance(resource, dict):
+                continue
+            candidates = [resource.get("folderUri")]
+            git = resource.get("gitFolder")
+            if isinstance(git, dict):
+                candidates.append(git.get("folderUri"))
+            if any(isinstance(uri, str) and _uri_path(uri) == target for uri in candidates):
+                return project_id
+    return None
+
+
 def collect_tool_paths(obj: dict[str, Any], into: set[str]) -> None:
     step = obj.get("step_update") if isinstance(obj.get("step_update"), dict) else obj
     if not isinstance(step, dict):
@@ -216,7 +258,10 @@ class AgyAdapter(Adapter):
         if session.native_session_id:
             cmd += ["--conversation", session.native_session_id]
         else:
-            cmd += ["--new-project"]
+            # Reuse the cwd's existing project so each dispatch does not add a
+            # duplicate to Antigravity's project list; --new-project only when none exists.
+            project_id = find_agy_project(session.cwd, agy_projects_dir()) if session.cwd else None
+            cmd += ["--project", project_id] if project_id else ["--new-project"]
         cmd += [
             "-p",
             "",

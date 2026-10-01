@@ -27,6 +27,7 @@ from agent_bridge.kimi_observe import observe_kimi_session
 from agent_bridge.models import (
     DEFAULT_WAIT_SEC,
     TERMINAL_STATUSES,
+    FilesChangedState,
     ProcState,
     Session,
     Task,
@@ -319,6 +320,12 @@ class Registry:
                 task.status = TaskStatus.failed
                 task.error = "bridge_restarted"
                 task.finished_at = iso()
+            if task.files_changed_state == FilesChangedState.pending and task.status in TERMINAL_STATUSES:
+                task.files_changed_state = (
+                    FilesChangedState.collected
+                    if task.files_changed or task.files_changed_total > 0
+                    else FilesChangedState.unavailable
+                )
             self.tasks[task.task_id] = task
             done = asyncio.Event()
             done.set()
@@ -619,6 +626,7 @@ class Registry:
         session.last_active_at = iso()
         self.save()
         watch = None
+        before: dict[str, tuple[int, int]] | None = None
         try:
             mark_worker_activity(session.session_id, self.home)
             before = await asyncio.to_thread(snapshot_workspace, task.cwd)
@@ -648,9 +656,7 @@ class Registry:
             full_changed = await asyncio.to_thread(
                 merge_files_changed, task.cwd, result.files_changed, before
             )
-            task.files_changed_total = len(full_changed)
-            task.files_changed = full_changed[:FILES_CHANGED_MAX]
-            task.files_changed_truncated = len(full_changed) > FILES_CHANGED_MAX
+            self._set_files_changed(task, full_changed)
             task.usage = result.usage
             if session.agent == "grok":
                 observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
@@ -698,6 +704,24 @@ class Registry:
                 watch.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await watch
+            if task.files_changed_state == FilesChangedState.pending:
+                if before is None:
+                    task.files_changed_state = FilesChangedState.unavailable
+                else:
+                    try:
+                        full_changed = await asyncio.to_thread(
+                            merge_files_changed, task.cwd, [], before
+                        )
+                        self._set_files_changed(task, full_changed)
+                    except Exception as exc:
+                        task.files_changed_state = FilesChangedState.unavailable
+                        task.warnings.append(
+                            f"final files_changed collection failed: {type(exc).__name__}: {exc}"
+                        )
+                        log.exception(
+                            "could not collect final workspace changes for task %s",
+                            task.task_id,
+                        )
             if task.finished_at is None:
                 task.finished_at = iso()
             # A Kimi quota failure arrives as a warning on a "completed" turn.
@@ -730,6 +754,13 @@ class Registry:
                 (task.error or "")[:500],
             )
             self._schedule_idle(session.session_id)
+
+    @staticmethod
+    def _set_files_changed(task: Task, paths: list[str]) -> None:
+        task.files_changed_total = len(paths)
+        task.files_changed = paths[:FILES_CHANGED_MAX]
+        task.files_changed_truncated = len(paths) > FILES_CHANGED_MAX
+        task.files_changed_state = FilesChangedState.collected
 
     async def _stall_watch(
         self,
@@ -958,6 +989,7 @@ class Registry:
             "files_changed": task.files_changed,
             "files_changed_total": task.files_changed_total,
             "files_changed_truncated": task.files_changed_truncated,
+            "files_changed_state": task.files_changed_state.value,
             "model": task.model,
             "effort": task.effort,
             "observed_model": task.observed_model,
@@ -1080,6 +1112,7 @@ class Registry:
             task.status = TaskStatus.cancelled
             task.stop_reason = "cancelled"
             task.finished_at = iso()
+            task.files_changed_state = FilesChangedState.unavailable
             if task.started_at is None and session.proc_state == ProcState.spawning:
                 session.proc_state = ProcState.idle_unloaded
             self._bg.pop(task_id, None)

@@ -52,6 +52,18 @@ def test_loads_bundled_agents():
     # wholesale, so Kimi's keys have to be listed there too.
     assert "KIMI_CODE_HOME" in cfg.env.inherit
     assert "KIMI_SHELL_PATH" in cfg.env.inherit
+    assert cfg.agents["zcode"].protocol == "acp"
+    assert cfg.agents["zcode"].command == ["zcode-acp-server"]
+    assert cfg.agents["zcode"].fallback_commands == [["zcode-acp", "server"]]
+    assert cfg.agents["zcode"].revivable is True
+    assert cfg.agents["minimax"].protocol == "acp"
+    assert cfg.agents["minimax"].command == ["mcode", "acp"]
+    assert cfg.agents["minimax"].revivable is True
+    assert "ZCODE_HOME" in cfg.env.inherit
+    assert "ZCODE_BIN" in cfg.env.inherit
+    assert "MINIMAX_DATA_DIR" in cfg.env.inherit
+    assert "MAVIS_DATA_DIR" in cfg.env.inherit
+    assert "MCODE_CONFIG_DIR" in cfg.env.inherit
     assert cfg.agents["dsh"].command[0] == "dsh-acp-demo"
     assert cfg.agents["dsh"].fallback_commands == []
     assert cfg.agents["dsh"].cwd is None

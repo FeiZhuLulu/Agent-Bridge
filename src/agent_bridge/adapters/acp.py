@@ -7,7 +7,7 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -32,6 +32,12 @@ from agent_bridge.config import AgentConfig
 from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
 from agent_bridge.dsh_home import command_has_native_acp, prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
+from agent_bridge.minimax_meta import (
+    MINIMAX_PERMISSION_BYPASS,
+    minimax_model_labels,
+    resolve_minimax_effort,
+    resolve_minimax_model,
+)
 from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
 from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.processes import (
@@ -45,6 +51,12 @@ from agent_bridge.processes import (
 from agent_bridge.transcript import append_event
 from agent_bridge.worker_env import build_worker_env
 from agent_bridge.workspace import collect_update_paths
+from agent_bridge.zcode_meta import (
+    ZCODE_MODE_YOLO,
+    resolve_zcode_effort,
+    resolve_zcode_model,
+    zcode_model_candidates,
+)
 
 STDERR_TAIL_LIMIT = 16000
 
@@ -53,9 +65,13 @@ log = logging.getLogger(__name__)
 GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
 # These workers' session/load replays persisted history as session/update
 # notifications. session/resume is advertised and skips that replay.
-_RESUME_AGENTS = frozenset({"kimi", "opencode", "claude"})
-_CONFIG_OPTION_AGENTS = frozenset({"kimi", "opencode", "claude", "devin", "cursor", "dsh"})
-_MODEL_EFFORT_AGENTS = frozenset({"grok", "dsh", "kimi", "opencode", "claude", "devin", "cursor"})
+_RESUME_AGENTS = frozenset({"kimi", "opencode", "claude", "zcode", "minimax"})
+_CONFIG_OPTION_AGENTS = frozenset(
+    {"kimi", "opencode", "claude", "devin", "cursor", "dsh", "zcode", "minimax"}
+)
+_MODEL_EFFORT_AGENTS = frozenset(
+    {"grok", "dsh", "kimi", "opencode", "claude", "devin", "cursor", "zcode", "minimax"}
+)
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
@@ -824,8 +840,9 @@ class AcpAdapter(Adapter):
         if use_resume is None:
             use_resume = self.agent.name in _RESUME_AGENTS
         if use_resume:
-            # kimi/opencode/claude replay persisted history as session/update
-            # on load; resume skips it. Native dsh implements only resume.
+            # kimi/opencode/claude/zcode/minimax replay persisted history as
+            # session/update on load; resume skips it. Native dsh implements
+            # only resume. ZCode replays on resume only for its own TUI client.
             return await conn.resume_session(
                 session_id=native_id,
                 cwd=cwd,
@@ -1209,6 +1226,193 @@ class AcpAdapter(Adapter):
             live.pending_warnings.append(message)
             live.applied_effort = session.effort
 
+    async def _sync_zcode_selection(self, live: _Live, session: Session) -> None:
+        """Force yolo, then apply model and thought level for a ZCode session.
+
+        The adapter's default create mode is yolo, but ``ZCODE_ACP_MODE`` and
+        the user's saved session mode can land elsewhere. Model values are
+        ``provider\\model``; a bare id is accepted only when one advertised
+        option has that id. Thought level is per model.
+        """
+        if self.agent.name != "zcode" or live.conn is None or not session.native_session_id:
+            return
+        await self._sync_named_option(
+            live,
+            session,
+            "mode",
+            ZCODE_MODE_YOLO,
+            missing=(
+                f"zcode mode {ZCODE_MODE_YOLO} is not advertised; "
+                "ACP requestPermission will auto-allow instead"
+            ),
+        )
+        await self._sync_zcode_model(live, session)
+        await self._sync_mapped_effort(
+            live,
+            session,
+            "thought",
+            resolve_zcode_effort,
+            noun="thought",
+        )
+
+    async def _sync_zcode_model(self, live: _Live, session: Session) -> None:
+        if not session.model or session.model == live.applied_model:
+            return
+        current, offered = config_option_values(live.config_options, "model")
+        target = resolve_zcode_model(session.model, offered)
+        if target is None:
+            matches = zcode_model_candidates(session.model, offered)
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"zcode model {session.model!r} matches more than one advertised option: "
+                    f"{matches}"
+                )
+            raise RuntimeError(
+                f"zcode rejected model {session.model!r}; "
+                f"session advertises {offered or 'no models'}"
+            )
+        if current != target:
+            try:
+                await self._set_config_option(live, session, "model", target)
+            except RpcTimeoutError:
+                raise
+            except Exception as exc:
+                _, refreshed = config_option_values(live.config_options, "model")
+                raise RuntimeError(
+                    f"zcode rejected model {session.model!r}; "
+                    f"session advertises {refreshed or offered or 'no models'}"
+                ) from exc
+        self._remember_applied_model(live, session.model)
+
+    async def _sync_minimax_selection(self, live: _Live, session: Session) -> None:
+        """Force bypassPermissions, then apply model and thinking effort.
+
+        ``permissionMode`` is not the ACP session mode (that one is only
+        ``default`` / ``plan``). Model slugs are ``provider/model`` or
+        ``provider/model#variant``; the wire value is the CLI's ``m:``
+        encoding. ``thinkingEffort`` is per model and may be absent.
+        """
+        if self.agent.name != "minimax" or live.conn is None or not session.native_session_id:
+            return
+        await self._sync_named_option(
+            live,
+            session,
+            "permissionMode",
+            MINIMAX_PERMISSION_BYPASS,
+            missing=(
+                "minimax permissionMode=bypassPermissions is not advertised; "
+                "ACP requestPermission will auto-allow instead"
+            ),
+        )
+        await self._sync_minimax_model(live, session)
+        await self._sync_mapped_effort(
+            live,
+            session,
+            "thinkingEffort",
+            resolve_minimax_effort,
+            noun="thinkingEffort",
+        )
+
+    async def _sync_minimax_model(self, live: _Live, session: Session) -> None:
+        if not session.model or session.model == live.applied_model:
+            return
+        current, offered = config_option_values(live.config_options, "model")
+        target = resolve_minimax_model(session.model, offered)
+        if target is None:
+            raise RuntimeError(
+                f"minimax rejected model {session.model!r}; "
+                f"session advertises {minimax_model_labels(offered) or 'no models'}"
+            )
+        if current != target:
+            try:
+                await self._set_config_option(live, session, "model", target)
+            except RpcTimeoutError:
+                raise
+            except Exception as exc:
+                _, refreshed = config_option_values(live.config_options, "model")
+                labels = minimax_model_labels(refreshed or offered)
+                raise RuntimeError(
+                    f"minimax rejected model {session.model!r}; "
+                    f"session advertises {labels or 'no models'}"
+                ) from exc
+        self._remember_applied_model(live, session.model)
+
+    async def _sync_named_option(
+        self,
+        live: _Live,
+        session: Session,
+        option_id: str,
+        value: str,
+        *,
+        missing: str,
+    ) -> None:
+        """Set one select option, warning instead of failing when it will not stick.
+
+        Used for permission/mode switches. A missing or rejected value still
+        leaves ACP ``requestPermission`` to auto-allow tool calls.
+        """
+        if live.applied_mode == value:
+            return
+        current, offered = config_option_values(live.config_options, option_id)
+        if current == value:
+            live.applied_mode = value
+            return
+        if value not in offered:
+            log.warning("%s", missing)
+            live.pending_warnings.append(missing)
+            return
+        try:
+            await self._set_config_option(live, session, option_id, value)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            message = (
+                f"{self.agent.name} rejected {option_id}={value}: {exc}; "
+                "ACP requestPermission will auto-allow instead"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_mode = value
+
+    async def _sync_mapped_effort(
+        self,
+        live: _Live,
+        session: Session,
+        option_id: str,
+        resolve: Callable[[str | None, Any], str | None],
+        *,
+        noun: str,
+    ) -> None:
+        if not session.effort:
+            return
+        current, offered = config_option_values(live.config_options, option_id)
+        level = resolve(session.effort, offered)
+        if level is None:
+            message = (
+                f"{self.agent.name} effort={session.effort} has no counterpart on "
+                f"{live.applied_model or 'the current model'}; "
+                f"session advertises {noun} {offered or '(none)'}"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        if level == current:
+            live.applied_effort = level
+            return
+        try:
+            await self._set_config_option(live, session, option_id, level)
+        except RpcTimeoutError:
+            raise
+        except Exception as exc:
+            message = (
+                f"{self.agent.name} rejected {noun}={level} for effort={session.effort}: {exc}"
+            )
+            log.warning("%s", message)
+            live.pending_warnings.append(message)
+            return
+        live.applied_effort = level
+
     async def _sync_selection(self, live: _Live, session: Session) -> None:
         await self._sync_grok_model(live, session)
         await self._sync_cursor_selection(live, session)
@@ -1217,6 +1421,8 @@ class AcpAdapter(Adapter):
         await self._sync_claude_selection(live, session)
         await self._sync_devin_selection(live, session)
         await self._sync_dsh_selection(live, session)
+        await self._sync_zcode_selection(live, session)
+        await self._sync_minimax_selection(live, session)
 
     async def _sync_claude_effort(self, live: _Live, session: Session) -> None:
         if not session.effort:

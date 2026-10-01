@@ -64,6 +64,26 @@ inherit = [
   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
   "OPENROUTER_API_KEY",
   "WINDSURF_API_KEY",
+  "ZCODE_HOME",
+  "ZCODE_BIN",
+  "ZCODE_NODE",
+  "ZCODE_MODEL",
+  "ZCODE_PROVIDER",
+  "ZCODE_BASE_URL",
+  "ZCODE_ACP_MODE",
+  "ZCODE_ACP_DEBUG",
+  "MINIMAX_DATA_DIR",
+  "MAVIS_DATA_DIR",
+  "MAVIS_REGION",
+  "MAVIS_BUILD_ENV",
+  "MAVIS_PROFILE",
+  "MCODE_CONFIG_DIR",
+  "MCODE_API_BASE_URL",
+  "MCODE_AUTH_BASE_URL",
+  "MCODE_REGION",
+  "MCODE_CLIENT_ID",
+  "MCODE_SCOPE",
+  "MCODE_AUTH_PROVIDER",
   "GOOGLE_API_KEY",
   "GEMINI_API_KEY",
   "CLOUDFLARE_API_TOKEN",
@@ -190,6 +210,31 @@ protocol = "acp"
 # claude-opus-5-high) — there is no separate effort. Auth is `devin auth
 # login` on disk or WINDSURF_API_KEY. Revive is session/load (replays history).
 command = ["devin", "acp"]
+revivable = true
+idle_unload_sec = 900
+
+[agents.zcode]
+protocol = "acp"
+# Product `zcode` has no ACP profile. Bridge drives `zcode-acp-server`
+# (npm `zcode-acp-server`). Bare `zcode-acp` is a TUI, so the fallback is
+# the explicit `server` subcommand. A fresh session is yolo unless
+# ZCODE_ACP_MODE overrides it; Bridge re-asserts yolo. Model values are
+# provider\model. Thought level is per model. Auth is the ZCode app login
+# at ~/.zcode/v2 (or ZCODE_HOME). Revive is session/resume — session/load
+# replays history.
+command = ["zcode-acp-server"]
+fallback_commands = [["zcode-acp", "server"]]
+revivable = true
+idle_unload_sec = 900
+
+[agents.minimax]
+protocol = "acp"
+# MiniMax Code's own ACP server. permissionMode starts at default (ask);
+# Bridge switches it to bypassPermissions. Model slugs are provider/model
+# or provider/model#variant. thinkingEffort is per model. Auth is
+# `mcode login` under ~/.minimax (or MINIMAX_DATA_DIR). Revive is
+# session/resume — session/load replays history.
+command = ["mcode", "acp"]
 revivable = true
 idle_unload_sec = 900
 

@@ -19,8 +19,10 @@ from agent_bridge.dsh_home import (
     resolve_dsh_command,
 )
 from agent_bridge.kimi_observe import kimi_home
+from agent_bridge.minimax_meta import describe_minimax_auth, minimax_data_dir
 from agent_bridge.processes import reap_subprocess, resolve_command
 from agent_bridge.worker_env import build_worker_env
+from agent_bridge.zcode_meta import describe_zcode_auth, zcode_home
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +229,27 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         details.append(f"auth={await _devin_auth(command[0], resolved)}")
         if resolved.get("WINDSURF_API_KEY"):
             details.append("WINDSURF_API_KEY=set")
+
+    if cfg.name == "zcode":
+        details.append(
+            "model=provider\\model or a unique bare id the session advertises; "
+            "effort mapped onto that model's thought levels; mode forced to yolo"
+        )
+        details.append(f"zcode-home={zcode_home(resolved)}")
+        details.append(f"auth={describe_zcode_auth(resolved)}")
+        details.append(
+            "product `zcode` is not ACP; worker is zcode-acp-server "
+            "(npm zcode-acp-server; fallback `zcode-acp server`)"
+        )
+
+    if cfg.name == "minimax":
+        details.append(
+            "model=provider/model or provider/model#variant "
+            "(mcode exec --model); effort mapped onto thinkingEffort; "
+            "permissionMode forced to bypassPermissions"
+        )
+        details.append(f"minimax-home={minimax_data_dir(resolved)}")
+        details.append(f"auth={describe_minimax_auth(resolved)}")
 
     if cfg.protocol == "codex":
         details.append(

@@ -53,7 +53,9 @@ def test_snapshot_skips_build_dirs_and_tracks_changes(tmp_path: Path):
     assert set(before) == {"src/a.py", "nested/deep/b.txt"}
     assert "\\" not in "".join(before)
 
-    (tmp_path / "src" / "a.py").write_text("print(2)\n", encoding="utf-8")
+    # A same-length rewrite can keep both size and mtime_ns on a coarse
+    # filesystem clock, so the payload length has to change.
+    (tmp_path / "src" / "a.py").write_text("print(22)\n", encoding="utf-8")
     assert merge_files_changed(tmp_path, [], before) == ["src/a.py"]
 
     (nested / "b.txt").unlink()

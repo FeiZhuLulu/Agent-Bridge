@@ -271,7 +271,7 @@ Live coordinator loop (product `claude` as host, OpenCode as worker): `uv run py
 
 ## Environment and proxy
 
-Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code, Codex, Devin) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
+Worker CLIs (Grok, Kimi, DSH, agy, OpenCode, Claude Code, Codex, Devin, ZCode, MiniMax Code) read API keys — and, on machines that need one, `HTTPS_PROXY` — from **their** process environment. Two things strip that:
 
 1. Codex env-clears the MCP server.
 2. Bridge launches `grok.exe` / `kimi` / `agy` / `opencode` / `claude-agent-acp` directly, so PowerShell functions that wrap those CLIs never run.
@@ -367,7 +367,7 @@ Where each number comes from:
 | DeepSeek Harness | `unknown` — balance lookup is not supported | DSH can use different providers and accounts; a DeepSeek key does not identify the active account |
 | Grok Build | `GET cli-chat-proxy.grok.com/v1/billing` — what `/usage` calls; **experimental** | Default first-party xAI OAuth scope in `~/.grok/auth.json` (or `GROK_AUTH_PATH`); `[quota] experimental = true` |
 | Claude Code | `GET api.anthropic.com/api/oauth/usage` — what `/usage` calls; **experimental** | `claude auth login` OAuth; `[quota] experimental = true` |
-| Antigravity, Cursor, OpenCode, Devin, others | — | always `unknown` with the reason in `detail` |
+| Antigravity, Cursor, OpenCode, Devin, ZCode, MiniMax Code, others | — | always `unknown` with the reason in `detail` |
 
 Custom API or OAuth endpoints are unsupported for quota lookup. Bridge checks each supported CLI's environment, selected provider/configuration and supported startup selectors before using either credentials or cached quota. Unreadable or unverified configuration returns `unknown`; ordinary HTTP(S)/ALL_PROXY transport proxies are supported. Kimi reads only the default `kimi-code.json` slot. Grok verifies the exact default OAuth scope, issuer, expiry and user ID, and sends the CLI's version and authentication headers. DSH balance remains unsupported.
 
@@ -517,6 +517,31 @@ devin auth login
 Auth is `devin auth login` on disk or `WINDSURF_API_KEY`. `list_agents` runs `devin auth status` and reports its first line as `auth=`. Bridge drops `ACP_BACKEND` from the worker environment: Devin Desktop stamps that variable on every child process, and with it set the CLI trusts only credentials the ACP host passes in and refuses `session/new` — so a Devin Desktop coordinator can still dispatch to a `devin` worker.
 
 `dispatch_task.model` is a model id the live session advertises (`devin models list`): the level is part of the id (`swe-1-7`, `swe-1-7-medium`, `claude-opus-5-high`), so there is no `effort` option — a Bridge `effort` is ignored with a warning. An unknown id fails the turn and lists the real options. Bridge forces `bypass` after `session/new` (a fresh session starts in `accept-edits`; `DEVIN_PERMISSION_MODE` is parsed but not applied to ACP sessions). Revive uses `session/load` — Devin has no `session/resume` — and Devin ignores `noReplay`, so the persisted history is replayed as `session/update` notifications before `load` answers. Bridge resets its turn state before prompting, so `get_result` and `files_changed` for the new turn are clean, but `get_transcript` will show the replayed history again after a revive; that is a side effect, not the way to fetch history. Mode and model survive the reload. A long session may take longer than the 60 s handshake timeout to replay; if that bites, lower `idle_unload_sec` for devin or open a new session.
+
+## Worker: ZCode
+
+Product `zcode` is not an ACP server. Bridge drives `zcode-acp-server` from npm package `zcode-acp-server` (the `zcode-acp server` subcommand is the fallback; bare `zcode-acp` is a terminal UI). The adapter launches `zcode app-server` itself. Install the adapter, install ZCode, and sign in once in the ZCode app:
+
+```powershell
+npm install -g zcode-acp-server
+```
+
+Login lives in `~/.zcode/v2` (`config.json` / `credentials.json`), or in `ZCODE_HOME`. If the ZCode CLI is not on `PATH`, set `ZCODE_BIN` to the bundled `zcode` or `zcode.cjs`. `list_agents` reports that login state in `auth=` and does not hide the worker when the login is missing.
+
+`dispatch_task.model` is an advertised `provider\model` value, or a bare model id such as `GLM-5.3` when only one option has that id. A slash form `provider/model` is accepted too. An unknown or ambiguous id fails the turn and lists the real options. `effort` maps onto that model's thought levels (`low|high|max` is common; Bridge `off` → `low`, `medium` → `high` unless the session lists a closer value). A model with no thought option, or an effort that will not map, comes back as a warning. `get_result.observed_model` is the slug that matched; `observed_effort` is the thought level Bridge set. Switching model on a live session re-applies effort. Bridge forces mode `yolo` after `session/new` (the adapter default is already `yolo` unless `ZCODE_ACP_MODE` or the saved session mode says otherwise). Revive uses `session/resume`: `session/load` replays the whole history.
+
+## Worker: MiniMax Code
+
+`mcode acp` is MiniMax Code's own ACP server (npm `@minimax-ai/code`). Install it and log in once:
+
+```powershell
+npm install -g @minimax-ai/code
+mcode login
+```
+
+Auth is `mcode login` under `~/.minimax` (`auth/<build>/<region>/auth.json`), or `MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR`. `list_agents` reports `auth=` and still lists the worker when the login is missing — the probe only checks that `mcode` is on `PATH`.
+
+`dispatch_task.model` is `provider/model` or `provider/model#variant`, the same shape as `mcode exec --model`. Bridge encodes that into the ACP value the session actually advertises. An unknown slug fails the turn and lists the real `provider/model` options. `effort` maps onto that model's `thinkingEffort` (`default|low|medium|high|xhigh|max` is common; Bridge `off` → `default`). A model with no effort option, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set after that mapping. Switching model on a live session re-applies effort. Bridge forces `permissionMode=bypassPermissions` after `session/new` (a fresh process starts in `default`, which asks). That option is not the session mode — `session/set_mode` is only `default` / `plan`, and Bridge leaves it on `default`. Revive uses `session/resume`: `session/load` replays the whole history.
 
 ## Permissions
 

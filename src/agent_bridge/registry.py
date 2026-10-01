@@ -1014,6 +1014,16 @@ class Registry:
                 " Devin observed_model is the last id Bridge set on the session; "
                 "observed_effort is always null because the level is part of the model id."
             )
+        if task.agent == "zcode":
+            hint += (
+                " ZCode observed_model is the slug Bridge matched to an advertised "
+                "provider\\model option; observed_effort is the thought level it set."
+            )
+        if task.agent == "minimax":
+            hint += (
+                " MiniMax Code observed_model is the provider/model slug Bridge matched; "
+                "observed_effort is the thinkingEffort it set. Neither is a live sampler."
+            )
         if task.files_changed_truncated:
             hint += (
                 f" files_changed lists the first {FILES_CHANGED_MAX} of "

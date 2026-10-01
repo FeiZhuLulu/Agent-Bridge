@@ -445,6 +445,54 @@ def test_state_write_does_not_replace_invalid_json(bridge_home):
 
 
 @pytest.mark.asyncio
+async def test_start_quarantines_corrupt_state(bridge_home, tmp_path):
+    """A corrupt state.json must not lock every later startup out of working.
+
+    _write_state keeps refusing to overwrite it, so start() has to move it aside
+    or flush_state() would fail forever and the bridge could never boot again.
+    """
+    path = state_path(bridge_home)
+    path.write_text("{not valid json", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+
+    await registry.start()
+    try:
+        quarantined = sorted(bridge_home.glob("state.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == "{not valid json"
+        assert isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
+    finally:
+        await registry.stop()
+
+    # The rewritten file is valid, so a second boot must not fail either.
+    second = Registry.create(bridge_home)
+    await second.start()
+    await second.stop()
+    assert len(sorted(bridge_home.glob("state.json.corrupt-*"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_survives_non_object_state(bridge_home, tmp_path):
+    """Valid JSON of the wrong shape must not raise out of payload.get()."""
+    state_path(bridge_home).write_text("[1, 2, 3]", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_shape"] = Session(
+        session_id="sess_shape", agent="fake", cwd=str(work.resolve())
+    )
+
+    await registry.start()
+    try:
+        payload = read_json(state_path(bridge_home), {})
+        assert {row["session_id"] for row in payload["sessions"]} == {"sess_shape"}
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_dead_owner_records_are_adopted(bridge_home, monkeypatch):
     monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: False)
     cwd = str(Path.cwd())

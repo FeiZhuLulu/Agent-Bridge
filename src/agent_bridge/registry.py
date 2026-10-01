@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -39,7 +40,6 @@ from agent_bridge.persist import (
     atomic_write_json,
     atomic_write_text,
     file_lock,
-    read_json,
     read_json_strict,
 )
 from agent_bridge.probes import probe_agent
@@ -329,11 +329,35 @@ class Registry:
         except asyncio.CancelledError:
             raise
 
+    def _load_state(self) -> dict[str, Any]:
+        """Read state.json, isolating unparsable data instead of deadlocking on it.
+
+        _write_state refuses to treat invalid JSON as empty, so a corrupt file is
+        never overwritten. Left in place it also fails every later write, so the
+        process would never start again without deleting the file by hand.
+        Renaming keeps the evidence and lets startup continue from empty state.
+        """
+        path = state_path(self.home)
+        lock_path = path.with_name(f"{path.name}.lock")
+        with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+            try:
+                payload = read_json_strict(path, {})
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                quarantine = path.with_name(f"{path.name}.corrupt-{stamp}")
+                os.replace(path, quarantine)
+                log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
+                return {}
+        if not isinstance(payload, dict):
+            log.warning("ignoring non-object %s; starting from empty state", path)
+            return {}
+        return payload
+
     async def start(self) -> None:
         self._stopping = False
         install_host_env(self.config.env)
         reap_orphans(self.home)
-        payload = read_json(state_path(self.home), {})
+        payload = self._load_state()
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
             if self._foreign_live(session.owner_pid, session.owner_create_time):

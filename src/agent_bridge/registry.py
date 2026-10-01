@@ -343,8 +343,13 @@ class Registry:
             try:
                 payload = read_json_strict(path, {})
             except (json.JSONDecodeError, UnicodeDecodeError):
+                # The lock only serialises concurrent writers, not a later start
+                # that finds a fresh state.json corrupt again within the same
+                # second, so the name needs a unique suffix of its own.
                 stamp = time.strftime("%Y%m%d-%H%M%S")
-                quarantine = path.with_name(f"{path.name}.corrupt-{stamp}")
+                quarantine = path.with_name(
+                    f"{path.name}.corrupt-{stamp}-{uuid.uuid4().hex[:8]}"
+                )
                 os.replace(path, quarantine)
                 log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
                 return {}

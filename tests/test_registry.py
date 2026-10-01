@@ -474,6 +474,27 @@ async def test_start_quarantines_corrupt_state(bridge_home, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_two_corruptions_in_one_second_keep_both_copies(bridge_home, monkeypatch):
+    """A second quarantine must not replace the first recovery copy.
+
+    The state lock serialises concurrent writers, not two starts that each find
+    a corrupt file within the same wall-clock second, so the copy name has to
+    carry its own uniqueness.
+    """
+    monkeypatch.setattr("agent_bridge.registry.time.strftime", lambda *_args: "20261001-120000")
+
+    for _ in range(2):
+        state_path(bridge_home).write_text("{not valid json", encoding="utf-8")
+        registry = Registry.create(bridge_home)
+        await registry.start()
+        await registry.stop()
+
+    quarantined = sorted(bridge_home.glob("state.json.corrupt-*"))
+    assert len(quarantined) == 2
+    assert all(item.read_text(encoding="utf-8") == "{not valid json" for item in quarantined)
+
+
+@pytest.mark.asyncio
 async def test_start_survives_non_object_state(bridge_home, tmp_path):
     """Valid JSON of the wrong shape must not raise out of payload.get()."""
     state_path(bridge_home).write_text("[1, 2, 3]", encoding="utf-8")

@@ -79,4 +79,6 @@ Claude 的 `quota.status` 只汇总通用的 `5h` / `weekly` 额度。派发前�
 
 不要去操作 Worker 的图形界面。已经打开的 Grok TUI 不会跟着 ACP 回合实时刷新；用户重启 Grok Build 即可看到同一会话。会话续上是 Bridge 的事。
 
+ACP 失败保留字符串 `error`，并可附带 `failure`。`failure.prompt_may_have_been_sent=true` 或没有诊断证据时，不要盲目重发；false 也不保证初始化没有副作用或重试安全。Bridge 不自动重试 prompt。诊断字段详见 SETUP.md。
+
 需要重试去重时，在首次调用 `dispatch_task` 前生成 UUID `request_id`，首次调用就传入。重试须使用同一 ID 和原始参数；首次省略了 `session_id`，重试也保持省略。只在重试时补 ID 无法对首次调用去重。相同参数复用原任务（`reused=true`），不同参数直接拒绝。去重只在同一 Bridge 实例内、原任务仍保留时有效，仍须通过正常派发校验。重启 Bridge、切换实例或清理原任务后不再保留绑定；Worker 的外部副作用不保证 exactly-once。

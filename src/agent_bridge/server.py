@@ -168,7 +168,7 @@ async def get_result(
     cursor: int = 0,
     max_chars: int = RESULT_PAGE_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Return a page of the complete worker result plus changed files, usage, and requested/observed model. Continue with next_cursor while has_more is true. max_chars is capped at 60000. files_changed_state says whether the list/count were collected; files_changed is capped at 200 paths and files_changed_total carries the real count. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not."""
+    """Return a page of the complete worker result plus changed files, usage, and requested/observed model. Continue with next_cursor while has_more is true. max_chars is capped at 60000. files_changed_state says whether the list/count were collected; files_changed is capped at 200 paths and files_changed_total carries the real count. For Grok, observed_model is the live sampler; the worker saying it is Grok 4.6 is not. ACP failures may include failure (operation, kind, exit_code, prompt_may_have_been_sent, stderr_summary); error stays a string. Missing evidence or prompt_may_have_been_sent=true must not trigger blind replay; false is not proof of safe retry."""
     try:
         return {
             "ok": True,

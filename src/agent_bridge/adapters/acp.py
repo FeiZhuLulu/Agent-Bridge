@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from acp import PROTOCOL_VERSION, connect_to_agent, text_block
+from acp.exceptions import RequestError
 from acp.schema import (
     AllowedOutcome,
     ClientCapabilities,
@@ -38,7 +39,7 @@ from agent_bridge.minimax_meta import (
     resolve_minimax_effort,
     resolve_minimax_model,
 )
-from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
+from agent_bridge.models import Session, Task, TaskFailure, TurnResult, dsh_effort, grok_effort
 from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.processes import (
     drop_pid,
@@ -94,7 +95,40 @@ def _tool_io_summary(value: Any) -> str | None:
     return text if len(text) <= _TOOL_IO_LIMIT else text[:_TOOL_IO_LIMIT] + "…"
 
 
-class RpcTimeoutError(RuntimeError):
+def _redact_diagnostic(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"(?im)^.*(?:authorization|(?:set-)?cookie)\s*[:=].*$", "[redacted]", text)
+    text = re.sub(
+        r"""(?i)(\b(?:[\w-]*(?:token|secret|password|api[_-]?key)|authorization|cookie)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+        r"\1[redacted]", text,
+    )
+    text = re.sub(r"(?i)\b(?:bearer|basic)\s+\S+", "[redacted]", text)
+    text = re.sub(r"""(?i)\b(?:https?|wss?)://[^\s<>"']+""", "[redacted URL]", text)
+    text = re.sub(r"\b(?:sk-[\w-]+|gh[pousr]_\w+)\b", "[redacted]", text)
+    return text[:2048]
+
+
+def _stderr_summary(text: str) -> str | None:
+    hints = re.findall(
+        r"\b(?:authentication required|not logged in|unauthorized|permission denied|"
+        r"unsupported model|invalid model|model not found|connection (?:closed|refused|reset)|"
+        r"timed out|timeout|quota exceeded|rate limit exceeded)\b",
+        text, re.IGNORECASE,
+    )
+    return "; ".join(dict.fromkeys(hint.lower() for hint in hints))[:2048] or None
+
+
+class AcpError(RuntimeError):
+    def __init__(self, message: str, failure: TaskFailure) -> None:
+        super().__init__(_redact_diagnostic(message))
+        self.failure = failure
+
+
+class AcpUnavailableError(AcpError):
+    pass
+
+
+class RpcTimeoutError(AcpUnavailableError):
     pass
 
 
@@ -673,6 +707,42 @@ class AcpAdapter(Adapter):
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
 
+    def _failure(
+        self, exc: Exception, operation: str, session: Session | None = None, *,
+        proc: asyncio.subprocess.Process | None = None, stderr: str | None = None,
+        prompt_may_have_been_sent: bool = False, kind: str | None = None,
+    ) -> AcpError:
+        if isinstance(exc, AcpError):
+            return exc
+        if isinstance(exc.__cause__, AcpError):
+            return type(exc.__cause__)(str(exc), exc.__cause__.failure)
+        live = self._live.get(session.session_id) if session else None
+        proc = proc if proc is not None else live.proc if live else None
+        exit_code = proc.returncode if proc is not None else None
+        if kind is None:
+            if isinstance(exc, TimeoutError):
+                kind = "timeout"
+            elif isinstance(exc, RequestError) and exc.code == -32000:
+                kind = "auth_required"
+            elif isinstance(exc, RequestError):
+                kind = "protocol_error"
+            elif exit_code is not None:
+                kind = "worker_exit"
+            elif isinstance(exc, (ConnectionError, EOFError)):
+                kind = "connection_closed"
+            else:
+                kind = "unknown"
+        failure = TaskFailure(
+            operation=operation, kind=kind, exit_code=exit_code,
+            prompt_may_have_been_sent=prompt_may_have_been_sent,
+            stderr_summary=_stderr_summary(stderr if stderr is not None else live.stderr_tail if live else ""),
+        )
+        error_type = (
+            RpcTimeoutError if kind == "timeout" else
+            AcpUnavailableError if kind in {"auth_required", "connection_closed", "worker_exit"} else AcpError
+        )
+        return error_type(str(exc) or type(exc).__name__, failure)
+
     async def _rpc(
         self,
         coro: Any,
@@ -683,20 +753,18 @@ class AcpAdapter(Adapter):
         """Await a handshake RPC with a timeout; kill the worker on hang."""
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
-        except TimeoutError:
-            live = self._live.get(session.session_id)
-            log.error(
-                "%s %s timed out after %ss for %s; killing worker stderr_tail=%r",
-                self.agent.name,
-                what,
-                timeout,
-                session.session_id,
-                live.stderr_tail if live else "",
-            )
-            await self.shutdown(session)
-            raise RpcTimeoutError(
-                f"{self.agent.name} {what} timed out after {int(timeout)}s"
-            ) from None
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                exc = TimeoutError(f"{self.agent.name} {what} timed out after {int(timeout)}s")
+            error = self._failure(exc, what, session)
+            if (
+                isinstance(error, RpcTimeoutError)
+                or what in {"initialize", "session/new"}
+                or (what in {"session/load", "session/resume"} and isinstance(error, AcpUnavailableError))
+            ):
+                log.error("%s; stderr_summary=%r", error, error.failure.stderr_summary)
+                await self.shutdown(session)
+            raise error from None
 
     async def _cursor_models(
         self,
@@ -706,14 +774,17 @@ class AcpAdapter(Adapter):
     ) -> dict[str, str]:
         if self._cursor_models_cache is not None:
             return self._cursor_models_cache
-        model_cmd = cursor_list_models_command(command)
-        proc = await asyncio.create_subprocess_exec(
-            *model_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=cwd,
-        )
+        try:
+            model_cmd = cursor_list_models_command(command)
+            proc = await asyncio.create_subprocess_exec(
+                *model_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=cwd,
+            )
+        except Exception as exc:
+            raise self._failure(exc, "model_discovery") from None
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=CURSOR_MODEL_LIST_TIMEOUT_SEC
@@ -722,20 +793,23 @@ class AcpAdapter(Adapter):
             await reap_subprocess(proc)
             raise
         except TimeoutError:
+            error = self._failure(
+                TimeoutError("cursor model discovery timed out; run 'cursor-agent --list-models' to check the current account"),
+                "model_discovery", proc=proc,
+            )
             await reap_subprocess(proc)
-            raise RuntimeError(
-                "cursor model discovery timed out; run 'cursor-agent --list-models' "
-                "to check the current account"
-            ) from None
+            raise error from None
         if proc.returncode:
-            detail = stderr.decode("utf-8", errors="replace").strip()
-            suffix = f": {detail[-1000:]}" if detail else ""
-            raise RuntimeError(f"cursor model discovery failed{suffix}")
+            raise self._failure(
+                RuntimeError("cursor model discovery failed"), "model_discovery",
+                proc=proc, stderr=stderr.decode("utf-8", errors="replace"),
+            )
         models = parse_cursor_models(stdout.decode("utf-8", errors="replace"))
         if not models:
-            raise RuntimeError(
-                "cursor model discovery returned no model IDs; run "
-                "'cursor-agent --list-models' to check the current account"
+            raise self._failure(
+                RuntimeError("cursor model discovery returned no model IDs; run 'cursor-agent --list-models' to check the current account"),
+                "model_discovery", proc=proc, stderr=stderr.decode("utf-8", errors="replace"),
+                kind="unknown",
             )
         self._cursor_models_cache = models
         return models
@@ -764,9 +838,10 @@ class AcpAdapter(Adapter):
                 self.agent.cwd or session.cwd or None,
             )
             if session.model not in models:
-                raise ValueError(
-                    f"cursor model {session.model!r} is not available for the current account; "
-                    f"available model IDs: {', '.join(models)}"
+                raise self._failure(
+                    ValueError(f"cursor model {session.model!r} is not available for the current account; "
+                               f"available model IDs: {', '.join(models)}"),
+                    "model_discovery", session, kind="unsupported_model",
                 )
             cmd = with_cursor_cli_model(cmd, session.model)
         kwargs: dict[str, Any] = {}
@@ -962,7 +1037,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "model", session.model)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             _, offered = config_option_values(live.config_options, "model")
@@ -984,9 +1059,10 @@ class AcpAdapter(Adapter):
             )
             label = catalog.get(session.model)
             if label is None:
-                raise ValueError(
-                    f"cursor model {session.model!r} is not available for the current account; "
-                    f"available model IDs: {', '.join(catalog)}"
+                raise self._failure(
+                    ValueError(f"cursor model {session.model!r} is not available for the current account; "
+                               f"available model IDs: {', '.join(catalog)}"),
+                    "model_discovery", session, kind="unsupported_model",
                 )
             base, base_name = _cursor_base_model(session.model, label, live.config_options)
             current, _offered = config_option_values(live.config_options, "model")
@@ -1080,7 +1156,7 @@ class AcpAdapter(Adapter):
                 "session/set_mode",
                 session,
             )
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1138,7 +1214,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "thinking", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             # Bridge chose this level by mapping, so a rejection is Bridge's
@@ -1181,7 +1257,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "effort", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = f"opencode rejected effort={level} for effort={session.effort}: {exc}"
@@ -1274,7 +1350,7 @@ class AcpAdapter(Adapter):
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)
-            except RpcTimeoutError:
+            except AcpUnavailableError:
                 raise
             except Exception as exc:
                 _, refreshed = config_option_values(live.config_options, "model")
@@ -1326,7 +1402,7 @@ class AcpAdapter(Adapter):
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)
-            except RpcTimeoutError:
+            except AcpUnavailableError:
                 raise
             except Exception as exc:
                 _, refreshed = config_option_values(live.config_options, "model")
@@ -1363,7 +1439,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, option_id, value)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1402,7 +1478,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, option_id, level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1414,15 +1490,18 @@ class AcpAdapter(Adapter):
         live.applied_effort = level
 
     async def _sync_selection(self, live: _Live, session: Session) -> None:
-        await self._sync_grok_model(live, session)
-        await self._sync_cursor_selection(live, session)
-        await self._sync_kimi_selection(live, session)
-        await self._sync_opencode_selection(live, session)
-        await self._sync_claude_selection(live, session)
-        await self._sync_devin_selection(live, session)
-        await self._sync_dsh_selection(live, session)
-        await self._sync_zcode_selection(live, session)
-        await self._sync_minimax_selection(live, session)
+        try:
+            await self._sync_grok_model(live, session)
+            await self._sync_cursor_selection(live, session)
+            await self._sync_kimi_selection(live, session)
+            await self._sync_opencode_selection(live, session)
+            await self._sync_claude_selection(live, session)
+            await self._sync_devin_selection(live, session)
+            await self._sync_dsh_selection(live, session)
+            await self._sync_zcode_selection(live, session)
+            await self._sync_minimax_selection(live, session)
+        except Exception as exc:
+            raise self._failure(exc, "session/configure", session) from None
 
     async def _sync_claude_effort(self, live: _Live, session: Session) -> None:
         if not session.effort:
@@ -1443,7 +1522,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "effort", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = f"claude rejected effort={level} for effort={session.effort}: {exc}"
@@ -1553,8 +1632,10 @@ class AcpAdapter(Adapter):
                 # The worker is already dead; a new_session on the same
                 # connection cannot succeed.
                 raise
-            except Exception:
-                log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
+            except AcpUnavailableError:
+                raise
+            except Exception as exc:
+                log.warning("session/load failed for %s; creating a new session: %s", session.session_id, _redact_diagnostic(str(exc)))
             else:
                 self._remember_config_options(live, revived)
                 await self._sync_selection(live, session)
@@ -1575,11 +1656,16 @@ class AcpAdapter(Adapter):
         await self._sync_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
-        await self.ensure_session(session)
+        live = self._live.get(session.session_id)
+        if live is not None:
+            live.stderr_tail = ""
+        try:
+            await self.ensure_session(session)
+        except Exception as exc:
+            raise self._failure(exc, "process_start", session) from None
         live = self._live[session.session_id]
         assert live.conn is not None and live.client is not None
         live.client.reset_turn()
-        live.stderr_tail = ""
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
         if self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
@@ -1588,12 +1674,12 @@ class AcpAdapter(Adapter):
                 f"model={task.model!r} effort={task.effort!r} were ignored"
             )
         append_event(session.session_id, "prompt_sent", {"text": task.message}, self.home)
-        prompt = live.conn.prompt(
-            session_id=session.native_session_id,
-            prompt=[text_block(task.message)],
-        )
-        live.prompt_task = asyncio.ensure_future(prompt)
         try:
+            prompt = live.conn.prompt(
+                session_id=session.native_session_id,
+                prompt=[text_block(task.message)],
+            )
+            live.prompt_task = asyncio.ensure_future(prompt)
             response = await live.prompt_task
         except asyncio.CancelledError:
             append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
@@ -1605,15 +1691,10 @@ class AcpAdapter(Adapter):
                 observed_model=live.applied_model,
                 observed_effort=live.applied_effort,
             )
-        except Exception:
-            if live.stderr_tail:
-                log.warning(
-                    "%s prompt failed for %s stderr_tail=%r",
-                    self.agent.name,
-                    session.session_id,
-                    live.stderr_tail,
-                )
-            raise
+        except Exception as exc:
+            raise self._failure(
+                exc, "session/prompt", session, prompt_may_have_been_sent=True,
+            ) from None
         finally:
             live.prompt_task = None
         stop = getattr(response, "stop_reason", None) or "end_turn"

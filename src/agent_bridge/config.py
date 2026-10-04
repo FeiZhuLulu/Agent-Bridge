@@ -130,9 +130,9 @@ class EnvConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    """Process-level server behavior (idle self-exit for abandoned MCP instances)."""
+    """Process-level server behavior (optional idle self-exit)."""
 
-    idle_exit_sec: int = 7200
+    idle_exit_sec: int = 0
 
 
 class QuotaConfig(BaseModel):

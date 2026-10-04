@@ -125,6 +125,8 @@ lose that last window. A turn whose worker stays silent past `stall_timeout_sec`
 (default 1800 s, per worker) ends `failed` / `stalled`; `check_task` shows
 `silent_for_sec`.
 
+ACP failures retain the string `error` and add optional `failure` diagnostics: the operation, category, observed exit code, prompt delivery uncertainty and a safe stderr summary. Missing diagnostics do not imply a safe retry; Bridge never automatically replays failed prompts. See [failure diagnostics](SETUP.md#acp-failure-diagnostics).
+
 ### Remaining quota
 
 Each `list_agents` row carries `quota`: `status` ok / exhausted / unknown, the
@@ -274,6 +276,8 @@ revivable = true
 缓冲事件在累计 64 KB、间隔 30 秒或一轮结束时落盘；正常停止会全部刷出，只有崩溃或被强杀才可能丢掉最后这一窗口。
 Worker 静默超过 `stall_timeout_sec`（默认 1800 秒，可按 Worker 设置）的一轮会以
 `failed` / `stalled` 结束；`check_task` 会给出 `silent_for_sec`。
+
+ACP 失败保留字符串 `error`，新增可选 `failure` 诊断：失败操作、类别、已观察到的退出码、prompt 是否可能已发送以及安全的 stderr 摘要。没有诊断不等于可以安全重试；Bridge 不自动重发失败的 prompt。详见[失败诊断](SETUP.md#acp-failure-diagnostics)。
 
 ### 剩余额度
 

@@ -141,9 +141,10 @@ def test_stall_timeout_rejects_negative(tmp_path):
 
 
 def test_server_idle_exit_defaults(tmp_path):
-    assert AppConfig().server.idle_exit_sec == 7200
+    assert AppConfig().server.idle_exit_sec == 0
     cfg = load_config(tmp_path)
-    assert cfg.server.idle_exit_sec == 7200
+    assert cfg.server.idle_exit_sec == 0
+    assert load_config(Path(__file__).resolve().parents[1]).server.idle_exit_sec == 0
 
 
 def test_server_idle_exit_overlay(tmp_path):

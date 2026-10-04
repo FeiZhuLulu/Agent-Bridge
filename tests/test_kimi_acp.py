@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from acp.exceptions import RequestError
 
-from agent_bridge.adapters.acp import AcpAdapter, _Live
+from agent_bridge.adapters.acp import AcpAdapter, AcpError, _Live
 from agent_bridge.config import AgentConfig
 from agent_bridge.models import Session
 
@@ -150,6 +151,22 @@ async def test_a_rejected_model_fails_the_turn_and_names_the_real_options():
     live.config_options = [MODEL_OPTION, THINKING_OPTION]
     with pytest.raises(RuntimeError, match="kimi-code/k3-256k"):
         await adapter._sync_kimi_selection(live, session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RequestError.auth_required(), ConnectionError("Connection closed")])
+async def test_model_transport_failure_is_not_relabelled_as_model_rejection(monkeypatch, error):
+    adapter, live, session = build(session_kwargs={"model": "kimi-code/k3"})
+
+    async def fail(**_kwargs):
+        raise error
+
+    monkeypatch.setattr(live.conn, "set_config_option", fail)
+    with pytest.raises(AcpError) as caught:
+        await adapter._sync_kimi_selection(live, session)
+    assert caught.value.failure.operation == "session/set_config_option model"
+    assert caught.value.failure.kind in {"auth_required", "connection_closed"}
+    assert caught.value.failure.prompt_may_have_been_sent is False
 
 
 @pytest.mark.asyncio

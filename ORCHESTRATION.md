@@ -75,4 +75,6 @@ In `auto`/`eager`, tell the user after the fact. In `manual`, their explicit req
 
 Do not drive worker GUIs or CLIs. Session resume is Bridge's job.
 
-For optional retry deduplication, generate a UUID `request_id` before the first `dispatch_task` call and include it on that call. Retry with the same ID and original arguments; if `session_id` was omitted, keep it omitted. Adding an ID only on retry cannot deduplicate the first call. Identical arguments reuse the task (`reused=true`); different arguments are rejected. Deduplication lasts only in the same Bridge instance while the task is retained. Normal dispatch validation still applies. Restarting Bridge, switching instances, or pruning the task loses the binding; worker side effects are not exactly-once.
+ACP `failure` supplements string `error` (fields: SETUP.md). Missing evidence or `failure.prompt_may_have_been_sent=true` forbids blind replay; false does not prove retry safety. Bridge never auto-retries prompts.
+
+For deduplication, send UUID `request_id` on the first dispatch; reuse its ID and exact arguments, including omitted `session_id`, on retry. Adding an ID only on retry cannot deduplicate earlier calls. Identical calls reuse the task (`reused=true`); changed arguments fail. Normal validation applies. Bindings last only in this instance until task pruning or restart; worker effects are not exactly-once.

@@ -331,7 +331,21 @@ Instances share the `~/.agent-bridge` state directory but not sessions: every se
 
 ## Server lifecycle
 
-Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200 s) with no MCP requests and no queued or running tasks, the process shuts its workers down and exits. Configure in `[server]` (repo `agents.toml` or `%USERPROFILE%\.agent-bridge\agents.toml`); `idle_exit_sec = 0` disables it. `list_agents` also warns when other Bridge instances are running on this machine — one per coordinator host is normal, a pile-up means a host keeps abandoning spawns.
+Bridge stays available while its host keeps the stdio connection open. `server.idle_exit_sec` defaults to `0` (disabled); EOF ends the connection and runs the normal worker and state cleanup. Worker idle unloading remains controlled separately by each agent's `idle_unload_sec`.
+
+A positive `idle_exit_sec` opts into server shutdown after that many seconds with no MCP tool calls and no queued or running tasks. Configure it in `[server]` (repo `agents.toml` or `%USERPROFILE%\.agent-bridge\agents.toml`) only when the host can reliably reconnect; explicit existing values remain effective. Idle time cannot distinguish an abandoned thread from one the user will continue later. `list_agents` reports other Bridge instances, but multiple coordinator threads may legitimately own separate instances.
+
+## ACP failure diagnostics
+
+`wait_task`, `check_task`, and `get_result` retain the string `error` and include an optional `failure` object for ACP failures:
+
+- `operation`: the failed operation, such as `process_start`, `initialize`, `model_discovery`, `session/new`, `session/load`, `session/resume`, `session/configure`, `session/set_config_option model`, or `session/prompt`.
+- `kind`: `auth_required`, `unsupported_model`, `timeout`, `connection_closed`, `worker_exit`, `protocol_error`, or `unknown`. Classification uses protocol codes and observed facts, not guesses from stderr.
+- `exit_code`: the observed exit code of the failing process, or `null`. During model discovery this belongs to the discovery command. An exit caused by Bridge's timeout cleanup is not substituted for the original failure.
+- `prompt_may_have_been_sent`: `false` only when this turn has not entered the prompt send operation; `true` means delivery or execution may already have occurred, not that delivery was acknowledged.
+- `stderr_summary`: recognized generic diagnostic phrases only, at most 2048 characters, or `null`. Raw stderr, arbitrary lines, credentials, URLs and local paths are not included. The human-readable `error` is also bounded and common credential fields are redacted.
+
+`failure = null` means no structured evidence is available (including old records, other adapters and interrupted tasks restored after a Bridge restart), not that retrying is safe. Bridge does not automatically replay failed prompts. Even `false` does not prove initialization was side-effect-free. An uncertain dispatch response can be retried with its original `request_id`; replaying that ID retrieves the same retained task, not a fresh execution of a failed task. `available` still describes command resolution, not authentication or session health.
 
 ## Remaining quota in `list_agents`
 

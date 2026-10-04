@@ -108,6 +108,14 @@ class Session(BaseModel):
     owner_create_time: float | None = None
 
 
+class TaskFailure(BaseModel):
+    operation: str
+    kind: str
+    prompt_may_have_been_sent: bool
+    exit_code: int | None = None
+    stderr_summary: str | None = None
+
+
 class Task(BaseModel):
     task_id: str
     session_id: str
@@ -128,6 +136,7 @@ class Task(BaseModel):
     files_changed_state: FilesChangedState = FilesChangedState.pending
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    failure: TaskFailure | None = None
     warnings: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=iso)
     started_at: str | None = None

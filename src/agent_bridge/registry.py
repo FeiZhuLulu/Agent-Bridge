@@ -14,6 +14,7 @@ from typing import Any, Literal
 import psutil
 
 from agent_bridge.adapters import build_adapter
+from agent_bridge.adapters.acp import AcpError
 from agent_bridge.adapters.base import Adapter
 from agent_bridge.config import (
     COORDINATOR_MODE_HINTS,
@@ -511,8 +512,8 @@ class Registry:
             warnings = status.setdefault("warnings", [])
             warnings.append(
                 f"{siblings} other agent-bridge server instance(s) running on this machine "
-                "(each coordinator host holds its own; abandoned ones self-exit after "
-                "server.idle_exit_sec)"
+                "(coordinator threads may each hold an instance; "
+                "counts alone do not imply orphaned processes)"
             )
         return status
 
@@ -756,10 +757,14 @@ class Registry:
                 task.status = TaskStatus.cancelled
                 task.stop_reason = "cancelled"
         except Exception as exc:
-            log.exception("task %s failed", task_id)
+            if isinstance(exc, AcpError):
+                log.warning("task %s failed: %s; failure=%s", task_id, exc, exc.failure.model_dump())
+            else:
+                log.exception("task %s failed", task_id)
             if task.status not in TERMINAL_STATUSES:
                 task.status = TaskStatus.failed
                 task.error = str(exc)
+                task.failure = exc.failure if isinstance(exc, AcpError) else None
                 task.stop_reason = "error"
         finally:
             if watch is not None:
@@ -1047,6 +1052,7 @@ class Registry:
             "status": task.status.value,
             "stop_reason": task.stop_reason,
             "error": task.error,
+            "failure": task.failure.model_dump(mode="json") if task.failure else None,
             "warnings": task.warnings,
             "files_changed": task.files_changed,
             "files_changed_total": task.files_changed_total,

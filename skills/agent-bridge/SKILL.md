@@ -56,4 +56,6 @@ Examples: "fix the README typo" → yourself. "Add a None check at line 120" →
 4. If review fails, `dispatch_task` again on the same `session_id` with a concrete problem list — at most three follow-ups, then fix it yourself and tell the user.
 5. Summarize the diff, leftover risk, and worker usage. `end_session` when the worker is no longer needed.
 
+ACP failures retain string `error` plus optional `failure`. If `failure.prompt_may_have_been_sent` is true or evidence is missing, do not blindly replay; false is not proof of safe retry. Bridge never auto-retries prompts. See SETUP.md for diagnostic fields.
+
 For optional retry deduplication, send a UUID `request_id` on the first `dispatch_task` call, then retry with the same ID and original arguments; keep `session_id` omitted if it was originally omitted. Adding an ID only on retry cannot deduplicate the first call. Identical retries reuse the task (`reused=true`) only within the same Bridge instance while the task is retained. Different arguments are rejected, and normal dispatch validation still applies. Restart, another instance, or task pruning loses the binding; this does not guarantee exactly-once worker side effects.

@@ -908,10 +908,26 @@ async def test_old_terminal_tasks_are_pruned(bridge_home, tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_default_server_remains_usable_after_long_idle(bridge_home, tmp_path):
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert registry._watchdog is None
+        registry._last_activity = time.monotonic() - 86400
+        assert registry.idle_exit_due() is False
+        dispatched = await registry.dispatch_task("fake", "after idle", cwd=str(tmp_path))
+        result = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert result["status"] == "completed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_idle_exit_due_predicate(bridge_home, tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     registry = Registry.create(bridge_home)
+    registry.config.server.idle_exit_sec = 30
     await registry.start()
     try:
         assert registry.idle_exit_due() is False

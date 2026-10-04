@@ -59,20 +59,37 @@ async def test_rpc_timeout_raises_clear_error(tmp_path):
         await adapter._rpc(asyncio.sleep(30), "session/new", session, timeout=0.05)
 
 
+def _fake_proc(returncode: int | None, exits_to: int | None = None) -> SimpleNamespace:
+    proc = SimpleNamespace(returncode=returncode)
+
+    async def wait() -> None:
+        if exits_to is None:
+            await asyncio.Event().wait()
+        else:
+            proc.returncode = exits_to
+
+    proc.wait = wait
+    return proc
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("error", "exit_code", "kind"), [
-    (RequestError.auth_required(), None, "auth_required"),
-    (RequestError.internal_error(), None, "protocol_error"),
-    (RequestError.internal_error(), 7, "protocol_error"),
-    (ConnectionError("Connection closed"), None, "connection_closed"),
-    (ConnectionError("Connection closed"), 7, "worker_exit"),
+@pytest.mark.parametrize(("error", "returncode", "exits_to", "kind", "exit_code"), [
+    (RequestError.auth_required(), None, None, "auth_required", None),
+    (RequestError.internal_error(), None, None, "protocol_error", None),
+    (RequestError.internal_error(), 7, None, "protocol_error", 7),
+    (ConnectionError("Connection closed"), None, None, "connection_closed", None),
+    (ConnectionError("Connection closed"), 7, None, "worker_exit", 7),
+    (ConnectionError("Connection closed"), None, 7, "worker_exit", 7),
 ])
-async def test_rpc_failure_keeps_operation_and_process_facts(tmp_path, monkeypatch, error, exit_code, kind):
+async def test_rpc_failure_keeps_operation_and_process_facts(
+    tmp_path, monkeypatch, error, returncode, exits_to, kind, exit_code
+):
     adapter = AcpAdapter(AgentConfig(name="echo", protocol="acp", command=["echo"]), tmp_path)
     monkeypatch.setattr(adapter, "shutdown", AsyncMock())
+    monkeypatch.setattr("agent_bridge.adapters.acp.EXIT_OBSERVE_SEC", 0.05)
     session = Session(session_id="sess_error", agent="echo", cwd=str(tmp_path))
     live = _Live()
-    live.proc = SimpleNamespace(returncode=exit_code)
+    live.proc = _fake_proc(returncode, exits_to)
     adapter._live[session.session_id] = live
 
     async def fail():
@@ -138,6 +155,17 @@ async def test_rpc_failure_redacts_and_bounds_untrusted_diagnostics(tmp_path, ca
     for secret in ("test-api-secret", "test-user", "test-pass", "test-query-secret", "test-cookie", "test-error-secret"):
         assert secret not in rendered
     assert len(failure.stderr_summary or "") <= 2048
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_native_session_skips_acp_cancel(tmp_path):
+    adapter = AcpAdapter(AgentConfig(name="echo", protocol="acp", command=["echo"]), tmp_path)
+    session = Session(session_id="sess_no_native", agent="echo", cwd=str(tmp_path))
+    live = _Live()
+    live.conn = SimpleNamespace(cancel=AsyncMock())
+    adapter._live[session.session_id] = live
+    await adapter.cancel(session)
+    live.conn.cancel.assert_not_called()
 
 
 @pytest.mark.asyncio

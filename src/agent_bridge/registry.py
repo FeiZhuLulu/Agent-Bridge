@@ -143,6 +143,7 @@ class Registry:
         self._done: dict[str, asyncio.Event] = {}
         self._idle: dict[str, asyncio.Task[None]] = {}
         self._bg: dict[str, asyncio.Task[None]] = {}
+        self._cancel_requested: set[str] = set()
         self._lock = asyncio.Lock()
         self._last_activity = time.monotonic()
         self._watchdog: asyncio.Task[None] | None = None
@@ -745,8 +746,12 @@ class Registry:
             if task.status not in TERMINAL_STATUSES:
                 task.stop_reason = result.stop_reason
                 if result.error:
-                    task.status = TaskStatus.failed
-                    task.error = result.error
+                    if task_id in self._cancel_requested:
+                        task.status = TaskStatus.cancelled
+                        task.stop_reason = "cancelled"
+                    else:
+                        task.status = TaskStatus.failed
+                        task.error = result.error
                 elif result.stop_reason == "cancelled":
                     task.status = TaskStatus.cancelled
                 else:
@@ -762,11 +767,18 @@ class Registry:
             else:
                 log.exception("task %s failed", task_id)
             if task.status not in TERMINAL_STATUSES:
-                task.status = TaskStatus.failed
-                task.error = str(exc)
-                task.failure = exc.failure if isinstance(exc, AcpError) else None
-                task.stop_reason = "error"
+                if task_id in self._cancel_requested:
+                    task.status = TaskStatus.cancelled
+                    task.stop_reason = "cancelled"
+                    task.error = None
+                    task.failure = None
+                else:
+                    task.status = TaskStatus.failed
+                    task.error = str(exc)
+                    task.failure = exc.failure if isinstance(exc, AcpError) else None
+                    task.stop_reason = "error"
         finally:
+            self._cancel_requested.discard(task_id)
             if watch is not None:
                 watch.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1163,6 +1175,7 @@ class Registry:
         task = self._require_task(task_id)
         if task.status in TERMINAL_STATUSES:
             return self._task_snapshot(task)
+        self._cancel_requested.add(task_id)
         session = self.sessions[task.session_id]
         adapter = self._adapters.get(session.session_id)
         if adapter is not None:

@@ -79,6 +79,8 @@ _MODEL_EFFORT_AGENTS = frozenset(
 # otherwise hang dispatch forever; prompt itself stays unbounded by design.
 RPC_TIMEOUT_SEC = 60.0
 CURSOR_MODEL_LIST_TIMEOUT_SEC = 30.0
+PROMPT_CANCEL_GRACE_SEC = 10.0
+EXIT_OBSERVE_SEC = 1.0
 
 # ACP ToolKind values that can change the workspace. Read-only kinds (read,
 # search, fetch, think, ...) also carry locations; counting them would report
@@ -499,6 +501,12 @@ def _pick_permission_option(options: Iterable[PermissionOption]) -> PermissionOp
     return ranked[0][1] if ranked else None
 
 
+async def _observe_exit(proc: asyncio.subprocess.Process | None) -> None:
+    if proc is not None and proc.returncode is None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=EXIT_OBSERVE_SEC)
+
+
 class _BridgeClient:
     def __init__(self, session_id: str, home: Path) -> None:
         self.session_id = session_id
@@ -698,12 +706,12 @@ class AcpAdapter(Adapter):
             return
         try:
             while True:
-                line = await proc.stderr.readline()
-                if not line:
+                chunk = await proc.stderr.read(65536)
+                if not chunk:
                     return
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    live.stderr_tail = f"{live.stderr_tail}\n{text}"[-STDERR_TAIL_LIMIT:]
+                live.stderr_tail = (
+                    live.stderr_tail + chunk.decode("utf-8", errors="replace")
+                )[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
 
@@ -756,6 +764,9 @@ class AcpAdapter(Adapter):
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 exc = TimeoutError(f"{self.agent.name} {what} timed out after {int(timeout)}s")
+            if isinstance(exc, (ConnectionError, EOFError)):
+                live = self._live.get(session.session_id)
+                await _observe_exit(live.proc if live else None)
             error = self._failure(exc, what, session)
             if (
                 isinstance(error, RpcTimeoutError)
@@ -1692,6 +1703,8 @@ class AcpAdapter(Adapter):
                 observed_effort=live.applied_effort,
             )
         except Exception as exc:
+            if isinstance(exc, (ConnectionError, EOFError)):
+                await _observe_exit(live.proc)
             raise self._failure(
                 exc, "session/prompt", session, prompt_may_have_been_sent=True,
             ) from None
@@ -1722,13 +1735,14 @@ class AcpAdapter(Adapter):
         live = self._live.get(session.session_id)
         if live is None or live.conn is None:
             return
-        try:
-            await asyncio.wait_for(live.conn.cancel(session_id=session.native_session_id), timeout=5)
-        except Exception:
-            log.warning("ACP cancel failed for %s", session.session_id, exc_info=True)
+        if session.native_session_id:
+            try:
+                await asyncio.wait_for(live.conn.cancel(session_id=session.native_session_id), timeout=5)
+            except Exception:
+                log.warning("ACP cancel failed for %s", session.session_id, exc_info=True)
         if live.prompt_task is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(live.prompt_task), timeout=10)
+                await asyncio.wait_for(asyncio.shield(live.prompt_task), timeout=PROMPT_CANCEL_GRACE_SEC)
                 return
             except (asyncio.CancelledError, Exception):
                 # CancelledError derives from BaseException and must be

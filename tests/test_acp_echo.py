@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -65,12 +66,15 @@ async def test_acp_echo_roundtrip(bridge_home, tmp_path):
         assert session.session_id not in table
 
 
-@pytest.mark.parametrize(("mode", "operation", "possibly_sent"), [
-    ("initialize", "initialize", False),
-    ("new", "session/new", False),
-    ("prompt_exit", "session/prompt", True),
+@pytest.mark.parametrize(("mode", "operation", "possibly_sent", "kind", "exit_code"), [
+    ("initialize", "initialize", False, "auth_required", None),
+    ("new", "session/new", False, "auth_required", None),
+    ("initialize_exit", "initialize", False, "worker_exit", 9),
+    ("prompt_exit", "session/prompt", True, "worker_exit", 7),
 ])
-async def test_acp_failures_survive_tools_and_restart(bridge_home, tmp_path, mode, operation, possibly_sent):
+async def test_acp_failures_survive_tools_and_restart(
+    bridge_home, tmp_path, mode, operation, possibly_sent, kind, exit_code
+):
     marker = tmp_path / "effects.txt"
     cfg = AgentConfig(
         name="echo", protocol="acp",
@@ -89,7 +93,8 @@ async def test_acp_failures_survive_tools_and_restart(bridge_home, tmp_path, mod
         failure = result["failure"]
         assert failure["operation"] == operation
         assert failure["prompt_may_have_been_sent"] is possibly_sent
-        assert failure["kind"] in ({"connection_closed", "worker_exit"} if possibly_sent else {"auth_required"})
+        assert failure["kind"] == kind
+        assert failure["exit_code"] == exit_code
         assert registry.check_task(task_id)["failure"] == failure
         assert registry.get_result(task_id)["failure"] == failure
         if possibly_sent:
@@ -107,6 +112,60 @@ async def test_acp_failures_survive_tools_and_restart(bridge_home, tmp_path, mod
         assert restored.check_task(task_id)["status"] == "failed"
     finally:
         await restored.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_of_cancel_ignoring_worker_ends_cancelled(bridge_home, tmp_path, monkeypatch):
+    marker = tmp_path / "effects.txt"
+    cfg = AgentConfig(
+        name="echo", protocol="acp",
+        command=[sys.executable, str(Path(__file__).with_name("echo_agent.py"))],
+        env={"BRIDGE_ECHO_FAILURE": "prompt_hang", "BRIDGE_ECHO_MARKER": str(marker)},
+    )
+    monkeypatch.setattr("agent_bridge.adapters.acp.PROMPT_CANCEL_GRACE_SEC", 0.5)
+    registry = Registry.create(bridge_home)
+    registry.config.agents["echo"] = cfg
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("echo", "hang", cwd=str(tmp_path))
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert marker.exists()
+        cancelled = await registry.cancel_task(dispatched["task_id"])
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["stop_reason"] == "cancelled"
+        assert cancelled["failure"] is None
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
+        assert waited["status"] == "cancelled"
+        assert registry.check_task(dispatched["task_id"])["failure"] is None
+        session = registry.sessions[dispatched["session_id"]]
+        assert session.pid is None
+        assert session.session_id not in read_json(pids_path(bridge_home), {})
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_stderr_flood_keeps_auth_diagnostics(bridge_home, tmp_path):
+    cfg = AgentConfig(
+        name="echo", protocol="acp",
+        command=[sys.executable, str(Path(__file__).with_name("echo_agent.py"))],
+        env={"BRIDGE_ECHO_FAILURE": "stderr_flood"},
+    )
+    registry = Registry.create(bridge_home)
+    registry.config.agents["echo"] = cfg
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("echo", "flood", cwd=str(tmp_path))
+        result = await registry.wait_task(dispatched["task_id"], timeout_sec=30)
+        assert result["timed_out"] is False
+        assert result["status"] == "failed"
+        assert result["failure"]["kind"] == "auth_required"
+        assert "authentication required" in result["failure"]["stderr_summary"]
+    finally:
+        await registry.stop()
 
 
 async def test_missing_worker_command_reports_unsent_failure(bridge_home, tmp_path):

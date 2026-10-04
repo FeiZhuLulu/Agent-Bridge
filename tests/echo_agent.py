@@ -36,7 +36,16 @@ class EchoAgent:
         self._conn = conn
 
     async def initialize(self, protocol_version: int, **kwargs: Any) -> InitializeResponse:
-        if os.environ.get("BRIDGE_ECHO_FAILURE") == "initialize":
+        failure = os.environ.get("BRIDGE_ECHO_FAILURE")
+        if failure == "initialize":
+            raise RequestError.auth_required()
+        if failure == "initialize_exit":
+            os._exit(9)
+        if failure == "stderr_flood":
+            sys.stderr.write("x" * (17 * 1024 * 1024))
+            sys.stderr.write("\nauthentication required\n")
+            sys.stderr.flush()
+            await asyncio.sleep(0.5)
             raise RequestError.auth_required()
         return InitializeResponse(
             protocol_version=protocol_version,
@@ -67,6 +76,9 @@ class EchoAgent:
             await asyncio.to_thread(_record_effect, os.environ["BRIDGE_ECHO_MARKER"])
             print("Connection closed", file=sys.stderr, flush=True)
             os._exit(7)
+        if os.environ.get("BRIDGE_ECHO_FAILURE") == "prompt_hang":
+            await asyncio.to_thread(_record_effect, os.environ["BRIDGE_ECHO_MARKER"])
+            await asyncio.Event().wait()
         text = ""
         for block in prompt:
             piece = getattr(block, "text", None)

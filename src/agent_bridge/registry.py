@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -96,6 +97,19 @@ STALL_CANCEL_GRACE_SEC = 15
 STATE_WRITE_ATTEMPTS = 5
 STATE_WRITE_RETRY_BASE_SEC = 0.05
 STATE_LOCK_TIMEOUT_SEC = 5.0
+# flush_state() waits for the saves issued at call time; write failures
+# degrade to a logged warning instead of raising into the caller.
+STATE_FLUSH_ATTEMPTS = 3
+# state.json is an index, not a data store: task message/result bodies are
+# persisted truncated so a long-lived Bridge keeps each write bounded.
+STATE_MESSAGE_MAX = 2000
+STATE_RESULT_TEXT_MAX = 6000
+# Live resident (ready) sessions kept before force-unloading the least
+# recently active ones. With idle_unload_sec=0 workers otherwise accumulate
+# a process each until the host runs out of memory.
+RESIDENT_SESSION_KEEP = 50
+# Persisted request_id bindings kept; bindings also drop with their task.
+REQUEST_KEEP_MAX = 1000
 
 
 def _new_id(prefix: str) -> str:
@@ -124,6 +138,11 @@ def _tail(text: str, limit: int = RESULT_TAIL) -> str:
     return encoded[-limit:].decode("utf-8", errors="ignore")
 
 
+def _request_fingerprint(request: tuple) -> str:
+    blob = json.dumps(list(request), ensure_ascii=False, default=str, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 class Registry:
     def __init__(
         self,
@@ -138,7 +157,9 @@ class Registry:
         self.config = config
         self.sessions: dict[str, Session] = {}
         self.tasks: dict[str, Task] = {}
-        self._requests: dict[str, tuple[tuple, str]] = {}
+        # request_id -> (request fingerprint, task_id). Fingerprints instead
+        # of request tuples so bindings can persist to state.json compactly.
+        self._requests: dict[str, tuple[str, str]] = {}
         self._adapters: dict[str, Adapter] = {}
         self._done: dict[str, asyncio.Event] = {}
         self._idle: dict[str, asyncio.Task[None]] = {}
@@ -157,7 +178,10 @@ class Registry:
         self._quota_cache = QuotaCache(config.quota.cache_sec)
         self._stopping = False
         self._pending_state: dict[str, list[dict]] | None = None
+        self._pending_gen = 0
         self._flush_task: asyncio.Task[None] | None = None
+        self._save_gen = 0
+        self._flushed_gen = 0
         self._state_error: Exception | None = None
 
     @classmethod
@@ -215,10 +239,33 @@ class Registry:
         merged.update(mine)
         return list(merged.values())
 
+    @staticmethod
+    def _state_task_row(task: Task) -> dict:
+        row = task.model_dump(mode="json")
+        # Full bodies already live in result files and transcripts; writing
+        # them into state.json again grew the payload without bound.
+        if len(row["message"]) > STATE_MESSAGE_MAX:
+            row["message"] = row["message"][:STATE_MESSAGE_MAX]
+        row["result_text"] = _tail(row["result_text"], STATE_RESULT_TEXT_MAX)
+        return row
+
     def _own_rows(self) -> dict[str, list[dict]]:
+        request_rows = [
+            {
+                "request_id": rid,
+                "task_id": tid,
+                "fingerprint": fp,
+                # Owner stamps let _merge_owned drop rows this instance pruned;
+                # without them pruned bindings linger on disk forever.
+                "owner_pid": self._owner_pid,
+                "owner_create_time": self._owner_create_time,
+            }
+            for rid, (fp, tid) in self._requests.items()
+        ][-REQUEST_KEEP_MAX:]
         return {
             "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
-            "tasks": [t.model_dump(mode="json") for t in self.tasks.values()],
+            "tasks": [self._state_task_row(t) for t in self.tasks.values()],
+            "requests": request_rows,
         }
 
     def _write_state(self, own: dict[str, list[dict]]) -> None:
@@ -245,6 +292,11 @@ class Registry:
                                 {row["task_id"]: row for row in own["tasks"]},
                                 "task_id",
                             ),
+                            "requests": self._merge_owned(
+                                disk.get("requests") or [],
+                                {row["request_id"]: row for row in own["requests"]},
+                                "request_id",
+                            ),
                         },
                     )
                 return
@@ -255,6 +307,8 @@ class Registry:
 
     def save(self) -> None:
         self._pending_state = self._own_rows()
+        self._save_gen += 1
+        self._pending_gen = self._save_gen
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -263,8 +317,10 @@ class Registry:
                 self._write_state(own)
             except Exception as exc:
                 self._pending_state = own
+                self._pending_gen = self._save_gen
                 self._state_error = exc
                 raise
+            self._flushed_gen = self._save_gen
             self._state_error = None
             return
         if self._flush_task is None or self._flush_task.done():
@@ -275,28 +331,53 @@ class Registry:
         # save() cannot observe a still-running flush task and skip creating
         # a new one after this loop has already decided to exit.
         while self._pending_state is not None:
-            own, self._pending_state = self._pending_state, None
+            own, gen = self._pending_state, self._pending_gen
+            self._pending_state = None
             try:
                 await asyncio.to_thread(self._write_state, own)
             except Exception as exc:
                 # Keep the newest snapshot. A later save or flush can retry it.
                 if self._pending_state is None:
                     self._pending_state = own
+                    self._pending_gen = gen
                 self._state_error = exc
                 log.exception("could not write state.json")
                 return
+            self._flushed_gen = gen
             self._state_error = None
 
     async def flush_state(self) -> None:
-        """Wait until every save() so far is on disk."""
-        task = self._flush_task
-        if self._pending_state is not None and (task is None or task.done()):
-            task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
-            self._flush_task = task
-        if task is not None and not task.done():
-            await task
-        if self._pending_state is not None:
-            raise RuntimeError("could not persist state.json") from self._state_error
+        """Wait until every save() issued so far is on disk.
+
+        Generation-scoped: a save() issued *after* this call does not block
+        it, so concurrent saves can no longer trigger the spurious
+        "could not persist state.json" raise. Persistent write failures
+        degrade to a logged warning — a broken disk must not kill
+        coordination; the next save() retries the same rows because
+        snapshots are cumulative.
+        """
+        target = self._save_gen
+        for _ in range(STATE_FLUSH_ATTEMPTS):
+            if self._flushed_gen >= target:
+                return
+            task = self._flush_task
+            if task is None or task.done():
+                if self._pending_state is None:
+                    break
+                task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
+                self._flush_task = task
+            try:
+                await task
+            except Exception as exc:  # flush loop itself died unexpectedly
+                self._state_error = exc
+                break
+        if self._flushed_gen < target:
+            log.warning(
+                "state.json persistence degraded (flushed %s of %s saves): %s",
+                self._flushed_gen,
+                target,
+                self._state_error,
+            )
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -394,6 +475,14 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
+        for raw in payload.get("requests") or []:
+            if not isinstance(raw, dict):
+                continue
+            rid = raw.get("request_id")
+            tid = raw.get("task_id")
+            fp = raw.get("fingerprint")
+            if rid and fp and tid in self.tasks:
+                self._requests[rid] = (fp, tid)
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
@@ -595,8 +684,8 @@ class Registry:
         request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested)
         async with self._lock:
             if request_id is not None and request_id in self._requests:
-                previous, task_id = self._requests[request_id]
-                if previous != request:
+                previous_fp, task_id = self._requests[request_id]
+                if previous_fp != _request_fingerprint(request):
                     raise ValueError("request_id is already bound to a different dispatch request")
                 task = self.tasks[task_id]
                 return {
@@ -658,7 +747,7 @@ class Registry:
             self._stamp_owner(task)
             self.tasks[task.task_id] = task
             if request_id is not None:
-                self._requests[request_id] = (request, task.task_id)
+                self._requests[request_id] = (_request_fingerprint(request), task.task_id)
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)
             self._prune()
@@ -930,6 +1019,41 @@ class Registry:
                 session.proc_state.value,
                 session.last_active_at,
             )
+        # Bound live resident sessions: the default idle_unload_sec=0 never
+        # unloads workers on its own, so `ready` sessions accumulate a worker
+        # process each until the host runs out of memory. Force-unload the
+        # least recently active ones beyond RESIDENT_SESSION_KEEP; they land
+        # as idle_unloaded and become regular prune candidates later.
+        resident = [
+            session
+            for session in self.sessions.values()
+            if session.proc_state == ProcState.ready
+            and session.session_id in self._adapters
+            and self._busy_task(session.session_id) is None
+        ]
+        resident.sort(key=lambda item: _session_last_active_ts(item.last_active_at))
+        for session in resident[: max(0, len(resident) - RESIDENT_SESSION_KEEP)]:
+            log.info("over-cap unload of resident session %s", session.session_id)
+            self._unload_over_cap(session.session_id)
+
+    def _unload_over_cap(self, session_id: str) -> None:
+        self._cancel_idle(session_id)
+
+        async def _unload() -> None:
+            session = self.sessions.get(session_id)
+            if session is None or self._busy_task(session_id):
+                return
+            adapter = self._adapters.get(session_id)
+            if adapter is not None:
+                try:
+                    await adapter.shutdown(session)
+                except Exception:
+                    log.exception("over-cap unload failed for %s", session_id)
+                    return
+            session.proc_state = ProcState.idle_unloaded
+            self.save()
+
+        self._idle[session_id] = asyncio.create_task(_unload(), name=f"overcap-{session_id}")
 
     def _prune_tasks(self) -> None:
         by_session: dict[str, list[Task]] = {}
@@ -1114,7 +1238,15 @@ class Registry:
                 await asyncio.wait_for(event.wait(), timeout=timeout_sec)
             except TimeoutError:
                 return {"timed_out": True, **self._task_snapshot(self.tasks[task_id])}
-        return {"timed_out": False, **self._task_snapshot(self.tasks[task_id], include_result=True)}
+        if task.status in TERMINAL_STATUSES:
+            # A terminal answer must also be on disk, not merely queued
+            # behind the background flusher.
+            await self.flush_state()
+        return {
+            "timed_out": False,
+            "persisted": self._flushed_gen >= self._save_gen,
+            **self._task_snapshot(self.tasks[task_id], include_result=True),
+        }
 
     def check_task(self, task_id: str) -> dict:
         return self._task_snapshot(self._require_task(task_id))

@@ -404,14 +404,76 @@ async def test_failed_state_flush_keeps_snapshot_and_reports_failure(
     monkeypatch.setattr(registry, "_write_state", fail_once)
     registry.save()
 
-    with pytest.raises(RuntimeError, match=r"could not persist state\.json"):
-        await registry.flush_state()
-    assert registry._pending_state is not None
-
+    # flush_state degrades instead of raising: the failed write is retried
+    # by the same call (STATE_FLUSH_ATTEMPTS) and the snapshot lands.
     await registry.flush_state()
     assert registry._pending_state is None
     payload = read_json(state_path(bridge_home), {})
     assert {row["session_id"] for row in payload["sessions"]} == {"sess_retry"}
+
+
+@pytest.mark.asyncio
+async def test_persistent_state_write_failure_degrades_flush_without_raising(
+    bridge_home, tmp_path, monkeypatch
+):
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_dead_disk"] = Session(
+        session_id="sess_dead_disk",
+        agent="fake",
+        cwd=str(tmp_path),
+    )
+    original_write = registry._write_state
+
+    def fail_always(own):
+        raise PermissionError(5, "synthetic sharing/access failure")
+
+    monkeypatch.setattr(registry, "_write_state", fail_always)
+    registry.save()
+
+    # Never raises: a broken disk must not kill the caller. The newest
+    # snapshot is kept for a later retry and surfaced via _state_error.
+    await registry.flush_state()
+    assert registry._state_error is not None
+    assert registry._pending_state is not None
+
+    monkeypatch.setattr(registry, "_write_state", original_write)
+    await registry.flush_state()
+    assert registry._pending_state is None
+    assert registry._state_error is None
+    payload = read_json(state_path(bridge_home), {})
+    assert {row["session_id"] for row in payload["sessions"]} == {"sess_dead_disk"}
+
+
+@pytest.mark.asyncio
+async def test_flush_state_ignores_saves_issued_during_the_wait(
+    bridge_home, tmp_path, monkeypatch
+):
+    """A save() landing mid-flush must not trip a spurious persist error."""
+    import threading
+
+    registry = Registry.create(bridge_home)
+    registry.sessions["sess_race"] = Session(
+        session_id="sess_race",
+        agent="fake",
+        cwd=str(tmp_path),
+    )
+    original_write = registry._write_state
+    started = threading.Event()
+    gate = threading.Event()
+
+    def slow_write(own):
+        started.set()
+        gate.wait(10)
+        original_write(own)
+
+    monkeypatch.setattr(registry, "_write_state", slow_write)
+    registry.save()
+    flush = asyncio.create_task(registry.flush_state())
+    await asyncio.to_thread(started.wait, 10)  # first write in-flight, blocked
+    registry.save()  # lands while flush_state is awaiting the first write
+    gate.set()
+    await asyncio.wait_for(flush, timeout=10)  # must not raise
+    assert registry._flushed_gen >= 1
 
 
 def test_state_write_retries_bounded_permission_errors(bridge_home, monkeypatch):

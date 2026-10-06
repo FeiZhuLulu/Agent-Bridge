@@ -341,6 +341,78 @@ async def test_sibling_instances_do_not_clobber_state(bridge_home, tmp_path, mon
         await a.stop()
 
 
+@pytest.mark.asyncio
+async def test_start_sweeps_orphan_result_files(bridge_home, monkeypatch):
+    """A crash between the result write and the final save() leaves a file
+    no task row references (A1). Files of live sibling tasks are kept."""
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    foreign = Task(
+        task_id="task_foreign",
+        session_id="sess_foreign",
+        agent="fake",
+        message="x",
+        cwd=str(Path.cwd()),
+        status=TaskStatus.completed,
+        finished_at=iso(),
+        owner_pid=9999,
+        owner_create_time=1.0,
+    )
+    atomic_write_json(
+        state_path(bridge_home),
+        {"sessions": [], "tasks": [foreign.model_dump(mode="json")]},
+    )
+    results = bridge_home / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    (results / "task_orphan.txt").write_text("orphan", encoding="utf-8")
+    (results / "task_foreign.txt").write_text("kept", encoding="utf-8")
+
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert not (results / "task_orphan.txt").exists()
+        assert (results / "task_foreign.txt").read_text(encoding="utf-8") == "kept"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_reads_sibling_task_from_state(bridge_home, monkeypatch):
+    """F5: a second instance answers read calls from the persisted row.
+    Lifecycle calls (wait/cancel) stay owner-only."""
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    foreign = Task(
+        task_id="task_remote",
+        session_id="sess_remote",
+        agent="fake",
+        message="done elsewhere",
+        cwd=str(Path.cwd()),
+        status=TaskStatus.completed,
+        result_text="remote result",
+        finished_at=iso(),
+        owner_pid=9999,
+        owner_create_time=1.0,
+    )
+    atomic_write_json(
+        state_path(bridge_home),
+        {"sessions": [], "tasks": [foreign.model_dump(mode="json")]},
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert "task_remote" not in registry.tasks
+        snap = registry.check_task("task_remote")
+        assert snap["status"] == "completed"
+        assert snap["from_state"] is True
+        result = registry.get_result("task_remote")
+        assert result["result_text"] == "remote result"
+        with pytest.raises(KeyError, match="unknown task"):
+            await registry.wait_task("task_remote", timeout_sec=0.1)
+        with pytest.raises(KeyError, match="unknown task"):
+            registry._require_task("task_remote")
+    finally:
+        await registry.stop()
+
+
 def test_sibling_state_updates_are_serialized(bridge_home, tmp_path, monkeypatch):
     monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
     original_read = read_json_strict

@@ -151,6 +151,19 @@ def test_worker_activity_clock(bridge_home):
     assert worker_silence_sec("sess_act", bridge_home) is None
 
 
+def test_read_events_tolerates_torn_utf8_tail(bridge_home):
+    """A crash mid-write must not break every later read (H-09): the torn
+    tail is skipped like any other malformed line, good events survive."""
+    path = transcript_path("sess_torn", bridge_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    good = json.dumps({"type": "message_chunk", "data": {"text": "ok"}}).encode("utf-8")
+    path.write_bytes(good + b"\n" + b'{"type": "message_chunk", "data": {"text": "\xff\xfe')
+
+    events = read_events("sess_torn", bridge_home)
+
+    assert [event["data"]["text"] for event in events] == ["ok"]
+
+
 def test_parse_cache_is_bounded(bridge_home):
     transcript._parse_cache.clear()
     for index in range(6):

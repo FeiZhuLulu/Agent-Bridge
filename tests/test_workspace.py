@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from agent_bridge.workspace import (
     _root_prefix_len,
     collect_update_paths,
@@ -16,8 +18,9 @@ def test_snapshot_sees_new_file_and_ignores_sessions(tmp_path: Path):
     sessions = tmp_path / ".sessions"
     sessions.mkdir()
     (sessions / "log.jsonl").write_text("{}\n", encoding="utf-8")
-    changed = merge_files_changed(tmp_path, [], before)
+    changed, outside = merge_files_changed(tmp_path, [], before)
     assert changed == ["smoke.txt"]
+    assert outside == []
 
 
 def test_merges_protocol_paths_as_cwd_relative(tmp_path: Path):
@@ -25,15 +28,19 @@ def test_merges_protocol_paths_as_cwd_relative(tmp_path: Path):
     target = tmp_path / "src" / "app.py"
     target.parent.mkdir()
     target.write_text("print(1)\n", encoding="utf-8")
-    changed = merge_files_changed(tmp_path, [str(target)], before)
+    changed, outside = merge_files_changed(tmp_path, [str(target)], before)
     assert changed == ["src/app.py"]
+    assert outside == []
 
 
 def test_drops_cwd_dot_and_root_paths(tmp_path: Path):
     before = snapshot_workspace(tmp_path)
     (tmp_path / "ok.txt").write_text("x\n", encoding="utf-8")
-    changed = merge_files_changed(tmp_path, [".", str(tmp_path), str(tmp_path / "ok.txt")], before)
+    changed, outside = merge_files_changed(
+        tmp_path, [".", str(tmp_path), str(tmp_path / "ok.txt")], before
+    )
     assert changed == ["ok.txt"]
+    assert outside == []
 
 
 def test_snapshot_skips_build_dirs_and_tracks_changes(tmp_path: Path):
@@ -56,11 +63,11 @@ def test_snapshot_skips_build_dirs_and_tracks_changes(tmp_path: Path):
     # A same-length rewrite can keep both size and mtime_ns on a coarse
     # filesystem clock, so the payload length has to change.
     (tmp_path / "src" / "a.py").write_text("print(22)\n", encoding="utf-8")
-    assert merge_files_changed(tmp_path, [], before) == ["src/a.py"]
+    assert merge_files_changed(tmp_path, [], before)[0] == ["src/a.py"]
 
     (nested / "b.txt").unlink()
     (tmp_path / "src" / "c.py").write_text("print(3)\n", encoding="utf-8")
-    changed = set(merge_files_changed(tmp_path, [], before))
+    changed = set(merge_files_changed(tmp_path, [], before)[0])
     assert "nested/deep/b.txt" in changed
     assert "src/c.py" in changed
     assert "src/a.py" in changed
@@ -92,3 +99,60 @@ def test_collect_nested_tool_paths():
     )
     assert "README.md" in found
     assert "src/main.py" in found
+
+
+def test_classify_splits_inside_and_outside_paths(tmp_path: Path):
+    from agent_bridge.workspace import classify_changed_paths
+
+    inside, outside = classify_changed_paths(
+        tmp_path,
+        [
+            "src/ok.py",
+            "../escape.txt",
+            str(tmp_path.parent / "sibling.py"),
+            str(tmp_path / "in.txt"),
+        ],
+    )
+    assert inside == ["src/ok.py", "in.txt"]
+    assert len(outside) == 2
+    assert not any(".." in p for p in inside)
+    # E3 regression: ../escape.txt must NOT fold to escape.txt inside cwd.
+    assert "escape.txt" not in inside
+
+
+def test_dotdot_absolute_outside_goes_to_outside_list(tmp_path: Path):
+    inside, outside = merge_files_changed(
+        tmp_path, [os.path.join("..", "..", "far_away.txt")], {}
+    )
+    assert inside == []
+    assert outside and outside[0].endswith("far_away.txt")
+
+
+def test_bridge_dirs_are_skipped_in_snapshot(tmp_path: Path):
+    for d in (".agent-bridge", ".codex", ".claude"):
+        sub = tmp_path / d
+        sub.mkdir()
+        (sub / "state.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "real.py").write_text("x\n", encoding="utf-8")
+    found = set(snapshot_workspace(tmp_path))
+    # .agent-bridge churn is bridge bookkeeping; .codex/.claude inside the
+    # project hold legitimate config (e.g. .codex/config.toml) and must be
+    # reported (review: worker state dirs live under home, outside cwd).
+    assert found == {"real.py", ".codex/state.json", ".claude/state.json"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction repro")
+def test_junction_inside_cwd_is_not_traversed(tmp_path: Path):
+    import subprocess
+
+    target = tmp_path.parent / "junction_target"
+    target.mkdir(exist_ok=True)
+    (target / "foreign.txt").write_text("out\n", encoding="utf-8")
+    link = tmp_path / "link"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        check=True,
+        capture_output=True,
+    )
+    snap = snapshot_workspace(tmp_path)
+    assert "link/foreign.txt" not in snap

@@ -172,3 +172,39 @@ def test_parse_cache_is_bounded(bridge_home):
         flush_session(session_id, bridge_home)
         read_events(session_id, bridge_home)
     assert len(transcript._parse_cache) <= 4
+
+
+def test_only_worker_events_reset_the_activity_clock(bridge_home, monkeypatch):
+    """H-16: bridge-side bookkeeping must not count as worker aliveness."""
+    import time as _time
+
+    path = transcript_path("sess_gate", bridge_home)
+    with transcript._buffers_lock:
+        transcript._activity[path] = _time.monotonic() - 10.0
+    append_event("sess_gate", "prompt_sent", {"text": "hi"}, bridge_home)
+    append_event("sess_gate", "permission", {"decision": "selected"}, bridge_home)
+    append_event("sess_gate", "turn_end", {"stop_reason": "x"}, bridge_home)
+    silence = worker_silence_sec("sess_gate", bridge_home)
+    assert silence is not None and silence >= 9.0
+    append_event("sess_gate", "message_chunk", {"text": "worker speaks"}, bridge_home)
+    silence = worker_silence_sec("sess_gate", bridge_home)
+    assert silence is not None and silence < 2.0
+    append_event("sess_gate", "thought_chunk", {"text": "..."}, bridge_home)
+    assert (worker_silence_sec("sess_gate", bridge_home) or 0) < 2.0
+    forget_worker_activity("sess_gate", bridge_home)
+
+
+def test_forget_session_drops_caches_and_transcript_file(bridge_home):
+    """H-02: session prune must delete the transcript, not just the result."""
+    append_event("sess_forget", "message_chunk", {"text": "one"}, bridge_home)
+    flush_session("sess_forget", bridge_home)
+    path = transcript_path("sess_forget", bridge_home)
+    assert path.is_file()
+    mark_worker_activity("sess_forget", bridge_home)
+    read_events("sess_forget", bridge_home)
+    transcript.forget_session("sess_forget", bridge_home)
+    assert not path.exists()
+    assert worker_silence_sec("sess_forget", bridge_home) is None
+    with transcript._buffers_lock:
+        assert path not in transcript._parse_cache
+        assert path not in transcript._buffers

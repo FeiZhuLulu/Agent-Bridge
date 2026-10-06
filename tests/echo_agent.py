@@ -65,6 +65,10 @@ class EchoAgent:
     async def load_session(self, cwd: str, session_id: str, mcp_servers=None, **kwargs: Any) -> None:
         if os.environ.get("BRIDGE_ECHO_FAILURE") == "load":
             raise RequestError.auth_required()
+        if os.environ.get("BRIDGE_ECHO_FAILURE") == "load_internal":
+            # Generic failure (not "unavailable"): Bridge should fall back to
+            # session/new and mark the switch visibly (H-05).
+            raise RequestError(-32603, "native session data corrupt")
         self._session_id = session_id
         self._ready = True
         return None

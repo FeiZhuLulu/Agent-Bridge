@@ -1629,6 +1629,7 @@ class AcpAdapter(Adapter):
                 return
         live = await self._spawn(session)
         native = session.native_session_id
+        load_failure: Exception | None = None
         if native and self.can_revive():
             use_resume = self.agent.name in _RESUME_AGENTS or (
                 self.agent.name == "dsh" and live.dsh_native_acp
@@ -1647,6 +1648,7 @@ class AcpAdapter(Adapter):
                 raise
             except Exception as exc:
                 log.warning("session/load failed for %s; creating a new session: %s", session.session_id, _redact_diagnostic(str(exc)))
+                load_failure = exc
             else:
                 self._remember_config_options(live, revived)
                 await self._sync_selection(live, session)
@@ -1656,7 +1658,28 @@ class AcpAdapter(Adapter):
             "session/new",
             session,
         )
+        # Adopt the new id before any fallible bookkeeping: a transcript write
+        # failure must not leave the session pointing at the rejected id.
         session.native_session_id = created.session_id
+        if load_failure is not None:
+            # H-05: the coordinator must see that its session lost context.
+            # pending_warnings lands on the next turn's task.warnings; the
+            # transcript event keeps the switch auditable after the fact. Both
+            # are emitted only once session/new has actually succeeded — a
+            # failed fallback is a failed task, not a recreation.
+            live.pending_warnings.append(
+                f"session/load failed ({type(load_failure).__name__}); started a new worker "
+                "session — prior conversation context is lost"
+            )
+            append_event(
+                session.session_id,
+                "session_recreated",
+                {
+                    "old_native_session_id": native,
+                    "reason": _redact_diagnostic(str(load_failure)),
+                },
+                self.home,
+            )
         self._remember_config_options(live, created)
         if self.agent.name == "grok":
             # Grok /new applies the _meta reasoningEffort but always lands on

@@ -1417,7 +1417,7 @@ async def test_workspace_snapshot_runs_off_loop(bridge_home, tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_files_changed_is_capped(bridge_home, tmp_path, monkeypatch):
     paths = [f"gen/{i:04d}.txt" for i in range(500)]
-    monkeypatch.setattr("agent_bridge.registry.merge_files_changed", lambda *args, **kwargs: list(paths))
+    monkeypatch.setattr("agent_bridge.registry.merge_files_changed", lambda *args, **kwargs: (list(paths), []))
     work = tmp_path / "work"
     work.mkdir()
     registry = Registry.create(bridge_home)
@@ -1981,5 +1981,53 @@ async def test_stall_cancel_finishes_after_turn_returns(bridge_home, tmp_path, m
         assert not cancel_finished.is_set()
         await asyncio.sleep(0.8)
         assert cancel_finished.is_set()
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_sec_caps_chatty_turn(bridge_home, tmp_path, monkeypatch):
+    """H-16: a worker emitting worker-type events forever still hits the cap."""
+    import asyncio as _asyncio
+
+    async def chatty_turn(self, session, task):
+        from agent_bridge.transcript import append_event
+
+        for _ in range(30):
+            append_event(session.session_id, "thought_chunk", {"text": "..."}, self.home)
+            await _asyncio.sleep(0.1)
+        return TurnResult(text="done")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", chatty_turn)
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].turn_timeout_sec = 1
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "chatty", cwd=str(tmp_path))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
+        assert waited["status"] == "failed"
+        assert waited["stop_reason"] == "timed_out"
+        assert "turn_timeout_sec" in (waited["error"] or "")
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_still_stalls(bridge_home, tmp_path, monkeypatch):
+    """Silence semantics: with no worker events at all, stall_timeout fires."""
+
+    async def silent_turn(self, session, task):
+        await asyncio.sleep(10)
+        return TurnResult(text="done")
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", silent_turn)
+    registry = Registry.create(bridge_home)
+    registry.config.agents["fake"].stall_timeout_sec = 1
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "quiet", cwd=str(tmp_path))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
+        assert waited["status"] == "failed"
+        assert waited["stop_reason"] == "stalled"
     finally:
         await registry.stop()

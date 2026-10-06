@@ -288,7 +288,13 @@ class AgyAdapter(Adapter):
                 if text:
                     tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
-            log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+            log.warning(
+                "stderr drain aborted for %s (line over %s MiB or stream closed); "
+                "later stderr evidence is lost",
+                session_id,
+                STDIO_LIMIT // (1024 * 1024),
+                exc_info=True,
+            )
             return tail
 
     async def _write_prompt(self, proc: asyncio.subprocess.Process, message: str) -> None:
@@ -345,7 +351,14 @@ class AgyAdapter(Adapter):
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"antigravity emitted a stdout line longer than "
+                        f"{STDIO_LIMIT // (1024 * 1024)} MiB (asyncio stream limit); "
+                        "the turn cannot continue"
+                    ) from exc
                 if not line:
                     break
                 raw = line.decode("utf-8", errors="replace").rstrip()

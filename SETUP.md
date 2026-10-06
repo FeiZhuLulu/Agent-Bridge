@@ -505,7 +505,7 @@ config_overrides = [
 ]
 ```
 
-Keep secrets out of overrides: a key can only be referenced via `env_key` (command-line arguments are visible in the process list). Task-level `model`/`effort` are appended after overrides, so they keep priority.
+Keep secrets out of overrides: a key can only be referenced via `env_key` (command-line arguments are visible in the process list). Since Codex clears the MCP child environment, a variable named by `env_key` must also be listed in the host's `env_vars` / `[env.inherit]` like any other worker credential. Task-level `model`/`effort` are appended after overrides, so they keep priority.
 
 Default approval is `--approve-for-me` (auto review + workspace-write). `--yolo` is only used when `[agents.codex] session_meta = { yolo = true }`. Prompt is UTF-8 stdin (`-`), never an argv string.
 

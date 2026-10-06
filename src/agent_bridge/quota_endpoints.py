@@ -85,7 +85,7 @@ def _codex(cfg: AgentConfig, env: Mapping[str, str]) -> str | None:
     if any(arg.split("=", 1)[0] in ("--oss", "--local-provider") for arg in cfg.command):
         return CUSTOM_ENDPOINT
     override = _option(cfg.command, "-c", "--config")
-    if override is not None:
+    if override is not None or cfg.config_overrides:
         # CLI overrides are arbitrary TOML paths. Do not build a second Codex
         # configuration resolver merely to guess which account they select.
         return "quota lookup is unsupported with Codex CLI configuration overrides"

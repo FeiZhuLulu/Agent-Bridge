@@ -134,7 +134,11 @@ def test_bridge_dirs_are_skipped_in_snapshot(tmp_path: Path):
         sub.mkdir()
         (sub / "state.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / "real.py").write_text("x\n", encoding="utf-8")
-    assert set(snapshot_workspace(tmp_path)) == {"real.py"}
+    found = set(snapshot_workspace(tmp_path))
+    # .agent-bridge churn is bridge bookkeeping; .codex/.claude inside the
+    # project hold legitimate config (e.g. .codex/config.toml) and must be
+    # reported (review: worker state dirs live under home, outside cwd).
+    assert found == {"real.py", ".codex/state.json", ".claude/state.json"}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction repro")

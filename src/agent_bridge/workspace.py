@@ -33,12 +33,13 @@ SKIP_DIR_NAMES = {
     ".parcel-cache",
     ".svelte-kit",
     ".terraform",
-    # Bridge/worker bookkeeping dirs. A worker CLI keeps its own state under
-    # these and churns them every turn; counting that as project changes
-    # misattributes Bridge-internal writes to the worker (H-06).
+    # Bridge bookkeeping dir. A nested bridge home under the project churns
+    # every turn; counting that as project changes misattributes Bridge-
+    # internal writes to the worker (H-06). `.codex`/`.claude` inside a
+    # project are NOT skipped: they hold legitimate project config (e.g.
+    # .codex/config.toml) whose edits must be reported; each worker's own
+    # state dirs live under its home, outside the workspace cwd.
     ".agent-bridge",
-    ".codex",
-    ".claude",
 }
 
 _PATH_KEYS = (
@@ -122,7 +123,7 @@ def classify_changed_paths(
         if not raw or not isinstance(raw, str):
             continue
         rel, out = _classify_path(raw, root)
-        if rel and not _ignored_rel(rel, reported=True) and rel not in seen_in:
+        if rel and not _ignored_rel(rel) and rel not in seen_in:
             seen_in.add(rel)
             inside.append(rel)
         elif out and out not in seen_out:
@@ -185,15 +186,8 @@ def _root_prefix_len(root: str) -> int:
     return len(root.rstrip(os.sep)) + 1
 
 
-# Reported paths skip less than the disk snapshot: .codex/.claude churn is
-# filtered from the snapshot walker, but a path a worker *explicitly reports*
-# there is an intentional project-config edit and must surface (review).
-_REPORTED_SKIP = SKIP_DIR_NAMES - {".codex", ".claude"}
-
-
-def _ignored_rel(rel: str, *, reported: bool = False) -> bool:
-    names = _REPORTED_SKIP if reported else SKIP_DIR_NAMES
-    return any(part in names for part in rel.split("/")[:-1])
+def _ignored_rel(rel: str) -> bool:
+    return any(part in SKIP_DIR_NAMES for part in rel.split("/")[:-1])
 
 
 def collect_update_paths(obj: object, into: set[str]) -> None:

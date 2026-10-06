@@ -221,6 +221,7 @@ def build_codex_exec_argv(
     effort: str | None = None,
     resume_id: str | None = None,
     yolo: bool = False,
+    config_overrides: Sequence[str] = (),
 ) -> list[str]:
     cmd = [
         *command,
@@ -241,6 +242,9 @@ def build_codex_exec_argv(
         "-C",
         cwd,
     ]
+    for item in config_overrides:
+        # Earlier than the task's -m / effort -c so per-dispatch values win.
+        cmd += ["-c", item]
     if model:
         cmd += ["-m", model]
     mapped = codex_effort(effort)

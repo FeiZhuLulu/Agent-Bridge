@@ -126,6 +126,10 @@ class AgentConfig(BaseModel):
     # privilege), "allow_always" persists the grant inside the worker,
     # "deny" cancels every request.
     permission_policy: str = "allow_once"
+    # Codex only: each item is passed as `codex exec -c <item>` (raw TOML
+    # key=value). No key validation, no filtering, user config.toml is
+    # never read.
+    config_overrides: list[str] = Field(default_factory=list)
 
 
 class EnvConfig(BaseModel):

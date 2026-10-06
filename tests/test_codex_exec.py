@@ -87,6 +87,66 @@ def test_build_argv_resume_and_yolo():
     assert cmd[-3:] == ["resume", "thread-1", "-"]
 
 
+def test_build_argv_config_overrides_sit_before_task_flags():
+    overrides = [
+        'model_provider="my-gateway"',
+        'model_providers.my-gateway.base_url="https://example.com/v1"',
+    ]
+    cmd = build_codex_exec_argv(
+        ["codex.exe"],
+        cwd=r"E:\proj",
+        model="gpt-5.6-sol",
+        effort="high",
+        config_overrides=overrides,
+    )
+    assert "--ignore-user-config" in cmd
+    # Each override is its own `-c <item>` pair, in order, after `-C <cwd>`
+    # and before the task-level `-m`/effort so those still win.
+    first = cmd.index(overrides[0])
+    assert cmd[first - 1] == "-c"
+    assert cmd[cmd.index(overrides[1]) - 1] == "-c"
+    assert cmd.index("-C") < first < cmd.index(overrides[1]) < cmd.index("-m")
+    assert cmd.index(overrides[1]) < cmd.index('model_reasoning_effort="high"')
+    assert cmd[-1] == "-"
+
+
+def test_build_argv_empty_overrides_unchanged():
+    base = build_codex_exec_argv(
+        ["codex.exe"], cwd=r"E:\proj", model="gpt-5.6-sol", effort="high"
+    )
+    with_empty = build_codex_exec_argv(
+        ["codex.exe"],
+        cwd=r"E:\proj",
+        model="gpt-5.6-sol",
+        effort="high",
+        config_overrides=[],
+    )
+    assert with_empty == base
+
+
+def test_adapter_config_overrides_reach_argv(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.adapters.codex.resolve_codex_command",
+        lambda *args, **kwargs: ["codex.exe"],
+    )
+    adapter = CodexAdapter(
+        AgentConfig(
+            name="codex",
+            protocol="codex",
+            command=["codex"],
+            config_overrides=['model_provider="my-gateway"'],
+        ),
+        tmp_path,
+    )
+    session = Session(session_id="s1", agent="codex", cwd=str(tmp_path))
+    cmd = adapter._build_cmd(
+        session,
+        Task(task_id="t1", session_id="s1", agent="codex", message="hi", cwd=str(tmp_path)),
+    )
+    assert 'model_provider="my-gateway"' in cmd
+    assert cmd[cmd.index('model_provider="my-gateway"') - 1] == "-c"
+
+
 def test_jsonl_takes_last_agent_message_and_requires_turn_completed():
     state = CodexTurnState()
     apply_codex_event(state, {"type": "thread.started", "thread_id": "t1"})

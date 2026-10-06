@@ -508,60 +508,20 @@ def install_host_env(config: EnvConfig, *, base: Mapping[str, str] | None = None
     return status
 
 
-# Glob patterns for credential-shaped env keys a worker subprocess must
-# never inherit implicitly. LLM vendor keys are intentionally NOT blanket-
-# denied: they are on DEFAULT_INHERIT_KEYS because a worker CLI needs one
-# configured key to run. Anything a worker legitimately needs can still be
-# passed explicitly (``env.set``, agent ``env``, or ``env.inherit``).
-DEFAULT_ENV_DENY_PATTERNS: tuple[str, ...] = (
-    "AWS_*",
-    "AZURE_*",
-    "GCP_*",
-    "GOOGLE_*",
-    "GCLOUD_*",
-    "KUBE*",
-    "DOCKER_*",
-    "VAULT_*",
-    "SSH_*",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITLAB_*",
-    "NPM_*",
-    "PYPI_*",
-    "TWINE_*",
-    "NUGET_*",
-    "CARGO_*",
-    "*_SECRET",
-    "*_SECRET_*",
-    "*_PASSWORD",
-    "*_PASSWORD_*",
-    "*_CREDENTIALS",
-    "*_PRIVATE_KEY*",
-    "DATABASE_URL",
-    "REDIS_URL",
-    "*_DSN",
-    "OPENAI_*",
-    "ANTHROPIC_*",
-    "SENTRY_*",
-    "DATADOG_*",
-)
-
-
 def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None) -> bool:
-    """True when the env deny rules would strip ``key`` from a worker env.
+    """True when the user's ``env.deny`` globs would strip ``key`` from a worker env.
 
-    Shared by _apply_env_deny and injection points downstream of it (e.g. the
-    DSH launch helper pulling credential refs from Windows env) so a denied
-    key cannot re-enter through another code path.
+    There is no built-in denylist: a default deny hid AWS_*/SSH_*/etc. from
+    workers that legitimately need them (Bedrock/Vertex auth, git-over-ssh),
+    so only the operator's configured globs strip keys. Shared by
+    _apply_env_deny and injection points downstream of it (e.g. the DSH
+    launch helper pulling credential refs from Windows env) so a denied key
+    cannot re-enter through another code path.
     """
     if explicit and key in explicit:
         return False
     user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
-    if user_deny and any(fnmatch.fnmatchcase(key, pat) for pat in user_deny):
-        return True
-    if key in set(cfg.inherit):
-        return False
-    return any(fnmatch.fnmatchcase(key, pat) for pat in DEFAULT_ENV_DENY_PATTERNS)
+    return any(fnmatch.fnmatchcase(key, pat) for pat in user_deny)
 
 
 def _apply_env_deny(
@@ -570,14 +530,12 @@ def _apply_env_deny(
     cfg: EnvConfig,
     explicit: set[str],
 ) -> None:
-    """Strip credential-shaped keys a worker never explicitly asked for.
+    """Strip env keys matching the user's ``env.deny`` globs.
 
     Explicit intent always wins: a key assigned through ``env.set`` or the
-    agent's own ``env`` block survives any pattern. The built-in denylist
-    additionally yields to keys named in ``env.inherit`` (the operator opted
-    those in by name); user ``env.deny`` patterns apply on top and only lose
-    to explicit ``set``/agent ``env`` values. Denied keys are recorded as
-    ``origin[key] = "denied"`` so describe_env can tell withheld from absent.
+    agent's own ``env`` block survives any pattern. Denied keys are recorded
+    as ``origin[key] = "denied"`` so describe_env can tell withheld from
+    absent.
     """
     for key in list(env):
         if denied_by_policy(key, cfg, explicit):

@@ -132,9 +132,8 @@ class EnvConfig(BaseModel):
     set: dict[str, str] = Field(default_factory=dict)
     proxy_url: str | None = None
     no_proxy: str | None = None
-    # Extra glob patterns of env keys a worker subprocess must never see.
-    # Applies on top of the built-in credential denylist (see worker_env);
-    # keys explicitly assigned via ``set``/agent ``env`` always survive.
+    # Glob patterns of env keys a worker subprocess must never see; keys
+    # explicitly assigned via ``set``/agent ``env`` always survive.
     deny: list[str] = Field(default_factory=list)
 
 

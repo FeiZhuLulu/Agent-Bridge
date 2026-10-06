@@ -203,55 +203,45 @@ def _env(base, *, config=None, overrides=None):
     )
 
 
-def test_worker_env_default_deny_strips_credential_keys():
+def test_worker_env_no_default_deny_but_user_deny_applies():
     env = _env(
         {
-            "AWS_SECRET_ACCESS_KEY": "s3cr3t",
-            "AWS_ACCESS_KEY_ID": "AKIA123",
-            "GITHUB_TOKEN": "ghp_leak",
-            "NPM_TOKEN": "npm_leak",
+            "AWS_REGION": "us-east-1",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
             "DATABASE_URL": "postgres://u:p@db",
             "HOME": "/h",
-            "PATH": "/bin",
         }
     )
-    assert "AWS_SECRET_ACCESS_KEY" not in env
-    assert "AWS_ACCESS_KEY_ID" not in env
-    assert "GITHUB_TOKEN" not in env
-    assert "NPM_TOKEN" not in env
-    assert "DATABASE_URL" not in env
-    assert env["HOME"] == "/h"
-    assert env["PATH"] == "/bin"
-
-
-def test_worker_env_default_deny_keeps_inherited_llm_keys():
+    assert env["AWS_REGION"] == "us-east-1"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+    assert env["DATABASE_URL"] == "postgres://u:p@db"
+    cfg = EnvConfig(deny=["AWS_*"])
     env = _env(
-        {"KIMI_API_KEY": "k", "OPENAI_API_KEY": "o", "ANTHROPIC_ADMIN_KEY": "admin"}
+        {"AWS_REGION": "us-east-1", "SSH_AUTH_SOCK": "/tmp/agent.sock"}, config=cfg
     )
-    # Both are named on DEFAULT_INHERIT_KEYS -> explicitly wanted by config.
-    assert env["KIMI_API_KEY"] == "k"
-    assert env["OPENAI_API_KEY"] == "o"
-    # A vendor-namespaced key NOT on the inherit list is still a credential.
-    assert "ANTHROPIC_ADMIN_KEY" not in env
+    assert "AWS_REGION" not in env
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
 
 
 def test_worker_env_explicit_set_and_agent_env_survive_deny():
-    cfg = EnvConfig(set={"AWS_SECRET_ACCESS_KEY": "configured", "OPENAI_API_KEY": "also-configured"})
+    cfg = EnvConfig(set={"AWS_SECRET_ACCESS_KEY": "configured"}, deny=["AWS_*"])
     env = _env({}, config=cfg)
     assert env["AWS_SECRET_ACCESS_KEY"] == "configured"
-    env = _env({"GITHUB_TOKEN": "agent-wants"}, overrides={"GITHUB_TOKEN": "agent-wants"})
+    env = _env(
+        {"GITHUB_TOKEN": "agent-wants"},
+        overrides={"GITHUB_TOKEN": "agent-wants"},
+        config=EnvConfig(deny=["GITHUB_*"]),
+    )
     assert env["GITHUB_TOKEN"] == "agent-wants"
 
 
-def test_worker_env_inherit_exempts_default_deny_only():
+def test_worker_env_inherit_does_not_exempt_user_deny():
+    # Both keys arrive via the process env; naming one in ``inherit`` does
+    # not exempt it from the user's deny globs.
     cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"], deny=["AWS_*"])
     env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
-    # User deny beats the inherit exemption for the default denylist.
     assert "AWS_SECRET_ACCESS_KEY" not in env
-    cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"])
-    env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
-    assert env["AWS_SECRET_ACCESS_KEY"] == "s3cr3t"
-    assert "AWS_REGION" not in env  # still denied: not explicitly wanted
+    assert "AWS_REGION" not in env
 
 
 def test_worker_env_user_deny_patterns():

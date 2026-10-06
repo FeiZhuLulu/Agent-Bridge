@@ -71,14 +71,22 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            # Windows junctions pass is_dir(follow_symlinks=False)
+                            # Junctions/mounts pass is_dir(follow_symlinks=False)
                             # but point outside cwd; traversing them attributes
                             # foreign files as workspace writes (E2).
-                            # DirEntry.is_junction needs Python 3.12, so fall
-                            # back to ismount: it matches the mount-point
-                            # reparse tag only, not cloud (OneDrive) reparse
-                            # dirs that legitimately belong to the workspace.
-                            is_junction = getattr(entry, "is_junction", lambda: False)() or os.path.ismount(entry.path)
+                            # DirEntry.is_junction needs Python 3.12; elsewhere
+                            # compare realpath against the canonicalized parent:
+                            # a junction resolves elsewhere while normal dirs,
+                            # cloud (OneDrive) reparse dirs and POSIX mounts
+                            # resolve to themselves and stay traversable.
+                            if hasattr(entry, "is_junction"):
+                                is_junction = entry.is_junction()
+                            else:
+                                expected = os.path.join(
+                                    os.path.realpath(os.path.dirname(entry.path)),
+                                    entry.name,
+                                )
+                                is_junction = os.path.realpath(entry.path) != expected
                             if entry.name not in SKIP_DIR_NAMES and not is_junction:
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):

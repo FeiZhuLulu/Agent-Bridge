@@ -134,6 +134,10 @@ class Task(BaseModel):
     files_changed_total: int = 0
     files_changed_truncated: bool = False
     files_changed_state: FilesChangedState = FilesChangedState.pending
+    # Paths the worker REPORTED that resolve outside task.cwd. Kept separate
+    # so an escape is never silently folded into an in-workspace path (E3).
+    files_outside_cwd: list[str] = Field(default_factory=list)
+    files_outside_cwd_total: int = 0
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     failure: TaskFailure | None = None

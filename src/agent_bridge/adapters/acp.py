@@ -1647,6 +1647,22 @@ class AcpAdapter(Adapter):
                 raise
             except Exception as exc:
                 log.warning("session/load failed for %s; creating a new session: %s", session.session_id, _redact_diagnostic(str(exc)))
+                # H-05: the coordinator must see that its session lost context.
+                # pending_warnings lands on the next turn's task.warnings; the
+                # transcript event keeps the switch auditable after the fact.
+                live.pending_warnings.append(
+                    f"session/load failed ({type(exc).__name__}); started a new worker "
+                    "session — prior conversation context is lost"
+                )
+                append_event(
+                    session.session_id,
+                    "session_recreated",
+                    {
+                        "old_native_session_id": native,
+                        "reason": _redact_diagnostic(str(exc)),
+                    },
+                    self.home,
+                )
             else:
                 self._remember_config_options(live, revived)
                 await self._sync_selection(live, session)

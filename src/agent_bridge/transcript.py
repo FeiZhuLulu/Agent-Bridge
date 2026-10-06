@@ -56,6 +56,21 @@ def _pending_text(path: Path) -> str:
         return "".join(buffer.lines) if buffer else ""
 
 
+# Event types that represent bytes arriving FROM the worker (session/update
+# notifications, raw JSONL, streamed chunks). Everything else in a transcript
+# is written by Bridge itself and never proves the worker is alive.
+WORKER_ACTIVITY_TYPES = frozenset(
+    {
+        "message_chunk",
+        "thought_chunk",
+        "tool_call",
+        "tool_call_update",
+        "plan",
+        "raw",
+    }
+)
+
+
 def append_event(session_id: str, event_type: str, data: dict[str, Any] | None = None, home: Path | None = None) -> TranscriptEvent:
     event = TranscriptEvent(type=event_type, data=data or {})
     path = transcript_path(session_id, home)
@@ -73,7 +88,11 @@ def append_event(session_id: str, event_type: str, data: dict[str, Any] | None =
             and now - buffer.first_pending_at >= BUFFER_MAX_AGE_SEC
         )
         terminal = event_type in {"turn_end", "error"}
-        _activity[path] = now
+        # Only worker-originated events reset the stall clock. Bridge-side
+        # bookkeeping (prompt_sent, turn_end, error, permission, ...) written
+        # into the same transcript must not count as "the worker is alive".
+        if event_type in WORKER_ACTIVITY_TYPES:
+            _activity[path] = now
         if buffer.size >= BUFFER_BYTE_LIMIT or aged or terminal:
             _flush_locked(path, buffer)
         if terminal and not buffer.lines:
@@ -100,6 +119,24 @@ def forget_worker_activity(session_id: str, home: Path | None = None) -> None:
     path = transcript_path(session_id, home)
     with _buffers_lock:
         _activity.pop(path, None)
+
+
+def forget_session(session_id: str, home: Path | None = None) -> None:
+    """Drop every cached trace of a pruned session and delete its transcript.
+
+    Result files die with their task; the per-session transcript would
+    otherwise live forever (H-02). Any unflushed buffered lines are dropped
+    with the file — the session is being deleted, not archived.
+    """
+    path = transcript_path(session_id, home)
+    with _buffers_lock:
+        _activity.pop(path, None)
+        _buffers.pop(path, None)
+        _parse_cache.pop(path, None)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("could not remove pruned transcript %s", path)
 
 
 def flush_pending(home: Path | None = None) -> None:

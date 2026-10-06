@@ -33,6 +33,12 @@ SKIP_DIR_NAMES = {
     ".parcel-cache",
     ".svelte-kit",
     ".terraform",
+    # Bridge/worker bookkeeping dirs. A worker CLI keeps its own state under
+    # these and churns them every turn; counting that as project changes
+    # misattributes Bridge-internal writes to the worker (H-06).
+    ".agent-bridge",
+    ".codex",
+    ".claude",
 }
 
 _PATH_KEYS = (
@@ -64,7 +70,11 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            if entry.name not in SKIP_DIR_NAMES:
+                            # Windows junctions pass is_dir(follow_symlinks=False)
+                            # but point outside cwd; traversing them attributes
+                            # foreign files as workspace writes (E2).
+                            is_junction = getattr(entry, "is_junction", lambda: False)()
+                            if entry.name not in SKIP_DIR_NAMES and not is_junction:
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             st = entry.stat(follow_symlinks=False)
@@ -90,48 +100,81 @@ def changed_since(cwd: str | Path, before: dict[str, tuple[int, int]]) -> list[s
 
 
 def normalize_changed_paths(cwd: str | Path, paths: list[str]) -> list[str]:
+    inside, _outside = classify_changed_paths(cwd, paths)
+    return inside
+
+
+def classify_changed_paths(
+    cwd: str | Path, paths: list[str]
+) -> tuple[list[str], list[str]]:
+    """Split reported paths into (inside-cwd rel, outside-cwd abs).
+
+    A path that resolves outside the workspace is reported as its resolved
+    absolute form in the second list — never folded into an inside path the
+    way ``../x`` used to collapse to ``x`` (E3).
+    """
     root = Path(cwd).resolve()
-    seen: set[str] = set()
-    ordered: list[str] = []
+    seen_in: set[str] = set()
+    seen_out: set[str] = set()
+    inside: list[str] = []
+    outside: list[str] = []
     for raw in paths:
         if not raw or not isinstance(raw, str):
             continue
-        rel = _relative_to_cwd(raw, root)
-        if not rel or _ignored_rel(rel):
-            continue
-        if rel not in seen:
-            seen.add(rel)
-            ordered.append(rel)
-    return ordered
+        rel, out = _classify_path(raw, root)
+        if rel and not _ignored_rel(rel) and rel not in seen_in:
+            seen_in.add(rel)
+            inside.append(rel)
+        elif out and out not in seen_out:
+            seen_out.add(out)
+            outside.append(out)
+    return inside, outside
 
 
 def merge_files_changed(
     cwd: str | Path,
     reported: list[str],
     before: dict[str, tuple[int, int]],
-) -> list[str]:
-    return normalize_changed_paths(cwd, [*reported, *changed_since(cwd, before)])
+) -> tuple[list[str], list[str]]:
+    """(inside-cwd rel paths, outside-cwd abs paths)."""
+    inside, outside = classify_changed_paths(cwd, reported)
+    disk = changed_since(cwd, before)
+    merged = inside + [rel for rel in disk if rel not in set(inside)]
+    return merged, outside
 
 
-def _relative_to_cwd(raw: str, root: Path) -> str | None:
+
+def _classify_path(raw: str, root: Path) -> tuple[str | None, str | None]:
+    """(inside rel | None, outside absolute | None). Both None = unusable."""
     text = raw.strip()
     if text.startswith("file://"):
         text = text[7:]
         if text.startswith("/") and len(text) >= 3 and text[2] == ":":
             text = text[1:]
     path = Path(text)
-    rel: str | None
     try:
         resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
-        rel = resolved.relative_to(root).as_posix()
-    except (OSError, ValueError):
-        rel = path.as_posix().lstrip("./") if not path.is_absolute() else None
+    except (OSError, ValueError, RuntimeError):
+        resolved = None
+    if resolved is not None:
+        try:
+            rel = resolved.relative_to(root).as_posix()
+        except ValueError:
+            return None, resolved.as_posix()
         if rel in {".", "..", ""}:
-            return None
-        return rel
-    if rel in {".", "..", ""}:
-        return None
-    return rel
+            return None, None
+        return rel, None
+    # Unresolvable: keep prior lenient behavior for relative strings, but a
+    # leading ../ can never be proven inside — report it as outside instead
+    # of folding it into the workspace (E3).
+    if not path.is_absolute():
+        rel = path.as_posix().lstrip("./")
+        if rel in {".", "..", ""}:
+            return None, None
+        if rel.startswith("../") or rel == "..":
+            return None, path.as_posix()
+        return rel, None
+    return None, path.as_posix()
 
 
 def _root_prefix_len(root: str) -> int:

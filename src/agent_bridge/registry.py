@@ -51,6 +51,7 @@ from agent_bridge.transcript import (
     append_event,
     flush_pending,
     flush_session,
+    forget_session,
     forget_worker_activity,
     mark_worker_activity,
     page_events,
@@ -694,13 +695,15 @@ class Registry:
         try:
             mark_worker_activity(session.session_id, self.home)
             before = await asyncio.to_thread(snapshot_workspace, task.cwd)
-            limit = self.config.get(session.agent).stall_timeout_sec
+            agent_cfg = self.config.get(session.agent)
+            limit = agent_cfg.stall_timeout_sec
+            turn_cap = agent_cfg.turn_timeout_sec
             watch = (
                 asyncio.create_task(
-                    self._stall_watch(task, session, adapter, limit),
+                    self._stall_watch(task, session, adapter, limit, turn_cap),
                     name=f"stall-{task_id}",
                 )
-                if limit > 0
+                if limit > 0 or turn_cap > 0
                 else None
             )
             result = await adapter.run_turn(session, task)
@@ -717,10 +720,10 @@ class Registry:
                     f"full result persistence failed: {type(exc).__name__}: {exc}"
                 )
                 log.exception("could not persist full result for task %s", task.task_id)
-            full_changed = await asyncio.to_thread(
+            inside_changed, outside_changed = await asyncio.to_thread(
                 merge_files_changed, task.cwd, result.files_changed, before
             )
-            self._set_files_changed(task, full_changed)
+            self._set_files_changed(task, inside_changed, outside_changed)
             task.usage = result.usage
             if session.agent == "grok":
                 observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
@@ -788,10 +791,10 @@ class Registry:
                     task.files_changed_state = FilesChangedState.unavailable
                 else:
                     try:
-                        full_changed = await asyncio.to_thread(
+                        inside_changed, outside_changed = await asyncio.to_thread(
                             merge_files_changed, task.cwd, [], before
                         )
-                        self._set_files_changed(task, full_changed)
+                        self._set_files_changed(task, inside_changed, outside_changed)
                     except Exception as exc:
                         task.files_changed_state = FilesChangedState.unavailable
                         task.warnings.append(
@@ -835,10 +838,13 @@ class Registry:
             self._schedule_idle(session.session_id)
 
     @staticmethod
-    def _set_files_changed(task: Task, paths: list[str]) -> None:
+    def _set_files_changed(task: Task, paths: list[str], outside: list[str] | None = None) -> None:
         task.files_changed_total = len(paths)
         task.files_changed = paths[:FILES_CHANGED_MAX]
         task.files_changed_truncated = len(paths) > FILES_CHANGED_MAX
+        outside = outside or []
+        task.files_outside_cwd_total = len(outside)
+        task.files_outside_cwd = outside[:FILES_CHANGED_MAX]
         task.files_changed_state = FilesChangedState.collected
 
     async def _stall_watch(
@@ -847,30 +853,54 @@ class Registry:
         session: Session,
         adapter: Adapter,
         limit: int,
+        turn_cap: int = 0,
     ) -> None:
+        """Dual watchdog: ``limit`` bounds worker silence, ``turn_cap`` bounds
+        total turn wall-clock. Silence only counts worker-originated transcript
+        events, so a heartbeat-spamming worker still needs the cap (H-16)."""
+        started = time.monotonic()
         while True:
             silence = worker_silence_sec(session.session_id, self.home) or 0.0
-            remaining = limit - silence
-            if remaining <= 0:
+            elapsed = time.monotonic() - started
+            if limit > 0 and silence >= limit:
+                reason = "stalled"
                 break
-            await asyncio.sleep(min(remaining, STALL_POLL_SEC))
+            if turn_cap > 0 and elapsed >= turn_cap:
+                reason = "timed_out"
+                break
+            waits: list[float] = [STALL_POLL_SEC]
+            if limit > 0:
+                waits.append(limit - silence)
+            if turn_cap > 0:
+                waits.append(turn_cap - elapsed)
+            await asyncio.sleep(max(min(waits), 0.05))
         if task.status in TERMINAL_STATUSES:
             return
         log.warning(
-            "task %s stalled: no worker output for %ss; cancelling the turn",
+            "task %s %s: cancelling the turn (silence=%.0fs, elapsed=%.0fs)",
             task.task_id,
-            limit,
+            reason,
+            silence,
+            elapsed,
         )
         task.status = TaskStatus.failed
-        task.stop_reason = "stalled"
+        task.stop_reason = reason
         task.error = (
             f"worker produced no output for {limit}s (stall_timeout_sec); "
             "Bridge cancelled the turn"
+            if reason == "stalled"
+            else f"turn exceeded turn_timeout_sec={turn_cap}s; Bridge cancelled the turn"
         )
         append_event(
             session.session_id,
             "error",
-            {"error": task.error, "stalled": True, "stall_timeout_sec": limit},
+            {
+                "error": task.error,
+                "stalled": reason == "stalled",
+                "timed_out": reason == "timed_out",
+                "stall_timeout_sec": limit,
+                "turn_timeout_sec": turn_cap,
+            },
             self.home,
         )
         # The turn normally returns (and _run_task tears this watch down)
@@ -920,7 +950,9 @@ class Registry:
         for session in drop:
             session_id = session.session_id
             self.sessions.pop(session_id, None)
-            forget_worker_activity(session_id, self.home)
+            # Result files die with their tasks; the per-session transcript
+            # would otherwise grow unbounded on disk (H-02).
+            forget_session(session_id, self.home)
             self._cancel_idle(session_id)
             for task in [item for item in self.tasks.values() if item.session_id == session_id]:
                 self._drop_task(task.task_id)
@@ -1048,10 +1080,16 @@ class Registry:
             )
         if task.stop_reason == "stalled":
             hint += (
-                " The worker went silent for stall_timeout_sec and Bridge cancelled the turn; "
+                " The worker produced no output for stall_timeout_sec and Bridge cancelled the turn; "
                 "read get_transcript for its last activity, then either dispatch a narrower "
                 f"task on the same session_id or raise [agents.{task.agent}] stall_timeout_sec "
                 "if that step was legitimately long."
+            )
+        if task.stop_reason == "timed_out":
+            hint += (
+                " The turn hit turn_timeout_sec and Bridge cancelled it; "
+                f"raise [agents.{task.agent}] turn_timeout_sec if turns legitimately "
+                "need more wall-clock time."
             )
         return hint
 
@@ -1070,6 +1108,8 @@ class Registry:
             "files_changed_total": task.files_changed_total,
             "files_changed_truncated": task.files_changed_truncated,
             "files_changed_state": task.files_changed_state.value,
+            "files_outside_cwd": task.files_outside_cwd,
+            "files_outside_cwd_total": task.files_outside_cwd_total,
             "model": task.model,
             "effort": task.effort,
             "observed_model": task.observed_model,

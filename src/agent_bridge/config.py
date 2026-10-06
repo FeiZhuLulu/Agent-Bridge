@@ -116,6 +116,10 @@ class AgentConfig(BaseModel):
     revivable: bool = False
     idle_unload_sec: int = 0
     stall_timeout_sec: int = Field(default=1800, ge=0)
+    # Hard cap on one turn's wall-clock length (0 = disabled). Catches a
+    # worker that stays chatty forever without ever going silent —
+    # stall_timeout_sec alone cannot see that case (H-16).
+    turn_timeout_sec: int = Field(default=0, ge=0)
     print_timeout: str = "120m"
 
 

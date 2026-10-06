@@ -1658,6 +1658,9 @@ class AcpAdapter(Adapter):
             "session/new",
             session,
         )
+        # Adopt the new id before any fallible bookkeeping: a transcript write
+        # failure must not leave the session pointing at the rejected id.
+        session.native_session_id = created.session_id
         if load_failure is not None:
             # H-05: the coordinator must see that its session lost context.
             # pending_warnings lands on the next turn's task.warnings; the
@@ -1677,7 +1680,6 @@ class AcpAdapter(Adapter):
                 },
                 self.home,
             )
-        session.native_session_id = created.session_id
         self._remember_config_options(live, created)
         if self.agent.name == "grok":
             # Grok /new applies the _meta reasoningEffort but always lands on

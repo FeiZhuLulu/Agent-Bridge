@@ -171,7 +171,9 @@ def _classify_path(raw: str, root: Path) -> tuple[str | None, str | None]:
     if not path.is_absolute():
         posix = path.as_posix()
         if posix.startswith("../") or posix == "..":
-            return None, posix
+            # files_outside_cwd is an absolute-path field: return the lexical
+            # absolute form (root-joined, normalized, no symlink resolution).
+            return None, Path(os.path.normpath(root / path)).as_posix()
         rel = posix.lstrip("./")
         if rel in {".", "..", ""}:
             return None, None

@@ -159,6 +159,7 @@ class Registry:
         self._pending_state: dict[str, list[dict]] | None = None
         self._flush_task: asyncio.Task[None] | None = None
         self._state_error: Exception | None = None
+        self._state_quarantined = False
 
     @classmethod
     def create(
@@ -355,6 +356,7 @@ class Registry:
                 )
                 os.replace(path, quarantine)
                 log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
+                self._state_quarantined = True
                 return {}
         if not isinstance(payload, dict):
             log.warning("ignoring non-object %s; starting from empty state", path)
@@ -401,7 +403,13 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
-        self._sweep_orphan_results(foreign_task_ids)
+        if self._state_quarantined:
+            # The tasks map is empty only because state was quarantined, not
+            # because the tasks are gone: sweeping now would delete result
+            # files whose rows live in the corrupt file (review).
+            log.warning("state.json was quarantined; skipping orphan result sweep")
+        else:
+            self._sweep_orphan_results(foreign_task_ids)
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
@@ -909,11 +917,28 @@ class Registry:
         results_dir = self.home / "results"
         if not results_dir.is_dir():
             return
+        # Re-read state under the same lock writers use: a sibling may have
+        # written a task row between the startup snapshot and this sweep —
+        # deleting its result file would destroy a live artifact (review).
+        path = state_path(self.home)
+        lock_path = path.with_name(f"{path.name}.lock")
+        try:
+            with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+                disk = read_json_strict(path, {})
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # Unknown task set — deleting on a stale view risks live results.
+            log.warning("could not re-read %s; skipping orphan result sweep", path)
+            return
+        known = set(self.tasks) | foreign_task_ids
+        if isinstance(disk, dict):
+            for row in disk.get("tasks") or []:
+                if isinstance(row, dict) and isinstance(row.get("task_id"), str):
+                    known.add(row["task_id"])
         # task ids are "task_<hex>" (_new_id); narrowing the glob avoids
-        # touching unrelated .txt files someone may drop in results/.
+        # touching unrelated .txt files dropped in results/.
         for orphan in results_dir.glob("task_*.txt"):
             task_id = orphan.stem
-            if task_id in self.tasks or task_id in foreign_task_ids:
+            if task_id in known:
                 continue
             try:
                 orphan.unlink()

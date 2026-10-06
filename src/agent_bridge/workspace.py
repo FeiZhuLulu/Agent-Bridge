@@ -122,7 +122,7 @@ def classify_changed_paths(
         if not raw or not isinstance(raw, str):
             continue
         rel, out = _classify_path(raw, root)
-        if rel and not _ignored_rel(rel) and rel not in seen_in:
+        if rel and not _ignored_rel(rel, reported=True) and rel not in seen_in:
             seen_in.add(rel)
             inside.append(rel)
         elif out and out not in seen_out:
@@ -166,13 +166,15 @@ def _classify_path(raw: str, root: Path) -> tuple[str | None, str | None]:
         return rel, None
     # Unresolvable: keep prior lenient behavior for relative strings, but a
     # leading ../ can never be proven inside — report it as outside instead
-    # of folding it into the workspace (E3).
+    # of folding it into the workspace (E3). Check the traversal BEFORE
+    # lstrip, which would otherwise eat the leading ../ as well.
     if not path.is_absolute():
-        rel = path.as_posix().lstrip("./")
+        posix = path.as_posix()
+        if posix.startswith("../") or posix == "..":
+            return None, posix
+        rel = posix.lstrip("./")
         if rel in {".", "..", ""}:
             return None, None
-        if rel.startswith("../") or rel == "..":
-            return None, path.as_posix()
         return rel, None
     return None, path.as_posix()
 
@@ -181,8 +183,15 @@ def _root_prefix_len(root: str) -> int:
     return len(root.rstrip(os.sep)) + 1
 
 
-def _ignored_rel(rel: str) -> bool:
-    return any(part in SKIP_DIR_NAMES for part in rel.split("/")[:-1])
+# Reported paths skip less than the disk snapshot: .codex/.claude churn is
+# filtered from the snapshot walker, but a path a worker *explicitly reports*
+# there is an intentional project-config edit and must surface (review).
+_REPORTED_SKIP = SKIP_DIR_NAMES - {".codex", ".claude"}
+
+
+def _ignored_rel(rel: str, *, reported: bool = False) -> bool:
+    names = _REPORTED_SKIP if reported else SKIP_DIR_NAMES
+    return any(part in names for part in rel.split("/")[:-1])
 
 
 def collect_update_paths(obj: object, into: set[str]) -> None:

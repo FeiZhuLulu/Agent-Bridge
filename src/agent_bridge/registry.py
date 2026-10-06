@@ -99,8 +99,9 @@ STALL_CANCEL_GRACE_SEC = 15
 STATE_WRITE_ATTEMPTS = 5
 STATE_WRITE_RETRY_BASE_SEC = 0.05
 STATE_LOCK_TIMEOUT_SEC = 5.0
-# flush_state() waits for the saves issued at call time; write failures
-# degrade to a logged warning instead of raising into the caller.
+# flush_state() waits for the saves issued at call time and returns whether
+# that generation reached disk; start()/stop() raise on False, wait_task
+# reports it as ``persisted``.
 STATE_FLUSH_ATTEMPTS = 3
 # Poll cadence while flush_state() waits on the shared flusher; small so a
 # terminal wait_task does not add up to a full second under save traffic.

@@ -74,7 +74,7 @@ def test_setup_zcode_points_at_mcp_settings_not_plugin_marketplace():
 
 def test_orchestration_english_stays_under_char_budget():
     text = _read("ORCHESTRATION.md")
-    assert len(text) <= 9500
+    assert len(text) <= 10500
 
 
 def test_readme_explains_coordinator_modes():

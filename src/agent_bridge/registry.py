@@ -358,18 +358,24 @@ class Registry:
         """
         target = self._save_gen
         for _ in range(STATE_FLUSH_ATTEMPTS):
+            while self._flushed_gen < target:
+                task = self._flush_task
+                fresh = False
+                if task is None or task.done():
+                    if self._pending_state is None:
+                        break
+                    task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
+                    self._flush_task = task
+                    fresh = True
+                # Poll the shared flusher instead of awaiting it to the end:
+                # under steady save() traffic the loop keeps draining newer
+                # snapshots, but our target generation is already on disk.
+                await asyncio.wait({task}, timeout=1.0)
+                if fresh and task.done():
+                    break  # this attempt's run finished; retry or give up
             if self._flushed_gen >= target:
                 return
-            task = self._flush_task
-            if task is None or task.done():
-                if self._pending_state is None:
-                    break
-                task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
-                self._flush_task = task
-            try:
-                await task
-            except Exception as exc:  # flush loop itself died unexpectedly
-                self._state_error = exc
+            if self._pending_state is None:
                 break
         if self._flushed_gen < target:
             log.warning(
@@ -922,6 +928,9 @@ class Registry:
                 (task.error or "")[:500],
             )
             self._schedule_idle(session.session_id)
+            # Re-check the resident cap: a burst of completions all land here
+            # and would otherwise stay resident until the next dispatch.
+            self._cap_resident_sessions()
 
     @staticmethod
     def _set_files_changed(task: Task, paths: list[str]) -> None:
@@ -1019,6 +1028,9 @@ class Registry:
                 session.proc_state.value,
                 session.last_active_at,
             )
+        self._cap_resident_sessions()
+
+    def _cap_resident_sessions(self) -> None:
         # Bound live resident sessions: the default idle_unload_sec=0 never
         # unloads workers on its own, so `ready` sessions accumulate a worker
         # process each until the host runs out of memory. Force-unload the
@@ -1050,6 +1062,11 @@ class Registry:
                 except Exception:
                     log.exception("over-cap unload failed for %s", session_id)
                     return
+            # Drop the dead adapter mapping: keeping it excludes the session
+            # from inactive pruning (filter requires `not in _adapters`), so
+            # unloaded sessions would persist in every state snapshot. Revival
+            # rebuilds via _adapter_for using session.native_session_id.
+            self._adapters.pop(session_id, None)
             session.proc_state = ProcState.idle_unloaded
             self.save()
 
@@ -1110,6 +1127,10 @@ class Registry:
                     await adapter.shutdown(current)
                 except Exception:
                     log.exception("idle unload failed for %s", session_id)
+                else:
+                    # Same as the over-cap path: drop the dead mapping so the
+                    # session stays prunable and revival rebuilds the adapter.
+                    self._adapters.pop(session_id, None)
             current.proc_state = ProcState.idle_unloaded
             self.save()
 

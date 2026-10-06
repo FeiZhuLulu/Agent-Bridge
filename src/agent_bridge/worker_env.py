@@ -547,6 +547,23 @@ DEFAULT_ENV_DENY_PATTERNS: tuple[str, ...] = (
 )
 
 
+def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None) -> bool:
+    """True when the env deny rules would strip ``key`` from a worker env.
+
+    Shared by _apply_env_deny and injection points downstream of it (e.g. the
+    DSH launch helper pulling credential refs from Windows env) so a denied
+    key cannot re-enter through another code path.
+    """
+    if explicit and key in explicit:
+        return False
+    user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
+    if user_deny and any(fnmatch.fnmatchcase(key, pat) for pat in user_deny):
+        return True
+    if key in set(cfg.inherit):
+        return False
+    return any(fnmatch.fnmatchcase(key, pat) for pat in DEFAULT_ENV_DENY_PATTERNS)
+
+
 def _apply_env_deny(
     env: dict[str, str],
     origin: dict[str, str],
@@ -562,18 +579,8 @@ def _apply_env_deny(
     to explicit ``set``/agent ``env`` values. Denied keys are recorded as
     ``origin[key] = "denied"`` so describe_env can tell withheld from absent.
     """
-    inherited = set(cfg.inherit)
-    user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
     for key in list(env):
-        if key in explicit:
-            continue
-        if user_deny and any(fnmatch.fnmatchcase(key, pat) for pat in user_deny):
-            env.pop(key, None)
-            origin[key] = "denied"
-            continue
-        if key in inherited:
-            continue
-        if any(fnmatch.fnmatchcase(key, pat) for pat in DEFAULT_ENV_DENY_PATTERNS):
+        if denied_by_policy(key, cfg, explicit):
             env.pop(key, None)
             origin[key] = "denied"
 

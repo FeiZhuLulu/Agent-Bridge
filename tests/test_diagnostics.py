@@ -59,10 +59,13 @@ def test_permission_deny_policy_returns_none():
     assert _pick_permission_option(options, "deny") is None
 
 
-def test_permission_allow_once_falls_back_to_allow_always():
+def test_permission_allow_once_never_picks_allow_always():
+    # A persistent grant must not satisfy a one-time policy — review finding:
+    # falling back to allow_always made allow_once lie.
     options = [_opt("reject_once"), _opt("allow_always")]
     picked = _pick_permission_option(options, "allow_once")
-    assert picked is not None and picked.kind == "allow_always"
+    assert picked is not None and picked.kind == "reject_once"
+    assert _pick_permission_option([_opt("allow_always")], "allow_once") is None
 
 
 def test_permission_unknown_policy_behaves_like_allow_once():

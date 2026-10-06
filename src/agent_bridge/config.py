@@ -256,7 +256,9 @@ def _coerce_env(raw: dict[str, Any]) -> dict[str, Any]:
     proxy: dict[str, Any] = raw_proxy if isinstance(raw_proxy, dict) else {}
     out: dict[str, Any] = {}
     if "inherit" in block and block["inherit"] is not None:
-        out["inherit"] = [str(item) for item in block["inherit"]]
+        raw_inherit = block["inherit"]
+        # A bare string is one name, not an iterable of characters.
+        out["inherit"] = [raw_inherit] if isinstance(raw_inherit, str) else [str(item) for item in raw_inherit]
     if "discover_proxy" in block:
         out["discover_proxy"] = bool(block["discover_proxy"])
     if isinstance(block.get("set"), dict):
@@ -268,7 +270,9 @@ def _coerce_env(raw: dict[str, Any]) -> dict[str, Any]:
     if no_proxy:
         out["no_proxy"] = str(no_proxy).strip()
     if "deny" in block and block["deny"] is not None:
-        out["deny"] = [str(item) for item in block["deny"]]
+        raw_deny = block["deny"]
+        # A bare string is one glob, not an iterable of characters.
+        out["deny"] = [raw_deny] if isinstance(raw_deny, str) else [str(item) for item in raw_deny]
     return out
 
 

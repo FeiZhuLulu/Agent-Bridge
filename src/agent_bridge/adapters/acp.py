@@ -492,7 +492,11 @@ def _pick_permission_option(
         option_id = str(getattr(option, "option_id", "")).lower().replace("_", "-")
         blob = f"{kind} {option_id}"
         if "allow-always" in blob or kind == "allow-always":
-            score = 0 if allow_always_first else 50
+            # Under any non-allow_always policy a persistent grant must not be
+            # picked — falling back to it would make a one-time policy lie.
+            if not allow_always_first:
+                continue
+            score = 0
         elif "allow-once" in blob or kind == "allow-once" or blob.strip().startswith("allow"):
             score = 1 if allow_always_first else 0
         else:
@@ -841,6 +845,7 @@ class AcpAdapter(Adapter):
                 session_id=session.session_id,
                 model=session.model,
                 effort=session.effort,
+                env_cfg=self.env_config,
             )
         elif self.agent.name == "grok":
             cmd = with_grok_cli_selection(cmd, session.model, session.effort)

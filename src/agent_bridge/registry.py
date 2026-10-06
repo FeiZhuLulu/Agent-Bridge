@@ -510,9 +510,15 @@ class Registry:
         self._watchdog = None
         if watchdog is not None:
             watchdog.cancel()
-        for idle in list(self._idle.values()):
+        idles = list(self._idle.values())
+        for idle in idles:
             idle.cancel()
         self._idle.clear()
+        if idles:
+            # Await cancellation so an in-flight over-cap/idle unload finishes
+            # unwinding before adapter shutdown — otherwise the loop may close
+            # with a worker half-reaped.
+            await asyncio.wait(idles, timeout=STOP_TASK_GRACE_SEC)
         bgs = [task for task in self._bg.values() if not task.done()]
         for bg in bgs:
             bg.cancel()
@@ -1036,6 +1042,10 @@ class Registry:
         # process each until the host runs out of memory. Force-unload the
         # least recently active ones beyond RESIDENT_SESSION_KEEP; they land
         # as idle_unloaded and become regular prune candidates later.
+        if self._stopping:
+            # stop() owns all worker teardown; an over-cap unload scheduled now
+            # would race its adapter shutdown and could orphan a worker.
+            return
         resident = [
             session
             for session in self.sessions.values()

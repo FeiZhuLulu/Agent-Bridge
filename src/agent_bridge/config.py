@@ -121,6 +121,11 @@ class AgentConfig(BaseModel):
     # stall_timeout_sec alone cannot see that case (H-16).
     turn_timeout_sec: int = Field(default=0, ge=0)
     print_timeout: str = "120m"
+    # How Bridge answers worker permission prompts when no human is present:
+    # "allow_once" grants each request for that call only (default, least
+    # privilege), "allow_always" persists the grant inside the worker,
+    # "deny" cancels every request.
+    permission_policy: str = "allow_once"
 
 
 class EnvConfig(BaseModel):
@@ -131,6 +136,9 @@ class EnvConfig(BaseModel):
     set: dict[str, str] = Field(default_factory=dict)
     proxy_url: str | None = None
     no_proxy: str | None = None
+    # Glob patterns of env keys a worker subprocess must never see; keys
+    # explicitly assigned via ``set``/agent ``env`` always survive.
+    deny: list[str] = Field(default_factory=list)
 
 
 class ServerConfig(BaseModel):
@@ -251,7 +259,9 @@ def _coerce_env(raw: dict[str, Any]) -> dict[str, Any]:
     proxy: dict[str, Any] = raw_proxy if isinstance(raw_proxy, dict) else {}
     out: dict[str, Any] = {}
     if "inherit" in block and block["inherit"] is not None:
-        out["inherit"] = [str(item) for item in block["inherit"]]
+        raw_inherit = block["inherit"]
+        # A bare string is one name, not an iterable of characters.
+        out["inherit"] = [raw_inherit] if isinstance(raw_inherit, str) else [str(item) for item in raw_inherit]
     if "discover_proxy" in block:
         out["discover_proxy"] = bool(block["discover_proxy"])
     if isinstance(block.get("set"), dict):
@@ -262,6 +272,10 @@ def _coerce_env(raw: dict[str, Any]) -> dict[str, Any]:
     no_proxy = proxy.get("no_proxy") or proxy.get("no") or block.get("no_proxy")
     if no_proxy:
         out["no_proxy"] = str(no_proxy).strip()
+    if "deny" in block and block["deny"] is not None:
+        raw_deny = block["deny"]
+        # A bare string is one glob, not an iterable of characters.
+        out["deny"] = [raw_deny] if isinstance(raw_deny, str) else [str(item) for item in raw_deny]
     return out
 
 
@@ -272,6 +286,10 @@ def _merge_env(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
             raw_set = out.get("set")
             current: dict[str, Any] = raw_set if isinstance(raw_set, dict) else {}
             out["set"] = {**current, **value}
+        elif key == "deny" and isinstance(value, list):
+            raw_deny = out.get("deny")
+            deny_list: list[Any] = raw_deny if isinstance(raw_deny, list) else []
+            out["deny"] = [*deny_list, *value]
         else:
             out[key] = value
     return out

@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 from agent_bridge.adapters.base import STDIO_LIMIT, Adapter
 from agent_bridge.config import AgentConfig
+from agent_bridge.diagnostics import redact_diagnostic
 from agent_bridge.models import Session, Task, TurnResult, agy_effort
 from agent_bridge.processes import (
     drop_pid,
@@ -447,7 +448,12 @@ class AgyAdapter(Adapter):
                             native_session_id=cid,
                             warnings=[err, *exit_warnings],
                         )
-                    append_event(session.session_id, "error", {"error": err, "code": proc.returncode}, self.home)
+                    append_event(
+                        session.session_id,
+                        "error",
+                        {"error": redact_diagnostic(err), "code": proc.returncode},
+                        self.home,
+                    )
                     return TurnResult(
                         text=result_text,
                         files_changed=sorted(files),

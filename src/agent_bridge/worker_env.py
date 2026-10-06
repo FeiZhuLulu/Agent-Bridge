@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -507,6 +508,41 @@ def install_host_env(config: EnvConfig, *, base: Mapping[str, str] | None = None
     return status
 
 
+def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None) -> bool:
+    """True when the user's ``env.deny`` globs would strip ``key`` from a worker env.
+
+    There is no built-in denylist: a default deny hid AWS_*/SSH_*/etc. from
+    workers that legitimately need them (Bedrock/Vertex auth, git-over-ssh),
+    so only the operator's configured globs strip keys. Shared by
+    _apply_env_deny and injection points downstream of it (e.g. the DSH
+    launch helper pulling credential refs from Windows env) so a denied key
+    cannot re-enter through another code path.
+    """
+    if explicit and key in explicit:
+        return False
+    user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
+    return any(fnmatch.fnmatchcase(key, pat) for pat in user_deny)
+
+
+def _apply_env_deny(
+    env: dict[str, str],
+    origin: dict[str, str],
+    cfg: EnvConfig,
+    explicit: set[str],
+) -> None:
+    """Strip env keys matching the user's ``env.deny`` globs.
+
+    Explicit intent always wins: a key assigned through ``env.set`` or the
+    agent's own ``env`` block survives any pattern. Denied keys are recorded
+    as ``origin[key] = "denied"`` so describe_env can tell withheld from
+    absent.
+    """
+    for key in list(env):
+        if denied_by_policy(key, cfg, explicit):
+            env.pop(key, None)
+            origin[key] = "denied"
+
+
 def build_worker_env(
     overrides: Mapping[str, str] | None = None,
     *,
@@ -529,6 +565,9 @@ def build_worker_env(
         user_env=user_env,
         machine_env=machine_env,
     )
+    cfg = config or EnvConfig()
+    explicit = set(cfg.set) | set(overrides or {})
+    _apply_env_deny(env, origin, cfg, explicit)
     # After every merge so agents.toml / inherited env cannot clear the mark.
     # Also pin a nested data dir: if the worker inherits this MCP server, the
     # nested Bridge must not share the coordinator's state.json. A host MCP

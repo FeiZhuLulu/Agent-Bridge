@@ -25,6 +25,7 @@ from agent_bridge.config import (
     normalize_coordinator_mode,
     write_coordinator_overlay,
 )
+from agent_bridge.diagnostics import redact_diagnostic
 from agent_bridge.grok_observe import observe_grok_session
 from agent_bridge.kimi_observe import observe_kimi_session
 from agent_bridge.models import (
@@ -98,8 +99,9 @@ STALL_CANCEL_GRACE_SEC = 15
 STATE_WRITE_ATTEMPTS = 5
 STATE_WRITE_RETRY_BASE_SEC = 0.05
 STATE_LOCK_TIMEOUT_SEC = 5.0
-# flush_state() waits for the saves issued at call time; write failures
-# degrade to a logged warning instead of raising into the caller.
+# flush_state() waits for the saves issued at call time and returns whether
+# that generation reached disk; start()/stop() raise on False, wait_task
+# reports it as ``persisted``.
 STATE_FLUSH_ATTEMPTS = 3
 # Poll cadence while flush_state() waits on the shared flusher; small so a
 # terminal wait_task does not add up to a full second under save traffic.
@@ -832,7 +834,9 @@ class Registry:
             if result.native_session_id:
                 session.native_session_id = result.native_session_id
             task.result_chars = len(result.text)
-            task.warnings = list(result.warnings)
+            # Worker-derived text crosses the trust boundary here: scrub
+            # before it lands in state.json/transcripts/MCP replies.
+            task.warnings = [redact_diagnostic(w) for w in result.warnings]
             try:
                 atomic_write_text(result_path(task.task_id, self.home), result.text)
                 task.result_text = _tail(result.text)
@@ -859,7 +863,8 @@ class Registry:
                     # Kimi answered end_turn, so nothing above this line knows
                     # the turn failed. Say so where the coordinator looks.
                     task.warnings.append(
-                        f"kimi reported end_turn but the turn failed: {observed['failure']}"
+                        "kimi reported end_turn but the turn failed: "
+                        + redact_diagnostic(str(observed["failure"]))
                     )
             else:
                 # OpenCode (and any later ACP worker) has no on-disk sampler
@@ -876,7 +881,7 @@ class Registry:
                         task.stop_reason = "cancelled"
                     else:
                         task.status = TaskStatus.failed
-                        task.error = result.error
+                        task.error = redact_diagnostic(result.error)
                 elif result.stop_reason == "cancelled":
                     task.status = TaskStatus.cancelled
                 else:
@@ -899,7 +904,7 @@ class Registry:
                     task.failure = None
                 else:
                     task.status = TaskStatus.failed
-                    task.error = str(exc)
+                    task.error = redact_diagnostic(str(exc))
                     task.failure = exc.failure if isinstance(exc, AcpError) else None
                     task.stop_reason = "error"
         finally:

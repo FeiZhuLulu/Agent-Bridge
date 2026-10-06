@@ -204,3 +204,64 @@ def test_is_worker_context_strict_value():
     assert is_worker_context({WORKER_CONTEXT_ENV: "coordinator"}) is False
     assert is_worker_context({}) is False
     assert is_worker_context({WORKER_CONTEXT_ENV: "Worker"}) is False
+
+
+def _env(base, *, config=None, overrides=None):
+    return build_worker_env(
+        overrides,
+        config=config,
+        base=base,
+        fallbacks={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+    )
+
+
+def test_worker_env_no_default_deny_but_user_deny_applies():
+    env = _env(
+        {
+            "AWS_REGION": "us-east-1",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "DATABASE_URL": "postgres://u:p@db",
+            "HOME": "/h",
+        }
+    )
+    assert env["AWS_REGION"] == "us-east-1"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+    assert env["DATABASE_URL"] == "postgres://u:p@db"
+    cfg = EnvConfig(deny=["AWS_*"])
+    env = _env(
+        {"AWS_REGION": "us-east-1", "SSH_AUTH_SOCK": "/tmp/agent.sock"}, config=cfg
+    )
+    assert "AWS_REGION" not in env
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+
+
+def test_worker_env_explicit_set_and_agent_env_survive_deny():
+    cfg = EnvConfig(set={"AWS_SECRET_ACCESS_KEY": "configured"}, deny=["AWS_*"])
+    env = _env({}, config=cfg)
+    assert env["AWS_SECRET_ACCESS_KEY"] == "configured"
+    env = _env(
+        {"GITHUB_TOKEN": "agent-wants"},
+        overrides={"GITHUB_TOKEN": "agent-wants"},
+        config=EnvConfig(deny=["GITHUB_*"]),
+    )
+    assert env["GITHUB_TOKEN"] == "agent-wants"
+
+
+def test_worker_env_inherit_does_not_exempt_user_deny():
+    # Both keys arrive via the process env; naming one in ``inherit`` does
+    # not exempt it from the user's deny globs.
+    cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"], deny=["AWS_*"])
+    env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_REGION" not in env
+
+
+def test_worker_env_user_deny_patterns():
+    cfg = EnvConfig(deny=["*_DEBUG", "CUSTOM*"])
+    env = _env({"APP_DEBUG": "1", "CUSTOM_FLAG": "x", "KEEP": "y"}, config=cfg)
+    assert "APP_DEBUG" not in env
+    assert "CUSTOM_FLAG" not in env
+    assert env["KEEP"] == "y"

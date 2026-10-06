@@ -48,7 +48,7 @@ class CodexAdapter(Adapter):
         return None
 
     def _worker_env(self) -> dict[str, str]:
-        return build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
+        return build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
 
     def _base_cmd(self, env: dict[str, str] | None = None) -> list[str]:
         return resolve_codex_command(self.agent.command, self.agent.fallback_commands, env=env)

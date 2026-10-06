@@ -366,6 +366,13 @@ class Registry:
         install_host_env(self.config.env)
         reap_orphans(self.home)
         payload = self._load_state()
+        foreign_task_ids = {
+            raw["task_id"]
+            for raw in payload.get("tasks") or []
+            if isinstance(raw, dict)
+            and isinstance(raw.get("task_id"), str)
+            and self._foreign_live(raw.get("owner_pid"), raw.get("owner_create_time"))
+        }
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
             if self._foreign_live(session.owner_pid, session.owner_create_time):
@@ -394,6 +401,7 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
+        self._sweep_orphan_results(foreign_task_ids)
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
@@ -890,6 +898,30 @@ class Registry:
         except Exception:
             log.exception("stall cancel failed for task %s", task_id)
 
+    def _sweep_orphan_results(self, foreign_task_ids: set[str]) -> None:
+        """Remove result files whose task never reached state.json.
+
+        A crash between the result write and the final save() leaves a file
+        no task row ever references (A1). Rows owned by a live sibling
+        instance are not in self.tasks, so their files are kept via
+        foreign_task_ids.
+        """
+        results_dir = self.home / "results"
+        if not results_dir.is_dir():
+            return
+        # task ids are "task_<hex>" (_new_id); narrowing the glob avoids
+        # touching unrelated .txt files someone may drop in results/.
+        for orphan in results_dir.glob("task_*.txt"):
+            task_id = orphan.stem
+            if task_id in self.tasks or task_id in foreign_task_ids:
+                continue
+            try:
+                orphan.unlink()
+            except OSError:
+                log.warning("could not remove orphan result %s", orphan)
+            else:
+                log.info("removed orphan result %s (no task row)", orphan.name)
+
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
         self._requests = {
@@ -991,8 +1023,29 @@ class Registry:
 
         self._idle[session_id] = asyncio.create_task(_idle(), name=f"idle-{session_id}")
 
-    def _require_task(self, task_id: str) -> Task:
+    def _task_from_disk(self, task_id: str) -> Task | None:
+        """Last-persisted row for a task this instance does not own.
+
+        _merge_owned keeps sibling instances' rows in state.json, so a task
+        unknown in memory can still answer read calls from its persisted
+        state (F5). Lifecycle calls deliberately stay memory-only.
+        """
+        try:
+            rows = self._load_state().get("tasks") or []
+        except Exception:
+            return None
+        for raw in rows:
+            if isinstance(raw, dict) and raw.get("task_id") == task_id:
+                try:
+                    return Task.model_validate(raw)
+                except ValueError:
+                    return None
+        return None
+
+    def _require_task(self, task_id: str, *, allow_disk: bool = False) -> Task:
         task = self.tasks.get(task_id)
+        if task is None and allow_disk:
+            task = self._task_from_disk(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id}")
         return task
@@ -1079,6 +1132,10 @@ class Registry:
             "finished_at": task.finished_at,
             "recent_activity": recent_activity(events),
         }
+        if task.task_id not in self.tasks:
+            # Read via the disk fallback: values are the other instance's
+            # last-persisted state, not live data.
+            payload["from_state"] = True
         if task.started_at:
             start = datetime.fromisoformat(task.started_at)
             end = datetime.fromisoformat(task.finished_at) if task.finished_at else datetime.fromisoformat(iso())
@@ -1117,7 +1174,7 @@ class Registry:
         return {"timed_out": False, **self._task_snapshot(self.tasks[task_id], include_result=True)}
 
     def check_task(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id))
+        return self._task_snapshot(self._require_task(task_id, allow_disk=True))
 
     def get_result(
         self,
@@ -1129,7 +1186,7 @@ class Registry:
             raise ValueError("cursor must be non-negative")
         if not 1 <= max_chars <= RESULT_PAGE_MAX_CHARS:
             raise ValueError(f"max_chars must be between 1 and {RESULT_PAGE_MAX_CHARS}")
-        task = self._require_task(task_id)
+        task = self._require_task(task_id, allow_disk=True)
         path = result_path(task.task_id, self.home)
         artifact = path.is_file()
         try:

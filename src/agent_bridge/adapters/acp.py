@@ -689,7 +689,7 @@ class AcpAdapter(Adapter):
         self._cursor_models_cache: dict[str, str] | None = None
 
     def _env(self) -> dict[str, str]:
-        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
+        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
         if self.agent.name == "claude":
             return apply_claude_gateway_env(env)
         if self.agent.name == "devin":

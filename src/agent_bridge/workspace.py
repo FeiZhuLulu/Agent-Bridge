@@ -7,7 +7,6 @@ tool_call updates. Protocol scraping alone then reports files_changed=[].
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 SKIP_DIR_NAMES = {
@@ -74,16 +73,13 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
                         if entry.is_dir(follow_symlinks=False):
                             # Windows junctions pass is_dir(follow_symlinks=False)
                             # but point outside cwd; traversing them attributes
-                            # foreign files as workspace writes (E2). The
-                            # DirEntry.is_junction method needs Python 3.12;
-                            # the reparse-point attribute works everywhere.
-                            is_junction = getattr(entry, "is_junction", lambda: False)()
-                            st = entry.stat(follow_symlinks=False)
-                            is_reparse = bool(
-                                getattr(st, "st_file_attributes", 0)
-                                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-                            )
-                            if entry.name not in SKIP_DIR_NAMES and not is_junction and not is_reparse:
+                            # foreign files as workspace writes (E2).
+                            # DirEntry.is_junction needs Python 3.12, so fall
+                            # back to ismount: it matches the mount-point
+                            # reparse tag only, not cloud (OneDrive) reparse
+                            # dirs that legitimately belong to the workspace.
+                            is_junction = getattr(entry, "is_junction", lambda: False)() or os.path.ismount(entry.path)
+                            if entry.name not in SKIP_DIR_NAMES and not is_junction:
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             st = entry.stat(follow_symlinks=False)

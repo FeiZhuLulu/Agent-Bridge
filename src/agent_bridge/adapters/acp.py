@@ -51,7 +51,7 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
-from agent_bridge.worker_env import build_worker_env
+from agent_bridge.worker_env import build_worker_env, denied_by_policy
 from agent_bridge.workspace import collect_update_paths
 from agent_bridge.zcode_meta import (
     ZCODE_MODE_YOLO,
@@ -697,7 +697,16 @@ class AcpAdapter(Adapter):
     def _env(self) -> dict[str, str]:
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
         if self.agent.name == "claude":
-            env = apply_claude_gateway_env(env)
+            # The gateway rewrite exists only to install ANTHROPIC_AUTH_TOKEN;
+            # when the user denies that token, skip the rewrite entirely so a
+            # direct ANTHROPIC_API_KEY is not blanked for a token the gate
+            # would strip anyway.
+            if not denied_by_policy(
+                "ANTHROPIC_AUTH_TOKEN",
+                self.env_config,
+                set(self.env_config.set) | set(self.agent.env),
+            ):
+                env = apply_claude_gateway_env(env)
         elif self.agent.name == "devin":
             env = apply_devin_env(env)
         # Gateway derivation above can recreate a denied key; the deny gate

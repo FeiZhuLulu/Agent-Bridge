@@ -268,6 +268,28 @@ def test_worker_env_user_deny_patterns():
     assert env["KEEP"] == "y"
 
 
+def test_bridge_owned_keys_survive_deny_star(tmp_path):
+    """deny=["*"] must not strip the worker-context marker or nested
+    AGENT_BRIDGE_HOME — that would break nested-Bridge isolation."""
+    cfg = EnvConfig(deny=["*"])
+    env = build_worker_env(
+        base={"SECRET_KEY": "s"},
+        config=cfg,
+        user_env={},
+        machine_env={},
+        log_fill=False,
+        worker_context=True,
+        home=tmp_path,
+    )
+    assert env[WORKER_CONTEXT_ENV] == WORKER_CONTEXT_VALUE
+    assert "AGENT_BRIDGE_HOME" in env
+    assert "SECRET_KEY" not in env
+    out = enforce_env_deny(env, cfg)
+    assert out[WORKER_CONTEXT_ENV] == WORKER_CONTEXT_VALUE
+    assert "AGENT_BRIDGE_HOME" in out
+    assert "SECRET_KEY" not in out
+
+
 def test_enforce_env_deny_on_rewritten_spawn_env():
     """The final spawn gate strips keys that post-build rewriting recreated;
     keys explicitly set via env.set or the agent's own env still win."""

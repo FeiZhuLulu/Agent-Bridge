@@ -287,7 +287,7 @@ Bridge rebuilds the environment **once at startup** (and again for each worker s
 | `[env.set]` | Explicit key/value map |
 | `[agents.<name>.env]` | Per-worker overlay |
 
-`[env] deny = ["GLOB", ...]` removes worker env keys matching those globs. Keys set explicitly via `[env] set` or the agent's `env` always survive. There is no built-in denylist.
+`[env] deny = ["GLOB", ...]` removes worker env keys matching those globs. Keys set explicitly via `[env] set` or the agent's `env` always survive, and Bridge's own `AGENT_BRIDGE_HOME` and worker-context marker are never removed. There is no built-in denylist.
 
 Do **not** put secrets in the repo `agents.toml`. Pin machine-local values in `%USERPROFILE%\.agent-bridge\agents.toml` (see [agents.toml.example](agents.toml.example)):
 

@@ -508,6 +508,12 @@ def install_host_env(config: EnvConfig, *, base: Mapping[str, str] | None = None
     return status
 
 
+# Bridge's own wiring must survive every deny pattern: stripping the
+# worker-context marker or the nested AGENT_BRIDGE_HOME would let a nested
+# Bridge run as a coordinator on the default home.
+BRIDGE_OWNED_ENV_KEYS = frozenset({WORKER_CONTEXT_ENV, "AGENT_BRIDGE_HOME"})
+
+
 def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None) -> bool:
     """True when the user's ``env.deny`` globs would strip ``key`` from a worker env.
 
@@ -517,7 +523,7 @@ def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None)
     _apply_env_deny and enforce_env_deny so a denied key cannot re-enter
     through post-build rewriting.
     """
-    if explicit and key in explicit:
+    if key in BRIDGE_OWNED_ENV_KEYS or (explicit and key in explicit):
         return False
     user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
     return any(fnmatch.fnmatchcase(key, pat) for pat in user_deny)

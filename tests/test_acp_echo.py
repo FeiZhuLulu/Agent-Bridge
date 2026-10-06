@@ -222,3 +222,53 @@ def test_legacy_task_has_no_failure_evidence():
         "message": "old", "status": "failed", "error": "Connection closed",
     })
     assert task.failure is None
+
+
+@pytest.mark.asyncio
+async def test_acp_load_failure_surfaces_session_recreated(bridge_home, tmp_path, monkeypatch):
+    """H-05: session/load -> session/new fallback must be visible to the
+    coordinator (task warning) and auditable later (transcript event)."""
+    echo = Path(__file__).resolve().parent / "echo_agent.py"
+    work = tmp_path / "work"
+    work.mkdir()
+    cfg = AgentConfig(
+        name="echo",
+        protocol="acp",
+        command=[sys.executable, str(echo)],
+        revivable=True,
+        idle_unload_sec=0,
+    )
+    adapter = AcpAdapter(cfg, bridge_home)
+    session = Session(session_id="sess_reload", agent="echo", cwd=str(work.resolve()))
+    first = Task(
+        task_id="task_reload_1",
+        session_id=session.session_id,
+        agent="echo",
+        message="one",
+        cwd=str(work.resolve()),
+    )
+    try:
+        r1 = await adapter.run_turn(session, first)
+        assert r1.stop_reason == "end_turn"
+        assert session.native_session_id
+        await adapter.shutdown(session)
+        # Make the worker's session/load fail (generic, non-unavailable) on
+        # the next spawn so Bridge takes the session/new fallback.
+        cfg.env["BRIDGE_ECHO_FAILURE"] = "load_internal"
+        second = Task(
+            task_id="task_reload_2",
+            session_id=session.session_id,
+            agent="echo",
+            message="two",
+            cwd=str(work.resolve()),
+        )
+        r2 = await adapter.run_turn(session, second)
+        assert r2.stop_reason == "end_turn"
+        assert any("context is lost" in w for w in r2.warnings)
+        from agent_bridge.transcript import read_events
+
+        types = {event["type"] for event in read_events(session.session_id, bridge_home)}
+        assert "session_recreated" in types
+    finally:
+        cfg.env.pop("BRIDGE_ECHO_FAILURE", None)
+        await adapter.shutdown(session)

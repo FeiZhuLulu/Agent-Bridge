@@ -554,6 +554,7 @@ def build_worker_env(
     machine_env: Mapping[str, str] | None = None,
     log_fill: bool = True,
     worker_context: bool = False,
+    home: Path | None = None,
 ) -> dict[str, str]:
     env, origin = resolve_env(
         config,
@@ -576,7 +577,10 @@ def build_worker_env(
     if worker_context:
         env[WORKER_CONTEXT_ENV] = WORKER_CONTEXT_VALUE
         origin[WORKER_CONTEXT_ENV] = "worker-context"
-        env["AGENT_BRIDGE_HOME"] = str(nested_bridge_home(bridge_home()))
+        # The nested home derives from the registry home, not the env var:
+        # a Bridge launched with an explicit home= would otherwise send the
+        # worker's nested Bridge to a different directory (G2).
+        env["AGENT_BRIDGE_HOME"] = str(nested_bridge_home(home) if home is not None else nested_bridge_home(bridge_home()))
         origin["AGENT_BRIDGE_HOME"] = "worker-context"
     if log_fill:
         status = describe_env(config, env=env, origin=origin)

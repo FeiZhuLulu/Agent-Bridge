@@ -168,6 +168,21 @@ def test_worker_context_forced_after_overrides(tmp_path, monkeypatch):
     assert env["AGENT_BRIDGE_HOME"] == str((tmp_path / "nested").resolve())
 
 
+def test_worker_context_pins_nested_home_to_registry_home(tmp_path, monkeypatch):
+    # A Bridge started with an explicit home= must derive the worker's nested
+    # dir from that home, not from the process env var (G2).
+    monkeypatch.setenv("AGENT_BRIDGE_HOME", str(tmp_path / "from_env"))
+    env = build_worker_env(
+        base={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+        worker_context=True,
+        home=tmp_path / "from_registry",
+    )
+    assert env["AGENT_BRIDGE_HOME"] == str((tmp_path / "from_registry" / "nested").resolve())
+
+
 def test_default_build_worker_env_does_not_add_mark():
     env = build_worker_env(
         base={WORKER_CONTEXT_ENV: "coordinator"},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from agent_bridge.transcript import (
     append_event,
     flush_pending,
     flush_session,
+    forget_session,
     forget_worker_activity,
     mark_worker_activity,
     page_events,
@@ -97,6 +99,18 @@ STALL_CANCEL_GRACE_SEC = 15
 STATE_WRITE_ATTEMPTS = 5
 STATE_WRITE_RETRY_BASE_SEC = 0.05
 STATE_LOCK_TIMEOUT_SEC = 5.0
+# flush_state() waits for the saves issued at call time; write failures
+# degrade to a logged warning instead of raising into the caller.
+STATE_FLUSH_ATTEMPTS = 3
+# Poll cadence while flush_state() waits on the shared flusher; small so a
+# terminal wait_task does not add up to a full second under save traffic.
+STATE_FLUSH_POLL_SEC = 0.05
+# state.json is an index, not a data store: task message/result bodies are
+# persisted truncated so a long-lived Bridge keeps each write bounded.
+STATE_MESSAGE_MAX = 2000
+STATE_RESULT_TEXT_MAX = 6000
+# Persisted request_id bindings kept; bindings also drop with their task.
+REQUEST_KEEP_MAX = 1000
 
 
 def _new_id(prefix: str) -> str:
@@ -125,6 +139,11 @@ def _tail(text: str, limit: int = RESULT_TAIL) -> str:
     return encoded[-limit:].decode("utf-8", errors="ignore")
 
 
+def _request_fingerprint(request: tuple) -> str:
+    blob = json.dumps(list(request), ensure_ascii=False, default=str, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 class Registry:
     def __init__(
         self,
@@ -139,7 +158,9 @@ class Registry:
         self.config = config
         self.sessions: dict[str, Session] = {}
         self.tasks: dict[str, Task] = {}
-        self._requests: dict[str, tuple[tuple, str]] = {}
+        # request_id -> (request fingerprint, task_id). Fingerprints instead
+        # of request tuples so bindings can persist to state.json compactly.
+        self._requests: dict[str, tuple[str, str]] = {}
         self._adapters: dict[str, Adapter] = {}
         self._done: dict[str, asyncio.Event] = {}
         self._idle: dict[str, asyncio.Task[None]] = {}
@@ -158,8 +179,12 @@ class Registry:
         self._quota_cache = QuotaCache(config.quota.cache_sec)
         self._stopping = False
         self._pending_state: dict[str, list[dict]] | None = None
+        self._pending_gen = 0
         self._flush_task: asyncio.Task[None] | None = None
+        self._save_gen = 0
+        self._flushed_gen = 0
         self._state_error: Exception | None = None
+        self._state_quarantined = False
 
     @classmethod
     def create(
@@ -216,10 +241,33 @@ class Registry:
         merged.update(mine)
         return list(merged.values())
 
+    @staticmethod
+    def _state_task_row(task: Task) -> dict:
+        row = task.model_dump(mode="json")
+        # Full bodies already live in result files and transcripts; writing
+        # them into state.json again grew the payload without bound.
+        if len(row["message"]) > STATE_MESSAGE_MAX:
+            row["message"] = row["message"][:STATE_MESSAGE_MAX]
+        row["result_text"] = _tail(row["result_text"], STATE_RESULT_TEXT_MAX)
+        return row
+
     def _own_rows(self) -> dict[str, list[dict]]:
+        request_rows = [
+            {
+                "request_id": rid,
+                "task_id": tid,
+                "fingerprint": fp,
+                # Owner stamps let _merge_owned drop rows this instance pruned;
+                # without them pruned bindings linger on disk forever.
+                "owner_pid": self._owner_pid,
+                "owner_create_time": self._owner_create_time,
+            }
+            for rid, (fp, tid) in self._requests.items()
+        ][-REQUEST_KEEP_MAX:]
         return {
             "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
-            "tasks": [t.model_dump(mode="json") for t in self.tasks.values()],
+            "tasks": [self._state_task_row(t) for t in self.tasks.values()],
+            "requests": request_rows,
         }
 
     def _write_state(self, own: dict[str, list[dict]]) -> None:
@@ -246,6 +294,11 @@ class Registry:
                                 {row["task_id"]: row for row in own["tasks"]},
                                 "task_id",
                             ),
+                            "requests": self._merge_owned(
+                                disk.get("requests") or [],
+                                {row["request_id"]: row for row in own["requests"]},
+                                "request_id",
+                            ),
                         },
                     )
                 return
@@ -256,6 +309,8 @@ class Registry:
 
     def save(self) -> None:
         self._pending_state = self._own_rows()
+        self._save_gen += 1
+        self._pending_gen = self._save_gen
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -264,8 +319,10 @@ class Registry:
                 self._write_state(own)
             except Exception as exc:
                 self._pending_state = own
+                self._pending_gen = self._save_gen
                 self._state_error = exc
                 raise
+            self._flushed_gen = self._save_gen
             self._state_error = None
             return
         if self._flush_task is None or self._flush_task.done():
@@ -276,28 +333,62 @@ class Registry:
         # save() cannot observe a still-running flush task and skip creating
         # a new one after this loop has already decided to exit.
         while self._pending_state is not None:
-            own, self._pending_state = self._pending_state, None
+            own, gen = self._pending_state, self._pending_gen
+            self._pending_state = None
             try:
                 await asyncio.to_thread(self._write_state, own)
             except Exception as exc:
                 # Keep the newest snapshot. A later save or flush can retry it.
                 if self._pending_state is None:
                     self._pending_state = own
+                    self._pending_gen = gen
                 self._state_error = exc
                 log.exception("could not write state.json")
                 return
+            self._flushed_gen = gen
             self._state_error = None
 
-    async def flush_state(self) -> None:
-        """Wait until every save() so far is on disk."""
-        task = self._flush_task
-        if self._pending_state is not None and (task is None or task.done()):
-            task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
-            self._flush_task = task
-        if task is not None and not task.done():
-            await task
-        if self._pending_state is not None:
-            raise RuntimeError("could not persist state.json") from self._state_error
+    async def flush_state(self) -> bool:
+        """Wait until every save() issued so far is on disk.
+
+        Generation-scoped and returns True iff that generation landed on
+        disk: a save() issued *after* this call does not block it, so
+        concurrent saves can no longer trigger the spurious "could not
+        persist state.json" raise. Persistent write failures degrade to a
+        logged warning — a broken disk must not kill coordination; the next
+        save() retries the same rows because snapshots are cumulative.
+        Callers that cannot proceed on stale disk (start, stop) check the
+        return value; wait_task reports it as ``persisted``.
+        """
+        target = self._save_gen
+        for _ in range(STATE_FLUSH_ATTEMPTS):
+            while self._flushed_gen < target:
+                task = self._flush_task
+                fresh = False
+                if task is None or task.done():
+                    if self._pending_state is None:
+                        break
+                    task = asyncio.create_task(self._flush_state_loop(), name="state-flush")
+                    self._flush_task = task
+                    fresh = True
+                # Poll the shared flusher instead of awaiting it to the end:
+                # under steady save() traffic the loop keeps draining newer
+                # snapshots, but our target generation is already on disk.
+                await asyncio.wait({task}, timeout=STATE_FLUSH_POLL_SEC)
+                if fresh and task.done():
+                    break  # this attempt's run finished; retry or give up
+            if self._flushed_gen >= target:
+                return True
+            if self._pending_state is None:
+                break
+        if self._flushed_gen < target:
+            log.warning(
+                "state.json persistence degraded (flushed %s of %s saves): %s",
+                self._flushed_gen,
+                target,
+                self._state_error,
+            )
+        return False
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -356,6 +447,7 @@ class Registry:
                 )
                 os.replace(path, quarantine)
                 log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
+                self._state_quarantined = True
                 return {}
         if not isinstance(payload, dict):
             log.warning("ignoring non-object %s; starting from empty state", path)
@@ -367,6 +459,13 @@ class Registry:
         install_host_env(self.config.env)
         reap_orphans(self.home)
         payload = self._load_state()
+        foreign_task_ids = {
+            raw["task_id"]
+            for raw in payload.get("tasks") or []
+            if isinstance(raw, dict)
+            and isinstance(raw.get("task_id"), str)
+            and self._foreign_live(raw.get("owner_pid"), raw.get("owner_create_time"))
+        }
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
             if self._foreign_live(session.owner_pid, session.owner_create_time):
@@ -395,13 +494,30 @@ class Registry:
             done = asyncio.Event()
             done.set()
             self._done[task.task_id] = done
+        for raw in payload.get("requests") or []:
+            if not isinstance(raw, dict):
+                continue
+            rid = raw.get("request_id")
+            tid = raw.get("task_id")
+            fp = raw.get("fingerprint")
+            if rid and fp and tid in self.tasks:
+                self._requests[rid] = (fp, tid)
+        if self._state_quarantined:
+            # The tasks map is empty only because state was quarantined, not
+            # because the tasks are gone: sweeping now would delete result
+            # files whose rows live in the corrupt file (review).
+            log.warning("state.json was quarantined; skipping orphan result sweep")
+        else:
+            self._sweep_orphan_results(foreign_task_ids)
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
         self._prune()
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
         self.touch_activity()
         if self.config.server.idle_exit_sec > 0:
             self._watchdog = asyncio.create_task(
@@ -416,9 +532,15 @@ class Registry:
         self._watchdog = None
         if watchdog is not None:
             watchdog.cancel()
-        for idle in list(self._idle.values()):
+        idles = list(self._idle.values())
+        for idle in idles:
             idle.cancel()
         self._idle.clear()
+        if idles:
+            # Await cancellation so an in-flight idle unload finishes
+            # unwinding before adapter shutdown — otherwise the loop may close
+            # with a worker half-reaped.
+            await asyncio.wait(idles, timeout=STOP_TASK_GRACE_SEC)
         bgs = [task for task in self._bg.values() if not task.done()]
         for bg in bgs:
             bg.cancel()
@@ -445,7 +567,8 @@ class Registry:
         except OSError:
             log.exception("could not flush transcripts during shutdown")
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
 
     def _adapter_for(self, session: Session) -> Adapter:
         existing = self._adapters.get(session.session_id)
@@ -596,8 +719,8 @@ class Registry:
         request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested)
         async with self._lock:
             if request_id is not None and request_id in self._requests:
-                previous, task_id = self._requests[request_id]
-                if previous != request:
+                previous_fp, task_id = self._requests[request_id]
+                if previous_fp != _request_fingerprint(request):
                     raise ValueError("request_id is already bound to a different dispatch request")
                 task = self.tasks[task_id]
                 return {
@@ -659,7 +782,7 @@ class Registry:
             self._stamp_owner(task)
             self.tasks[task.task_id] = task
             if request_id is not None:
-                self._requests[request_id] = (request, task.task_id)
+                self._requests[request_id] = (_request_fingerprint(request), task.task_id)
             self._done[task.task_id] = asyncio.Event()
             self._cancel_idle(session.session_id)
             self._prune()
@@ -695,13 +818,15 @@ class Registry:
         try:
             mark_worker_activity(session.session_id, self.home)
             before = await asyncio.to_thread(snapshot_workspace, task.cwd)
-            limit = self.config.get(session.agent).stall_timeout_sec
+            agent_cfg = self.config.get(session.agent)
+            limit = agent_cfg.stall_timeout_sec
+            turn_cap = agent_cfg.turn_timeout_sec
             watch = (
                 asyncio.create_task(
-                    self._stall_watch(task, session, adapter, limit),
+                    self._stall_watch(task, session, adapter, limit, turn_cap),
                     name=f"stall-{task_id}",
                 )
-                if limit > 0
+                if limit > 0 or turn_cap > 0
                 else None
             )
             result = await adapter.run_turn(session, task)
@@ -720,10 +845,10 @@ class Registry:
                     f"full result persistence failed: {type(exc).__name__}: {exc}"
                 )
                 log.exception("could not persist full result for task %s", task.task_id)
-            full_changed = await asyncio.to_thread(
+            inside_changed, outside_changed = await asyncio.to_thread(
                 merge_files_changed, task.cwd, result.files_changed, before
             )
-            self._set_files_changed(task, full_changed)
+            self._set_files_changed(task, inside_changed, outside_changed)
             task.usage = result.usage
             if session.agent == "grok":
                 observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
@@ -792,10 +917,10 @@ class Registry:
                     task.files_changed_state = FilesChangedState.unavailable
                 else:
                     try:
-                        full_changed = await asyncio.to_thread(
+                        inside_changed, outside_changed = await asyncio.to_thread(
                             merge_files_changed, task.cwd, [], before
                         )
-                        self._set_files_changed(task, full_changed)
+                        self._set_files_changed(task, inside_changed, outside_changed)
                     except Exception as exc:
                         task.files_changed_state = FilesChangedState.unavailable
                         task.warnings.append(
@@ -839,10 +964,13 @@ class Registry:
             self._schedule_idle(session.session_id)
 
     @staticmethod
-    def _set_files_changed(task: Task, paths: list[str]) -> None:
+    def _set_files_changed(task: Task, paths: list[str], outside: list[str] | None = None) -> None:
         task.files_changed_total = len(paths)
         task.files_changed = paths[:FILES_CHANGED_MAX]
         task.files_changed_truncated = len(paths) > FILES_CHANGED_MAX
+        outside = outside or []
+        task.files_outside_cwd_total = len(outside)
+        task.files_outside_cwd = outside[:FILES_CHANGED_MAX]
         task.files_changed_state = FilesChangedState.collected
 
     async def _stall_watch(
@@ -851,30 +979,54 @@ class Registry:
         session: Session,
         adapter: Adapter,
         limit: int,
+        turn_cap: int = 0,
     ) -> None:
+        """Dual watchdog: ``limit`` bounds worker silence, ``turn_cap`` bounds
+        total turn wall-clock. Silence only counts worker-originated transcript
+        events, so a heartbeat-spamming worker still needs the cap (H-16)."""
+        started = time.monotonic()
         while True:
             silence = worker_silence_sec(session.session_id, self.home) or 0.0
-            remaining = limit - silence
-            if remaining <= 0:
+            elapsed = time.monotonic() - started
+            if limit > 0 and silence >= limit:
+                reason = "stalled"
                 break
-            await asyncio.sleep(min(remaining, STALL_POLL_SEC))
+            if turn_cap > 0 and elapsed >= turn_cap:
+                reason = "timed_out"
+                break
+            waits: list[float] = [STALL_POLL_SEC]
+            if limit > 0:
+                waits.append(limit - silence)
+            if turn_cap > 0:
+                waits.append(turn_cap - elapsed)
+            await asyncio.sleep(max(min(waits), 0.05))
         if task.status in TERMINAL_STATUSES:
             return
         log.warning(
-            "task %s stalled: no worker output for %ss; cancelling the turn",
+            "task %s %s: cancelling the turn (silence=%.0fs, elapsed=%.0fs)",
             task.task_id,
-            limit,
+            reason,
+            silence,
+            elapsed,
         )
         task.status = TaskStatus.failed
-        task.stop_reason = "stalled"
+        task.stop_reason = reason
         task.error = (
             f"worker produced no output for {limit}s (stall_timeout_sec); "
             "Bridge cancelled the turn"
+            if reason == "stalled"
+            else f"turn exceeded turn_timeout_sec={turn_cap}s; Bridge cancelled the turn"
         )
         append_event(
             session.session_id,
             "error",
-            {"error": task.error, "stalled": True, "stall_timeout_sec": limit},
+            {
+                "error": task.error,
+                "stalled": reason == "stalled",
+                "timed_out": reason == "timed_out",
+                "stall_timeout_sec": limit,
+                "turn_timeout_sec": turn_cap,
+            },
             self.home,
         )
         # The turn normally returns (and _run_task tears this watch down)
@@ -893,6 +1045,49 @@ class Registry:
             await adapter.cancel(session)
         except Exception:
             log.exception("stall cancel failed for task %s", task_id)
+
+    def _sweep_orphan_results(self, foreign_task_ids: set[str]) -> None:
+        """Remove result files whose task never reached state.json.
+
+        A crash between the result write and the final save() leaves a file
+        no task row ever references (A1). Rows owned by a live sibling
+        instance are not in self.tasks, so their files are kept via
+        foreign_task_ids.
+        """
+        results_dir = self.home / "results"
+        if not results_dir.is_dir():
+            return
+        # Re-read state under the same lock writers use: a sibling may have
+        # written a task row between the startup snapshot and this sweep —
+        # deleting its result file would destroy a live artifact (review).
+        path = state_path(self.home)
+        lock_path = path.with_name(f"{path.name}.lock")
+        try:
+            with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+                disk = read_json_strict(path, {})
+        except (OSError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            # Unknown task set — deleting on a stale view risks live results.
+            # FileLockTimeout is a TimeoutError: a slow sibling writer must not
+            # abort startup over an optional sweep.
+            log.warning("could not re-read %s; skipping orphan result sweep", path)
+            return
+        known = set(self.tasks) | foreign_task_ids
+        if isinstance(disk, dict):
+            for row in disk.get("tasks") or []:
+                if isinstance(row, dict) and isinstance(row.get("task_id"), str):
+                    known.add(row["task_id"])
+        # task ids are "task_<hex>" (_new_id); narrowing the glob avoids
+        # touching unrelated .txt files dropped in results/.
+        for orphan in results_dir.glob("task_*.txt"):
+            task_id = orphan.stem
+            if task_id in known:
+                continue
+            try:
+                orphan.unlink()
+            except OSError:
+                log.warning("could not remove orphan result %s", orphan)
+            else:
+                log.info("removed orphan result %s (no task row)", orphan.name)
 
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
@@ -924,7 +1119,9 @@ class Registry:
         for session in drop:
             session_id = session.session_id
             self.sessions.pop(session_id, None)
-            forget_worker_activity(session_id, self.home)
+            # Result files die with their tasks; the per-session transcript
+            # would otherwise grow unbounded on disk (H-02).
+            forget_session(session_id, self.home)
             self._cancel_idle(session_id)
             for task in [item for item in self.tasks.values() if item.session_id == session_id]:
                 self._drop_task(task.task_id)
@@ -990,13 +1187,39 @@ class Registry:
                     await adapter.shutdown(current)
                 except Exception:
                     log.exception("idle unload failed for %s", session_id)
+                else:
+                    # Drop the dead adapter mapping: keeping it excludes the
+                    # session from inactive pruning (the filter requires
+                    # `not in _adapters`); revival rebuilds via _adapter_for.
+                    self._adapters.pop(session_id, None)
             current.proc_state = ProcState.idle_unloaded
             self.save()
 
         self._idle[session_id] = asyncio.create_task(_idle(), name=f"idle-{session_id}")
 
-    def _require_task(self, task_id: str) -> Task:
+    def _task_from_disk(self, task_id: str) -> Task | None:
+        """Last-persisted row for a task this instance does not own.
+
+        _merge_owned keeps sibling instances' rows in state.json, so a task
+        unknown in memory can still answer read calls from its persisted
+        state (F5). Lifecycle calls deliberately stay memory-only.
+        """
+        try:
+            rows = self._load_state().get("tasks") or []
+        except Exception:
+            return None
+        for raw in rows:
+            if isinstance(raw, dict) and raw.get("task_id") == task_id:
+                try:
+                    return Task.model_validate(raw)
+                except ValueError:
+                    return None
+        return None
+
+    def _require_task(self, task_id: str, *, allow_disk: bool = False) -> Task:
         task = self.tasks.get(task_id)
+        if task is None and allow_disk:
+            task = self._task_from_disk(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id}")
         return task
@@ -1052,10 +1275,16 @@ class Registry:
             )
         if task.stop_reason == "stalled":
             hint += (
-                " The worker went silent for stall_timeout_sec and Bridge cancelled the turn; "
+                " The worker produced no output for stall_timeout_sec and Bridge cancelled the turn; "
                 "read get_transcript for its last activity, then either dispatch a narrower "
                 f"task on the same session_id or raise [agents.{task.agent}] stall_timeout_sec "
                 "if that step was legitimately long."
+            )
+        if task.stop_reason == "timed_out":
+            hint += (
+                " The turn hit turn_timeout_sec and Bridge cancelled it; "
+                f"raise [agents.{task.agent}] turn_timeout_sec if turns legitimately "
+                "need more wall-clock time."
             )
         return hint
 
@@ -1074,6 +1303,8 @@ class Registry:
             "files_changed_total": task.files_changed_total,
             "files_changed_truncated": task.files_changed_truncated,
             "files_changed_state": task.files_changed_state.value,
+            "files_outside_cwd": task.files_outside_cwd,
+            "files_outside_cwd_total": task.files_outside_cwd_total,
             "model": task.model,
             "effort": task.effort,
             "observed_model": task.observed_model,
@@ -1083,6 +1314,10 @@ class Registry:
             "finished_at": task.finished_at,
             "recent_activity": recent_activity(events),
         }
+        if task.task_id not in self.tasks:
+            # Read via the disk fallback: values are the other instance's
+            # last-persisted state, not live data.
+            payload["from_state"] = True
         if task.started_at:
             start = datetime.fromisoformat(task.started_at)
             end = datetime.fromisoformat(task.finished_at) if task.finished_at else datetime.fromisoformat(iso())
@@ -1118,10 +1353,19 @@ class Registry:
                 await asyncio.wait_for(event.wait(), timeout=timeout_sec)
             except TimeoutError:
                 return {"timed_out": True, **self._task_snapshot(self.tasks[task_id])}
-        return {"timed_out": False, **self._task_snapshot(self.tasks[task_id], include_result=True)}
+        persisted = False
+        if task.status in TERMINAL_STATUSES:
+            # A terminal answer must also be on disk, not merely queued
+            # behind the background flusher.
+            persisted = await self.flush_state()
+        return {
+            "timed_out": False,
+            "persisted": persisted,
+            **self._task_snapshot(self.tasks[task_id], include_result=True),
+        }
 
     def check_task(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id))
+        return self._task_snapshot(self._require_task(task_id, allow_disk=True))
 
     def get_result(
         self,
@@ -1133,7 +1377,7 @@ class Registry:
             raise ValueError("cursor must be non-negative")
         if not 1 <= max_chars <= RESULT_PAGE_MAX_CHARS:
             raise ValueError(f"max_chars must be between 1 and {RESULT_PAGE_MAX_CHARS}")
-        task = self._require_task(task_id)
+        task = self._require_task(task_id, allow_disk=True)
         path = result_path(task.task_id, self.home)
         artifact = path.is_file()
         try:

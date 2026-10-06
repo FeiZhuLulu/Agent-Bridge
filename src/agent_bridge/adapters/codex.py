@@ -49,7 +49,7 @@ class CodexAdapter(Adapter):
         return None
 
     def _worker_env(self) -> dict[str, str]:
-        return build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
+        return build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
 
     def _base_cmd(self, env: dict[str, str] | None = None) -> list[str]:
         return resolve_codex_command(self.agent.command, self.agent.fallback_commands, env=env)
@@ -77,7 +77,13 @@ class CodexAdapter(Adapter):
                 if text:
                     tail = f"{tail}\n{text}"[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
-            log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+            log.warning(
+                "stderr drain aborted for %s (line over %s MiB or stream closed); "
+                "later stderr evidence is lost",
+                session_id,
+                STDIO_LIMIT // (1024 * 1024),
+                exc_info=True,
+            )
             return tail
 
     async def _write_prompt(self, proc: asyncio.subprocess.Process, message: str) -> None:
@@ -138,7 +144,14 @@ class CodexAdapter(Adapter):
             await self._write_prompt(proc, task.message)
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"codex emitted a stdout line longer than "
+                        f"{STDIO_LIMIT // (1024 * 1024)} MiB (asyncio stream limit); "
+                        "the turn cannot continue"
+                    ) from exc
                 if not line:
                     break
                 raw = line.decode("utf-8", errors="replace").rstrip()

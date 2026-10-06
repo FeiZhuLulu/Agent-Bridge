@@ -100,14 +100,13 @@ STATE_LOCK_TIMEOUT_SEC = 5.0
 # flush_state() waits for the saves issued at call time; write failures
 # degrade to a logged warning instead of raising into the caller.
 STATE_FLUSH_ATTEMPTS = 3
+# Poll cadence while flush_state() waits on the shared flusher; small so a
+# terminal wait_task does not add up to a full second under save traffic.
+STATE_FLUSH_POLL_SEC = 0.05
 # state.json is an index, not a data store: task message/result bodies are
 # persisted truncated so a long-lived Bridge keeps each write bounded.
 STATE_MESSAGE_MAX = 2000
 STATE_RESULT_TEXT_MAX = 6000
-# Live resident (ready) sessions kept before force-unloading the least
-# recently active ones. With idle_unload_sec=0 workers otherwise accumulate
-# a process each until the host runs out of memory.
-RESIDENT_SESSION_KEEP = 50
 # Persisted request_id bindings kept; bindings also drop with their task.
 REQUEST_KEEP_MAX = 1000
 
@@ -183,6 +182,7 @@ class Registry:
         self._save_gen = 0
         self._flushed_gen = 0
         self._state_error: Exception | None = None
+        self._state_quarantined = False
 
     @classmethod
     def create(
@@ -346,15 +346,17 @@ class Registry:
             self._flushed_gen = gen
             self._state_error = None
 
-    async def flush_state(self) -> None:
+    async def flush_state(self) -> bool:
         """Wait until every save() issued so far is on disk.
 
-        Generation-scoped: a save() issued *after* this call does not block
-        it, so concurrent saves can no longer trigger the spurious
-        "could not persist state.json" raise. Persistent write failures
-        degrade to a logged warning — a broken disk must not kill
-        coordination; the next save() retries the same rows because
-        snapshots are cumulative.
+        Generation-scoped and returns True iff that generation landed on
+        disk: a save() issued *after* this call does not block it, so
+        concurrent saves can no longer trigger the spurious "could not
+        persist state.json" raise. Persistent write failures degrade to a
+        logged warning — a broken disk must not kill coordination; the next
+        save() retries the same rows because snapshots are cumulative.
+        Callers that cannot proceed on stale disk (start, stop) check the
+        return value; wait_task reports it as ``persisted``.
         """
         target = self._save_gen
         for _ in range(STATE_FLUSH_ATTEMPTS):
@@ -370,11 +372,11 @@ class Registry:
                 # Poll the shared flusher instead of awaiting it to the end:
                 # under steady save() traffic the loop keeps draining newer
                 # snapshots, but our target generation is already on disk.
-                await asyncio.wait({task}, timeout=1.0)
+                await asyncio.wait({task}, timeout=STATE_FLUSH_POLL_SEC)
                 if fresh and task.done():
                     break  # this attempt's run finished; retry or give up
             if self._flushed_gen >= target:
-                return
+                return True
             if self._pending_state is None:
                 break
         if self._flushed_gen < target:
@@ -384,6 +386,7 @@ class Registry:
                 target,
                 self._state_error,
             )
+        return False
 
     def touch_activity(self) -> None:
         self._last_activity = time.monotonic()
@@ -442,6 +445,7 @@ class Registry:
                 )
                 os.replace(path, quarantine)
                 log.warning("moved unreadable %s to %s; starting from empty state", path, quarantine)
+                self._state_quarantined = True
                 return {}
         if not isinstance(payload, dict):
             log.warning("ignoring non-object %s; starting from empty state", path)
@@ -453,6 +457,13 @@ class Registry:
         install_host_env(self.config.env)
         reap_orphans(self.home)
         payload = self._load_state()
+        foreign_task_ids = {
+            raw["task_id"]
+            for raw in payload.get("tasks") or []
+            if isinstance(raw, dict)
+            and isinstance(raw.get("task_id"), str)
+            and self._foreign_live(raw.get("owner_pid"), raw.get("owner_create_time"))
+        }
         for raw in payload.get("sessions") or []:
             session = Session.model_validate(raw)
             if self._foreign_live(session.owner_pid, session.owner_create_time):
@@ -489,13 +500,22 @@ class Registry:
             fp = raw.get("fingerprint")
             if rid and fp and tid in self.tasks:
                 self._requests[rid] = (fp, tid)
+        if self._state_quarantined:
+            # The tasks map is empty only because state was quarantined, not
+            # because the tasks are gone: sweeping now would delete result
+            # files whose rows live in the corrupt file (review).
+            log.warning("state.json was quarantined; skipping orphan result sweep")
+        else:
+            self._sweep_orphan_results(foreign_task_ids)
         # Stamp adopted owners onto disk first so a following prune is not
         # undone by _merge_owned treating the old unowned rows as foreign.
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
         self._prune()
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
         self.touch_activity()
         if self.config.server.idle_exit_sec > 0:
             self._watchdog = asyncio.create_task(
@@ -515,7 +535,7 @@ class Registry:
             idle.cancel()
         self._idle.clear()
         if idles:
-            # Await cancellation so an in-flight over-cap/idle unload finishes
+            # Await cancellation so an in-flight idle unload finishes
             # unwinding before adapter shutdown — otherwise the loop may close
             # with a worker half-reaped.
             await asyncio.wait(idles, timeout=STOP_TASK_GRACE_SEC)
@@ -545,7 +565,8 @@ class Registry:
         except OSError:
             log.exception("could not flush transcripts during shutdown")
         self.save()
-        await self.flush_state()
+        if not await self.flush_state():
+            raise RuntimeError("could not persist state.json") from self._state_error
 
     def _adapter_for(self, session: Session) -> Adapter:
         existing = self._adapters.get(session.session_id)
@@ -934,9 +955,6 @@ class Registry:
                 (task.error or "")[:500],
             )
             self._schedule_idle(session.session_id)
-            # Re-check the resident cap: a burst of completions all land here
-            # and would otherwise stay resident until the next dispatch.
-            self._cap_resident_sessions()
 
     @staticmethod
     def _set_files_changed(task: Task, paths: list[str]) -> None:
@@ -994,6 +1012,49 @@ class Registry:
         except Exception:
             log.exception("stall cancel failed for task %s", task_id)
 
+    def _sweep_orphan_results(self, foreign_task_ids: set[str]) -> None:
+        """Remove result files whose task never reached state.json.
+
+        A crash between the result write and the final save() leaves a file
+        no task row ever references (A1). Rows owned by a live sibling
+        instance are not in self.tasks, so their files are kept via
+        foreign_task_ids.
+        """
+        results_dir = self.home / "results"
+        if not results_dir.is_dir():
+            return
+        # Re-read state under the same lock writers use: a sibling may have
+        # written a task row between the startup snapshot and this sweep —
+        # deleting its result file would destroy a live artifact (review).
+        path = state_path(self.home)
+        lock_path = path.with_name(f"{path.name}.lock")
+        try:
+            with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
+                disk = read_json_strict(path, {})
+        except (OSError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            # Unknown task set — deleting on a stale view risks live results.
+            # FileLockTimeout is a TimeoutError: a slow sibling writer must not
+            # abort startup over an optional sweep.
+            log.warning("could not re-read %s; skipping orphan result sweep", path)
+            return
+        known = set(self.tasks) | foreign_task_ids
+        if isinstance(disk, dict):
+            for row in disk.get("tasks") or []:
+                if isinstance(row, dict) and isinstance(row.get("task_id"), str):
+                    known.add(row["task_id"])
+        # task ids are "task_<hex>" (_new_id); narrowing the glob avoids
+        # touching unrelated .txt files dropped in results/.
+        for orphan in results_dir.glob("task_*.txt"):
+            task_id = orphan.stem
+            if task_id in known:
+                continue
+            try:
+                orphan.unlink()
+            except OSError:
+                log.warning("could not remove orphan result %s", orphan)
+            else:
+                log.info("removed orphan result %s (no task row)", orphan.name)
+
     def _drop_task(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
         self._requests = {
@@ -1034,53 +1095,6 @@ class Registry:
                 session.proc_state.value,
                 session.last_active_at,
             )
-        self._cap_resident_sessions()
-
-    def _cap_resident_sessions(self) -> None:
-        # Bound live resident sessions: the default idle_unload_sec=0 never
-        # unloads workers on its own, so `ready` sessions accumulate a worker
-        # process each until the host runs out of memory. Force-unload the
-        # least recently active ones beyond RESIDENT_SESSION_KEEP; they land
-        # as idle_unloaded and become regular prune candidates later.
-        if self._stopping:
-            # stop() owns all worker teardown; an over-cap unload scheduled now
-            # would race its adapter shutdown and could orphan a worker.
-            return
-        resident = [
-            session
-            for session in self.sessions.values()
-            if session.proc_state == ProcState.ready
-            and session.session_id in self._adapters
-            and self._busy_task(session.session_id) is None
-        ]
-        resident.sort(key=lambda item: _session_last_active_ts(item.last_active_at))
-        for session in resident[: max(0, len(resident) - RESIDENT_SESSION_KEEP)]:
-            log.info("over-cap unload of resident session %s", session.session_id)
-            self._unload_over_cap(session.session_id)
-
-    def _unload_over_cap(self, session_id: str) -> None:
-        self._cancel_idle(session_id)
-
-        async def _unload() -> None:
-            session = self.sessions.get(session_id)
-            if session is None or self._busy_task(session_id):
-                return
-            adapter = self._adapters.get(session_id)
-            if adapter is not None:
-                try:
-                    await adapter.shutdown(session)
-                except Exception:
-                    log.exception("over-cap unload failed for %s", session_id)
-                    return
-            # Drop the dead adapter mapping: keeping it excludes the session
-            # from inactive pruning (filter requires `not in _adapters`), so
-            # unloaded sessions would persist in every state snapshot. Revival
-            # rebuilds via _adapter_for using session.native_session_id.
-            self._adapters.pop(session_id, None)
-            session.proc_state = ProcState.idle_unloaded
-            self.save()
-
-        self._idle[session_id] = asyncio.create_task(_unload(), name=f"overcap-{session_id}")
 
     def _prune_tasks(self) -> None:
         by_session: dict[str, list[Task]] = {}
@@ -1138,16 +1152,38 @@ class Registry:
                 except Exception:
                     log.exception("idle unload failed for %s", session_id)
                 else:
-                    # Same as the over-cap path: drop the dead mapping so the
-                    # session stays prunable and revival rebuilds the adapter.
+                    # Drop the dead adapter mapping: keeping it excludes the
+                    # session from inactive pruning (the filter requires
+                    # `not in _adapters`); revival rebuilds via _adapter_for.
                     self._adapters.pop(session_id, None)
             current.proc_state = ProcState.idle_unloaded
             self.save()
 
         self._idle[session_id] = asyncio.create_task(_idle(), name=f"idle-{session_id}")
 
-    def _require_task(self, task_id: str) -> Task:
+    def _task_from_disk(self, task_id: str) -> Task | None:
+        """Last-persisted row for a task this instance does not own.
+
+        _merge_owned keeps sibling instances' rows in state.json, so a task
+        unknown in memory can still answer read calls from its persisted
+        state (F5). Lifecycle calls deliberately stay memory-only.
+        """
+        try:
+            rows = self._load_state().get("tasks") or []
+        except Exception:
+            return None
+        for raw in rows:
+            if isinstance(raw, dict) and raw.get("task_id") == task_id:
+                try:
+                    return Task.model_validate(raw)
+                except ValueError:
+                    return None
+        return None
+
+    def _require_task(self, task_id: str, *, allow_disk: bool = False) -> Task:
         task = self.tasks.get(task_id)
+        if task is None and allow_disk:
+            task = self._task_from_disk(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id}")
         return task
@@ -1234,6 +1270,10 @@ class Registry:
             "finished_at": task.finished_at,
             "recent_activity": recent_activity(events),
         }
+        if task.task_id not in self.tasks:
+            # Read via the disk fallback: values are the other instance's
+            # last-persisted state, not live data.
+            payload["from_state"] = True
         if task.started_at:
             start = datetime.fromisoformat(task.started_at)
             end = datetime.fromisoformat(task.finished_at) if task.finished_at else datetime.fromisoformat(iso())
@@ -1269,18 +1309,19 @@ class Registry:
                 await asyncio.wait_for(event.wait(), timeout=timeout_sec)
             except TimeoutError:
                 return {"timed_out": True, **self._task_snapshot(self.tasks[task_id])}
+        persisted = False
         if task.status in TERMINAL_STATUSES:
             # A terminal answer must also be on disk, not merely queued
             # behind the background flusher.
-            await self.flush_state()
+            persisted = await self.flush_state()
         return {
             "timed_out": False,
-            "persisted": self._flushed_gen >= self._save_gen,
+            "persisted": persisted,
             **self._task_snapshot(self.tasks[task_id], include_result=True),
         }
 
     def check_task(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id))
+        return self._task_snapshot(self._require_task(task_id, allow_disk=True))
 
     def get_result(
         self,
@@ -1292,7 +1333,7 @@ class Registry:
             raise ValueError("cursor must be non-negative")
         if not 1 <= max_chars <= RESULT_PAGE_MAX_CHARS:
             raise ValueError(f"max_chars must be between 1 and {RESULT_PAGE_MAX_CHARS}")
-        task = self._require_task(task_id)
+        task = self._require_task(task_id, allow_disk=True)
         path = result_path(task.task_id, self.home)
         artifact = path.is_file()
         try:

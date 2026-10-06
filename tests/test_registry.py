@@ -341,6 +341,78 @@ async def test_sibling_instances_do_not_clobber_state(bridge_home, tmp_path, mon
         await a.stop()
 
 
+@pytest.mark.asyncio
+async def test_start_sweeps_orphan_result_files(bridge_home, monkeypatch):
+    """A crash between the result write and the final save() leaves a file
+    no task row references (A1). Files of live sibling tasks are kept."""
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    foreign = Task(
+        task_id="task_foreign",
+        session_id="sess_foreign",
+        agent="fake",
+        message="x",
+        cwd=str(Path.cwd()),
+        status=TaskStatus.completed,
+        finished_at=iso(),
+        owner_pid=9999,
+        owner_create_time=1.0,
+    )
+    atomic_write_json(
+        state_path(bridge_home),
+        {"sessions": [], "tasks": [foreign.model_dump(mode="json")]},
+    )
+    results = bridge_home / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    (results / "task_orphan.txt").write_text("orphan", encoding="utf-8")
+    (results / "task_foreign.txt").write_text("kept", encoding="utf-8")
+
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert not (results / "task_orphan.txt").exists()
+        assert (results / "task_foreign.txt").read_text(encoding="utf-8") == "kept"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_reads_sibling_task_from_state(bridge_home, monkeypatch):
+    """F5: a second instance answers read calls from the persisted row.
+    Lifecycle calls (wait/cancel) stay owner-only."""
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    foreign = Task(
+        task_id="task_remote",
+        session_id="sess_remote",
+        agent="fake",
+        message="done elsewhere",
+        cwd=str(Path.cwd()),
+        status=TaskStatus.completed,
+        result_text="remote result",
+        finished_at=iso(),
+        owner_pid=9999,
+        owner_create_time=1.0,
+    )
+    atomic_write_json(
+        state_path(bridge_home),
+        {"sessions": [], "tasks": [foreign.model_dump(mode="json")]},
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        assert "task_remote" not in registry.tasks
+        snap = registry.check_task("task_remote")
+        assert snap["status"] == "completed"
+        assert snap["from_state"] is True
+        result = registry.get_result("task_remote")
+        assert result["result_text"] == "remote result"
+        with pytest.raises(KeyError, match="unknown task"):
+            await registry.wait_task("task_remote", timeout_sec=0.1)
+        with pytest.raises(KeyError, match="unknown task"):
+            registry._require_task("task_remote")
+    finally:
+        await registry.stop()
+
+
 def test_sibling_state_updates_are_serialized(bridge_home, tmp_path, monkeypatch):
     monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
     original_read = read_json_strict
@@ -474,6 +546,74 @@ async def test_flush_state_ignores_saves_issued_during_the_wait(
     gate.set()
     await asyncio.wait_for(flush, timeout=10)  # must not raise
     assert registry._flushed_gen >= 1
+
+
+@pytest.mark.asyncio
+async def test_wait_task_persisted_ignores_saves_issued_during_the_wait(
+    bridge_home, tmp_path, monkeypatch
+):
+    """persisted answers whether this task's save landed; a save() issued by
+    another task while the flush runs must not false-negative it."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        original_flush = registry.flush_state
+
+        async def flush_then_save():
+            done = await original_flush()
+            registry.save()  # a newer save is in flight when persisted is read
+            return done
+
+        monkeypatch.setattr(registry, "flush_state", flush_then_save)
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        assert waited["persisted"] is True
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_wait_task_reports_unpersisted_when_writes_fail(
+    bridge_home, tmp_path, monkeypatch
+):
+    """A broken disk degrades wait_task to persisted=False instead of raising."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    original_write = registry._write_state
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["persisted"] is True
+
+        def fail_always(own):
+            raise PermissionError(5, "synthetic sharing/access failure")
+
+        monkeypatch.setattr(registry, "_write_state", fail_always)
+        registry.save()
+        degraded = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert degraded["status"] == "completed"
+        assert degraded["persisted"] is False
+    finally:
+        monkeypatch.setattr(registry, "_write_state", original_write)
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_raises_when_state_never_persists(bridge_home, monkeypatch):
+    """start() cannot adopt/merge on stale disk, so it still fails fast."""
+    registry = Registry.create(bridge_home)
+
+    def fail_always(own):
+        raise PermissionError(5, "synthetic sharing/access failure")
+
+    monkeypatch.setattr(registry, "_write_state", fail_always)
+    with pytest.raises(RuntimeError, match=r"could not persist state\.json"):
+        await registry.start()
 
 
 def test_state_write_retries_bounded_permission_errors(bridge_home, monkeypatch):

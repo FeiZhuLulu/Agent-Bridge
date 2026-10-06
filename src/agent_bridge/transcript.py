@@ -145,7 +145,10 @@ def read_events(session_id: str, home: Path | None = None) -> list[dict[str, Any
     if cached is not None and cached[0] == key:
         return cached[1]
     events: list[dict[str, Any]] = []
-    persisted = path.read_text(encoding="utf-8") if path.is_file() else ""
+    # Torn bytes from a crash mid-write must not kill the read path; the
+    # mangled tail line then fails JSON parsing and is skipped like any
+    # other malformed line (read_events_tail already decodes this way).
+    persisted = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
     for line in (persisted + pending).splitlines():
         line = line.strip()
         if not line:

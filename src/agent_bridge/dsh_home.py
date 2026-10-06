@@ -482,6 +482,8 @@ def apply_dsh_worker_env(
 
     No provider is required. Official DeepSeek is only one of the routes DSH
     already knows; users configure providers in ``$DSH_HOME/settings.yaml``.
+    env.deny is not consulted here: the caller passes the returned dict
+    through enforce_env_deny at the spawn site, which is the single gate.
     """
     out = dict(env)
     home = dsh_home(out)

@@ -88,6 +88,27 @@ async def test_pruning_drops_binding(bridge_home, tmp_path, monkeypatch):
         await registry.stop()
 
 
+async def test_request_id_survives_restart(bridge_home, tmp_path):
+    """Bindings persist to state.json so a replay after restart reuses the task."""
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    request_id = str(uuid.uuid4())
+    args = dict(agent="fake", message="hello", cwd=str(tmp_path), request_id=request_id)
+    first = await registry.dispatch_task(**args)
+    await registry.wait_task(first["task_id"], timeout_sec=5)
+    await registry.stop()
+
+    registry2 = Registry.create(bridge_home)
+    await registry2.start()
+    try:
+        retry = await registry2.dispatch_task(**args)
+        assert retry == {**first, "reused": True}
+        with pytest.raises(ValueError, match="different dispatch request"):
+            await registry2.dispatch_task(**{**args, "message": "different"})
+    finally:
+        await registry2.stop()
+
+
 async def test_uuid_validation_and_canonicalization(bridge_home, tmp_path):
     registry = Registry.create(bridge_home)
     await registry.start()

@@ -1,10 +1,14 @@
 import asyncio
 import contextlib
+import json
+import os
+import sys
 import time
 import types
 
 import pytest
 
+from agent_bridge.processes import reap_subprocess
 from agent_bridge.registry import Registry
 from agent_bridge.server import INSTRUCTIONS, _error, _registry, list_sessions, mcp
 
@@ -92,6 +96,35 @@ async def test_list_sessions_does_not_block_event_loop(bridge_home, monkeypatch)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_exits_on_host_eof(bridge_home):
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c",
+        "from agent_bridge.server import mcp; mcp.run(transport='stdio')",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "AGENT_BRIDGE_HOME": str(bridge_home), "AGENT_BRIDGE_PARENT_CONTEXT": ""},
+    )
+    try:
+        request = {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "eof-test", "version": "1"},
+            },
+        }
+        proc.stdin.write((json.dumps(request) + "\n").encode())
+        await proc.stdin.drain()
+        response = json.loads(await asyncio.wait_for(proc.stdout.readline(), timeout=10))
+        assert response["id"] == 1 and "result" in response
+        assert proc.returncode is None
+        proc.stdin.close()
+        assert await asyncio.wait_for(proc.wait(), timeout=10) == 0
+    finally:
+        await reap_subprocess(proc)
 
 
 def test_registry_rejects_dict_lifespan(bridge_home):

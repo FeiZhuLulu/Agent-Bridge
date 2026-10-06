@@ -141,9 +141,10 @@ def test_stall_timeout_rejects_negative(tmp_path):
 
 
 def test_server_idle_exit_defaults(tmp_path):
-    assert AppConfig().server.idle_exit_sec == 7200
+    assert AppConfig().server.idle_exit_sec == 0
     cfg = load_config(tmp_path)
-    assert cfg.server.idle_exit_sec == 7200
+    assert cfg.server.idle_exit_sec == 0
+    assert load_config(Path(__file__).resolve().parents[1]).server.idle_exit_sec == 0
 
 
 def test_server_idle_exit_overlay(tmp_path):
@@ -380,3 +381,36 @@ def test_load_config_reports_overlay_path_on_bad_toml(tmp_path):
         load_config(tmp_path)
     assert str(path) in str(exc_info.value)
     assert "Fix or delete the file" in str(exc_info.value)
+
+
+def test_env_deny_overlay(tmp_path):
+    (tmp_path / "agents.toml").write_text(
+        """
+[env]
+deny = ["APP_*"]
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert "APP_*" in cfg.env.deny
+
+
+def test_merge_env_unions_deny_lists():
+    from agent_bridge.config import _merge_env
+
+    merged = _merge_env({"deny": ["A_*"]}, {"deny": ["B_*"]})
+    assert merged["deny"] == ["A_*", "B_*"]
+
+
+def test_permission_policy_default_and_overlay(tmp_path):
+    cfg = load_config(tmp_path)
+    assert cfg.agents["claude"].permission_policy == "allow_once"
+    (tmp_path / "agents.toml").write_text(
+        """
+[agents.claude]
+permission_policy = "deny"
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.agents["claude"].permission_policy == "deny"

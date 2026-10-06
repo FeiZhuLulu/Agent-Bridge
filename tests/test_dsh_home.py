@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from agent_bridge.config import EnvConfig
 from agent_bridge.dsh_home import (
     api_key_env_names,
     apply_dsh_worker_env,
@@ -15,6 +16,7 @@ from agent_bridge.dsh_home import (
     with_bridge_cordis,
 )
 from agent_bridge.paths import bundled_dsh_cordis
+from agent_bridge.worker_env import enforce_env_deny
 
 
 def test_reads_any_user_default_model(tmp_path: Path):
@@ -72,6 +74,29 @@ llm-pi-ai:
     assert env["OPENCODE_API_KEY"] == "sk-from-user"
     assert "DEEPSEEK_API_KEY" not in env
     assert "DSH_SNAPSHOT_SESSIONS_ROOT" not in env
+
+
+def test_denied_key_refilled_from_user_env_is_stripped_at_spawn_gate(tmp_path: Path):
+    """A denied credential re-filled from the host user/machine env does not
+    survive the single spawn-site gate."""
+    (tmp_path / "settings.yaml").write_text(
+        """
+llm-pi-ai:
+  providers:
+    acme:
+      apiKeyEnv: ACME_GATEWAY_API_KEY
+""",
+        encoding="utf-8",
+    )
+    env = apply_dsh_worker_env(
+        {"DSH_HOME": str(tmp_path)},
+        user_env={"ACME_GATEWAY_API_KEY": "sk-from-user"},
+        machine_env={},
+    )
+    assert env["ACME_GATEWAY_API_KEY"] == "sk-from-user"
+    cfg = EnvConfig(deny=["ACME_*"])
+    spawn_env = enforce_env_deny(env, cfg)
+    assert "ACME_GATEWAY_API_KEY" not in spawn_env
 
 
 def test_session_persistence_lives_under_bridge_home(tmp_path: Path, monkeypatch):

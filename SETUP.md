@@ -62,7 +62,7 @@ npm install -g @deepseek-ai/dsh-acp-demo
 .\.venv\Scripts\python.exe scripts\install_dsh_acp.py
 ```
 
-The helper writes `$AGENT_BRIDGE_HOME/dsh-acp` (default `~/.agent-bridge/dsh-acp`) and installs the ACP peers the cordis file imports. Bridge copies that cordis file next to the chosen `node_modules` so ESM can resolve plugins. An unbuilt checkout `src/bin.ts` is ignored unless `tsx` is installed. DSH persistence is `$AGENT_BRIDGE_HOME/dsh-sessions/<session_id>` so a user project does not get `./.sessions`. `get_result.files_changed` is a turn-scoped workspace diff, not only ACP tool_call events (DSH often sends none). It is capped at 200 paths; `files_changed_total` / `files_changed_truncated` tell you when to fall back to `git status`. `files_changed_state` is `pending` until that diff runs, `collected` when an empty list is a confirmed zero, and `unavailable` if collection could not run.
+The helper writes `$AGENT_BRIDGE_HOME/dsh-acp` (default `~/.agent-bridge/dsh-acp`) and installs the ACP peers the cordis file imports. Bridge copies that cordis file next to the chosen `node_modules` so ESM can resolve plugins. An unbuilt checkout `src/bin.ts` is ignored unless `tsx` is installed. DSH persistence is `$AGENT_BRIDGE_HOME/dsh-sessions/<session_id>` so a user project does not get `./.sessions`. `get_result.files_changed` is a turn-scoped workspace diff, not only ACP tool_call events (DSH often sends none). It is capped at 200 paths; `files_changed_total` / `files_changed_truncated` tell you when to fall back to `git status`. `files_changed_state` is `pending` until that diff runs, `collected` when an empty list is a confirmed zero, and `unavailable` if collection could not run. `files_changed` lists only paths inside the task `cwd`; worker-reported paths outside it land in `files_outside_cwd` (absolute, capped the same way, `files_outside_cwd_total`). `.agent-bridge` and Windows junctions are not scanned.
 
 Restart Codex after editing `config.toml`.
 
@@ -287,6 +287,8 @@ Bridge rebuilds the environment **once at startup** (and again for each worker s
 | `[env.set]` | Explicit key/value map |
 | `[agents.<name>.env]` | Per-worker overlay |
 
+`[env] deny = ["GLOB", ...]` removes worker env keys matching those globs. Keys set explicitly via `[env] set` or the agent's `env` always survive, and Bridge's own `AGENT_BRIDGE_HOME` and worker-context marker are never removed. There is no built-in denylist.
+
 Do **not** put secrets in the repo `agents.toml`. Pin machine-local values in `%USERPROFILE%\.agent-bridge\agents.toml` (see [agents.toml.example](agents.toml.example)):
 
 ```toml
@@ -327,11 +329,25 @@ error: failed to remove file `...\.venv\Lib\site-packages\../../Scripts/agent-br
 
 If you still launch from a checkout, use `uv --directory … run --no-sync agent-bridge` or `.venv/Scripts/python.exe -m agent_bridge`. POSIX hosts can replace a running binary, so this failure is Windows-only. `agent-bridge upgrade` / `uv tool upgrade` also need the coordinators closed first — same lock.
 
-Instances share the `~/.agent-bridge` state directory but not sessions: every session and task record carries the identity of the Bridge instance that owns it. `list_sessions` shows only the calling instance's records, saves leave a live sibling's records untouched on disk, and records whose owning instance has exited are adopted at the next boot — their in-flight tasks surface as `failed` / `bridge_restarted`. A session started from one host is continued from that host; it does not appear in another host's `list_sessions` while its owner is alive.
+Instances share the `~/.agent-bridge` state directory but not sessions: every session and task record carries the identity of the Bridge instance that owns it. `list_sessions` shows only the calling instance's records, saves leave a live sibling's records untouched on disk, and records whose owning instance has exited are adopted at the next boot — their in-flight tasks surface as `failed` / `bridge_restarted`. A session started from one host is continued from that host; it does not appear in another host's `list_sessions` while its owner is alive. `check_task` / `get_result` on a task owned by another instance answer from `state.json` (`from_state: true`, `silent_for_sec: null`); `wait_task` / `cancel_task` still require the owning instance.
 
 ## Server lifecycle
 
-Abandoned server instances self-exit: after `server.idle_exit_sec` (default 7200 s) with no MCP requests and no queued or running tasks, the process shuts its workers down and exits. Configure in `[server]` (repo `agents.toml` or `%USERPROFILE%\.agent-bridge\agents.toml`); `idle_exit_sec = 0` disables it. `list_agents` also warns when other Bridge instances are running on this machine — one per coordinator host is normal, a pile-up means a host keeps abandoning spawns.
+Bridge stays available while its host keeps the stdio connection open. `server.idle_exit_sec` defaults to `0` (disabled); EOF ends the connection and runs the normal worker and state cleanup. Worker idle unloading remains controlled separately by each agent's `idle_unload_sec`.
+
+A positive `idle_exit_sec` opts into server shutdown after that many seconds with no MCP tool calls and no queued or running tasks. Configure it in `[server]` (repo `agents.toml` or `%USERPROFILE%\.agent-bridge\agents.toml`) only when the host can reliably reconnect; explicit existing values remain effective. Idle time cannot distinguish an abandoned thread from one the user will continue later. `list_agents` reports other Bridge instances, but multiple coordinator threads may legitimately own separate instances.
+
+## ACP failure diagnostics
+
+`wait_task`, `check_task`, and `get_result` retain the string `error` and include an optional `failure` object for ACP failures:
+
+- `operation`: the failed operation, such as `process_start`, `initialize`, `model_discovery`, `session/new`, `session/load`, `session/resume`, `session/configure`, `session/set_config_option model`, or `session/prompt`.
+- `kind`: `auth_required`, `unsupported_model`, `timeout`, `connection_closed`, `worker_exit`, `protocol_error`, or `unknown`. Classification uses protocol codes and observed facts, not guesses from stderr.
+- `exit_code`: the observed exit code of the failing process, or `null`. During model discovery this belongs to the discovery command. An exit caused by Bridge's timeout cleanup is not substituted for the original failure.
+- `prompt_may_have_been_sent`: `false` only when this turn has not entered the prompt send operation; `true` means delivery or execution may already have occurred, not that delivery was acknowledged.
+- `stderr_summary`: recognized generic diagnostic phrases only, at most 2048 characters, or `null`. Raw stderr, arbitrary lines, credentials, URLs and local paths are not included. The human-readable `error` is also bounded and common credential fields are redacted.
+
+`failure = null` means no structured evidence is available (including old records, other adapters and interrupted tasks restored after a Bridge restart), not that retrying is safe. Bridge does not automatically replay failed prompts. Even `false` does not prove initialization was side-effect-free. An uncertain dispatch response can be retried with its original `request_id`; replaying that ID retrieves the same retained task, not a fresh execution of a failed task. `available` still describes command resolution, not authentication or session health.
 
 ## Remaining quota in `list_agents`
 
@@ -467,7 +483,7 @@ opencode auth
 
 OpenCode has **no product login**. You connect providers by storing API keys (or that provider's own oauth) with `opencode auth`. Official routes are OpenCode Zen and OpenCode Go; anything else is just another connected provider. `list_agents` reports the CLI as available when `opencode` is on PATH — a missing provider key only shows up when a turn actually talks to the model.
 
-`dispatch_task.model` is a `provider/model` slug the live session advertises (`opencode/...`, `xai/...`, …). `effort` maps onto that model's variants (`default|low|medium|high` is common; Bridge `max` usually becomes `high`). An unknown slug fails the turn and lists the real options; a model with no variants, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set on the session after that mapping, not a live sampler dump. Switching model on a live session re-applies effort: OpenCode resets the variant to the new model's default. Bridge revives with `session/resume` rather than `session/load`. Permissions are ACP `requestPermission`; Bridge auto-picks `allow-always`.
+`dispatch_task.model` is a `provider/model` slug the live session advertises (`opencode/...`, `xai/...`, …). `effort` maps onto that model's variants (`default|low|medium|high` is common; Bridge `max` usually becomes `high`). An unknown slug fails the turn and lists the real options; a model with no variants, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set on the session after that mapping, not a live sampler dump. Switching model on a live session re-applies effort: OpenCode resets the variant to the new model's default. Bridge revives with `session/resume` rather than `session/load`. Permissions are ACP `requestPermission`; Bridge answers per `[agents.<name>] permission_policy` — `allow_once` (default), `allow_always`, or `deny`. Under `allow_once` a prompt that offers only allow-always is denied.
 
 If OpenCode's configured default model is disabled, the first prompt fails with `Model is disabled`. Pass a slug from `opencode models` for a provider that still has a working key.
 
@@ -503,7 +519,7 @@ $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
 
 If `OPENROUTER_API_KEY` is set and `ANTHROPIC_AUTH_TOKEN` is not, Bridge copies it and defaults the base URL to OpenRouter **only when** `ANTHROPIC_API_KEY` is also unset. A machine that uses OpenRouter for OpenCode and a direct Anthropic key for Claude keeps the Anthropic key. Set `ANTHROPIC_BASE_URL` yourself if you want that Anthropic key treated as a gateway conflict (Bridge then blanks it once a token and base URL are both present).
 
-`dispatch_task.model` is a slug the live session advertises (`sonnet`, `opus`, `haiku`, or a full id). `effort` maps onto that model's levels (`default|low|medium|high|xhigh` is common; Bridge `off` → `default`, `max` → `xhigh` unless the session lists `max`). An unknown slug fails the turn and lists the real options; a model with no effort option, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set after that mapping. Switching model on a live session re-applies effort. Bridge forces `bypassPermissions` after `session/new` (a fresh session starts in manual `default` mode); if that mode is not advertised — for example when the process is root — ACP `requestPermission` still auto-picks `allow-always`. Revive uses `session/resume`: `session/load` replays the whole history.
+`dispatch_task.model` is a slug the live session advertises (`sonnet`, `opus`, `haiku`, or a full id). `effort` maps onto that model's levels (`default|low|medium|high|xhigh` is common; Bridge `off` → `default`, `max` → `xhigh` unless the session lists `max`). An unknown slug fails the turn and lists the real options; a model with no effort option, or an effort that will not map, comes back as a warning. `get_result.observed_model` / `observed_effort` are the last values Bridge successfully set after that mapping. Switching model on a live session re-applies effort. Bridge forces `bypassPermissions` after `session/new` (a fresh session starts in manual `default` mode); if that mode is not advertised — for example when the process is root — ACP `requestPermission` is still answered per `[agents.<name>] permission_policy` (`allow_once` default; a prompt offering only allow-always is denied). Revive uses `session/resume`: `session/load` replays the whole history.
 
 ## Worker: Devin CLI
 

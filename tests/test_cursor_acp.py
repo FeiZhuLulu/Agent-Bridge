@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from agent_bridge.adapters.acp import (
     AcpAdapter,
+    AcpError,
     _cursor_base_model,
     _cursor_effort_option_ids,
     _cursor_parameter_targets,
@@ -237,8 +239,10 @@ async def test_cursor_model_is_discovered_once_pinned_switched_and_reported(tmp_
                 "model": session.model,
             }
         )
-        with pytest.raises(ValueError, match="available model IDs"):
+        with pytest.raises(AcpError, match="available model IDs") as caught:
             await adapter.run_turn(session, invalid)
+        assert caught.value.failure.kind == "unsupported_model"
+        assert caught.value.failure.prompt_may_have_been_sent is False
         live = adapter._live[session.session_id]
         assert live.applied_model == "cursor-model-b"
     finally:
@@ -284,9 +288,32 @@ async def test_cursor_unavailable_model_fails_before_acp_start(tmp_path):
         model=session.model,
     )
 
-    with pytest.raises(ValueError, match="available model IDs: cursor-model-a, cursor-model-a-medium"):
+    with pytest.raises(AcpError, match="available model IDs: cursor-model-a, cursor-model-a-medium") as caught:
         await adapter.run_turn(session, task)
+    assert caught.value.failure.operation == "model_discovery"
+    assert caught.value.failure.kind == "unsupported_model"
+    assert caught.value.failure.prompt_may_have_been_sent is False
     assert session.pid is None
+
+
+@pytest.mark.asyncio
+async def test_cursor_model_discovery_reports_its_own_exit(tmp_path):
+    command = [
+        sys.executable, "-c",
+        "import sys; print('Authentication required', file=sys.stderr); "
+        "print('Authorization: Bearer test-discovery-secret', file=sys.stderr); sys.exit(7)",
+        "acp",
+    ]
+    adapter = AcpAdapter(AgentConfig(name="cursor", protocol="acp", command=command), tmp_path)
+    with pytest.raises(AcpError) as caught:
+        await adapter._cursor_models(command, dict(os.environ), str(tmp_path))
+    failure = caught.value.failure
+    assert failure.operation == "model_discovery"
+    assert failure.exit_code == 7
+    assert failure.kind == "worker_exit"
+    assert failure.prompt_may_have_been_sent is False
+    assert "authentication required" in failure.stderr_summary.lower()
+    assert "test-discovery-secret" not in str(caught.value) + failure.stderr_summary
 
 
 @pytest.mark.asyncio

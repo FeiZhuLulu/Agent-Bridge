@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from acp import PROTOCOL_VERSION, connect_to_agent, text_block
+from acp.exceptions import RequestError
 from acp.schema import (
     AllowedOutcome,
     ClientCapabilities,
@@ -30,6 +31,7 @@ from agent_bridge.claude_meta import (
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
+from agent_bridge.diagnostics import redact_diagnostic as _redact_diagnostic
 from agent_bridge.dsh_home import command_has_native_acp, prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
 from agent_bridge.minimax_meta import (
@@ -38,7 +40,7 @@ from agent_bridge.minimax_meta import (
     resolve_minimax_effort,
     resolve_minimax_model,
 )
-from agent_bridge.models import Session, Task, TurnResult, dsh_effort, grok_effort
+from agent_bridge.models import Session, Task, TaskFailure, TurnResult, dsh_effort, grok_effort
 from agent_bridge.opencode_meta import resolve_opencode_effort
 from agent_bridge.processes import (
     drop_pid,
@@ -49,7 +51,7 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
-from agent_bridge.worker_env import build_worker_env
+from agent_bridge.worker_env import build_worker_env, denied_by_policy
 from agent_bridge.workspace import collect_update_paths
 from agent_bridge.zcode_meta import (
     ZCODE_MODE_YOLO,
@@ -78,6 +80,8 @@ _MODEL_EFFORT_AGENTS = frozenset(
 # otherwise hang dispatch forever; prompt itself stays unbounded by design.
 RPC_TIMEOUT_SEC = 60.0
 CURSOR_MODEL_LIST_TIMEOUT_SEC = 30.0
+PROMPT_CANCEL_GRACE_SEC = 10.0
+EXIT_OBSERVE_SEC = 1.0
 
 # ACP ToolKind values that can change the workspace. Read-only kinds (read,
 # search, fetch, think, ...) also carry locations; counting them would report
@@ -94,7 +98,27 @@ def _tool_io_summary(value: Any) -> str | None:
     return text if len(text) <= _TOOL_IO_LIMIT else text[:_TOOL_IO_LIMIT] + "…"
 
 
-class RpcTimeoutError(RuntimeError):
+def _stderr_summary(text: str) -> str | None:
+    hints = re.findall(
+        r"\b(?:authentication required|not logged in|unauthorized|permission denied|"
+        r"unsupported model|invalid model|model not found|connection (?:closed|refused|reset)|"
+        r"timed out|timeout|quota exceeded|rate limit exceeded)\b",
+        text, re.IGNORECASE,
+    )
+    return "; ".join(dict.fromkeys(hint.lower() for hint in hints))[:2048] or None
+
+
+class AcpError(RuntimeError):
+    def __init__(self, message: str, failure: TaskFailure) -> None:
+        super().__init__(_redact_diagnostic(message))
+        self.failure = failure
+
+
+class AcpUnavailableError(AcpError):
+    pass
+
+
+class RpcTimeoutError(AcpUnavailableError):
     pass
 
 
@@ -448,27 +472,51 @@ def _text_of(content: Any) -> str:
     return str(dumped)
 
 
-def _pick_permission_option(options: Iterable[PermissionOption]) -> PermissionOption | None:
+def _pick_permission_option(
+    options: Iterable[PermissionOption],
+    policy: str = "allow_once",
+) -> PermissionOption | None:
+    """Pick the permission option matching the agent's policy.
+
+    Bridge is the only approver in the loop — there is no human to click
+    "allow". Default policy ``allow_once`` grants each request for this turn
+    only; ``allow_always`` additionally persists the grant inside the worker;
+    ``deny`` cancels every request.
+    """
+    if policy == "deny":
+        return None
+    allow_always_first = policy == "allow_always"
     ranked: list[tuple[int, PermissionOption]] = []
     for option in options:
         kind = str(getattr(option, "kind", "")).lower().replace("_", "-")
         option_id = str(getattr(option, "option_id", "")).lower().replace("_", "-")
         blob = f"{kind} {option_id}"
         if "allow-always" in blob or kind == "allow-always":
+            # Under any non-allow_always policy a persistent grant must not be
+            # picked — falling back to it would make a one-time policy lie.
+            if not allow_always_first:
+                continue
             score = 0
         elif "allow-once" in blob or kind == "allow-once" or blob.strip().startswith("allow"):
-            score = 1
+            score = 1 if allow_always_first else 0
         else:
-            score = 50
+            score = 50 if allow_always_first else 90
         ranked.append((score, option))
     ranked.sort(key=lambda item: item[0])
     return ranked[0][1] if ranked else None
 
 
+async def _observe_exit(proc: asyncio.subprocess.Process | None) -> None:
+    if proc is not None and proc.returncode is None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=EXIT_OBSERVE_SEC)
+
+
 class _BridgeClient:
-    def __init__(self, session_id: str, home: Path) -> None:
+    def __init__(self, session_id: str, home: Path, permission_policy: str = "allow_once") -> None:
         self.session_id = session_id
         self.home = home
+        self.permission_policy = permission_policy
         self.text_parts: list[str] = []
         self.files: set[str] = set()
         self.usage: dict[str, Any] = {}
@@ -487,7 +535,7 @@ class _BridgeClient:
         options: list[Any] | None,
         **kwargs: Any,
     ) -> RequestPermissionResponse:
-        option = _pick_permission_option(options or [])
+        option = _pick_permission_option(options or [], self.permission_policy)
         dumped = _dump(tool_call)
         if option is None:
             append_event(
@@ -647,12 +695,23 @@ class AcpAdapter(Adapter):
         self._cursor_models_cache: dict[str, str] | None = None
 
     def _env(self) -> dict[str, str]:
-        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True)
+        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
         if self.agent.name == "claude":
-            return apply_claude_gateway_env(env)
-        if self.agent.name == "devin":
-            return apply_devin_env(env)
-        return env
+            # The gateway rewrite exists only to install ANTHROPIC_AUTH_TOKEN;
+            # when the user denies that token, skip the rewrite entirely so a
+            # direct ANTHROPIC_API_KEY is not blanked for a token the gate
+            # would strip anyway.
+            if not denied_by_policy(
+                "ANTHROPIC_AUTH_TOKEN",
+                self.env_config,
+                set(self.env_config.set) | set(self.agent.env),
+            ):
+                env = apply_claude_gateway_env(env)
+        elif self.agent.name == "devin":
+            env = apply_devin_env(env)
+        # Gateway derivation above can recreate a denied key; the deny gate
+        # runs on the rewritten env, not on build_worker_env's output.
+        return self._enforce_spawn_env(env)
 
     async def _drain_stderr(
         self,
@@ -664,14 +723,50 @@ class AcpAdapter(Adapter):
             return
         try:
             while True:
-                line = await proc.stderr.readline()
-                if not line:
+                chunk = await proc.stderr.read(65536)
+                if not chunk:
                     return
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    live.stderr_tail = f"{live.stderr_tail}\n{text}"[-STDERR_TAIL_LIMIT:]
+                live.stderr_tail = (
+                    live.stderr_tail + chunk.decode("utf-8", errors="replace")
+                )[-STDERR_TAIL_LIMIT:]
         except (ValueError, OSError):
             log.warning("stderr drain aborted for %s", session_id, exc_info=True)
+
+    def _failure(
+        self, exc: Exception, operation: str, session: Session | None = None, *,
+        proc: asyncio.subprocess.Process | None = None, stderr: str | None = None,
+        prompt_may_have_been_sent: bool = False, kind: str | None = None,
+    ) -> AcpError:
+        if isinstance(exc, AcpError):
+            return exc
+        if isinstance(exc.__cause__, AcpError):
+            return type(exc.__cause__)(str(exc), exc.__cause__.failure)
+        live = self._live.get(session.session_id) if session else None
+        proc = proc if proc is not None else live.proc if live else None
+        exit_code = proc.returncode if proc is not None else None
+        if kind is None:
+            if isinstance(exc, TimeoutError):
+                kind = "timeout"
+            elif isinstance(exc, RequestError) and exc.code == -32000:
+                kind = "auth_required"
+            elif isinstance(exc, RequestError):
+                kind = "protocol_error"
+            elif exit_code is not None:
+                kind = "worker_exit"
+            elif isinstance(exc, (ConnectionError, EOFError)):
+                kind = "connection_closed"
+            else:
+                kind = "unknown"
+        failure = TaskFailure(
+            operation=operation, kind=kind, exit_code=exit_code,
+            prompt_may_have_been_sent=prompt_may_have_been_sent,
+            stderr_summary=_stderr_summary(stderr if stderr is not None else live.stderr_tail if live else ""),
+        )
+        error_type = (
+            RpcTimeoutError if kind == "timeout" else
+            AcpUnavailableError if kind in {"auth_required", "connection_closed", "worker_exit"} else AcpError
+        )
+        return error_type(str(exc) or type(exc).__name__, failure)
 
     async def _rpc(
         self,
@@ -683,20 +778,21 @@ class AcpAdapter(Adapter):
         """Await a handshake RPC with a timeout; kill the worker on hang."""
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
-        except TimeoutError:
-            live = self._live.get(session.session_id)
-            log.error(
-                "%s %s timed out after %ss for %s; killing worker stderr_tail=%r",
-                self.agent.name,
-                what,
-                timeout,
-                session.session_id,
-                live.stderr_tail if live else "",
-            )
-            await self.shutdown(session)
-            raise RpcTimeoutError(
-                f"{self.agent.name} {what} timed out after {int(timeout)}s"
-            ) from None
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                exc = TimeoutError(f"{self.agent.name} {what} timed out after {int(timeout)}s")
+            if isinstance(exc, (ConnectionError, EOFError)):
+                live = self._live.get(session.session_id)
+                await _observe_exit(live.proc if live else None)
+            error = self._failure(exc, what, session)
+            if (
+                isinstance(error, RpcTimeoutError)
+                or what in {"initialize", "session/new"}
+                or (what in {"session/load", "session/resume"} and isinstance(error, AcpUnavailableError))
+            ):
+                log.error("%s; stderr_summary=%r", error, error.failure.stderr_summary)
+                await self.shutdown(session)
+            raise error from None
 
     async def _cursor_models(
         self,
@@ -706,14 +802,18 @@ class AcpAdapter(Adapter):
     ) -> dict[str, str]:
         if self._cursor_models_cache is not None:
             return self._cursor_models_cache
-        model_cmd = cursor_list_models_command(command)
-        proc = await asyncio.create_subprocess_exec(
-            *model_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=cwd,
-        )
+        env = self._enforce_spawn_env(env)
+        try:
+            model_cmd = cursor_list_models_command(command)
+            proc = await asyncio.create_subprocess_exec(
+                *model_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=cwd,
+            )
+        except Exception as exc:
+            raise self._failure(exc, "model_discovery") from None
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=CURSOR_MODEL_LIST_TIMEOUT_SEC
@@ -722,20 +822,23 @@ class AcpAdapter(Adapter):
             await reap_subprocess(proc)
             raise
         except TimeoutError:
+            error = self._failure(
+                TimeoutError("cursor model discovery timed out; run 'cursor-agent --list-models' to check the current account"),
+                "model_discovery", proc=proc,
+            )
             await reap_subprocess(proc)
-            raise RuntimeError(
-                "cursor model discovery timed out; run 'cursor-agent --list-models' "
-                "to check the current account"
-            ) from None
+            raise error from None
         if proc.returncode:
-            detail = stderr.decode("utf-8", errors="replace").strip()
-            suffix = f": {detail[-1000:]}" if detail else ""
-            raise RuntimeError(f"cursor model discovery failed{suffix}")
+            raise self._failure(
+                RuntimeError("cursor model discovery failed"), "model_discovery",
+                proc=proc, stderr=stderr.decode("utf-8", errors="replace"),
+            )
         models = parse_cursor_models(stdout.decode("utf-8", errors="replace"))
         if not models:
-            raise RuntimeError(
-                "cursor model discovery returned no model IDs; run "
-                "'cursor-agent --list-models' to check the current account"
+            raise self._failure(
+                RuntimeError("cursor model discovery returned no model IDs; run 'cursor-agent --list-models' to check the current account"),
+                "model_discovery", proc=proc, stderr=stderr.decode("utf-8", errors="replace"),
+                kind="unknown",
             )
         self._cursor_models_cache = models
         return models
@@ -764,11 +867,13 @@ class AcpAdapter(Adapter):
                 self.agent.cwd or session.cwd or None,
             )
             if session.model not in models:
-                raise ValueError(
-                    f"cursor model {session.model!r} is not available for the current account; "
-                    f"available model IDs: {', '.join(models)}"
+                raise self._failure(
+                    ValueError(f"cursor model {session.model!r} is not available for the current account; "
+                               f"available model IDs: {', '.join(models)}"),
+                    "model_discovery", session, kind="unsupported_model",
                 )
             cmd = with_cursor_cli_model(cmd, session.model)
+        env = self._enforce_spawn_env(env)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -786,7 +891,9 @@ class AcpAdapter(Adapter):
             raise RuntimeError(f"{self.agent.name} did not expose stdio")
         live = _Live()
         live.proc = proc
-        live.client = _BridgeClient(session.session_id, self.home)
+        live.client = _BridgeClient(
+            session.session_id, self.home, self.agent.permission_policy
+        )
         live.conn = connect_to_agent(live.client, proc.stdin, proc.stdout)
         live.stderr_task = asyncio.create_task(
             self._drain_stderr(proc, session.session_id, live)
@@ -962,7 +1069,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "model", session.model)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             _, offered = config_option_values(live.config_options, "model")
@@ -984,9 +1091,10 @@ class AcpAdapter(Adapter):
             )
             label = catalog.get(session.model)
             if label is None:
-                raise ValueError(
-                    f"cursor model {session.model!r} is not available for the current account; "
-                    f"available model IDs: {', '.join(catalog)}"
+                raise self._failure(
+                    ValueError(f"cursor model {session.model!r} is not available for the current account; "
+                               f"available model IDs: {', '.join(catalog)}"),
+                    "model_discovery", session, kind="unsupported_model",
                 )
             base, base_name = _cursor_base_model(session.model, label, live.config_options)
             current, _offered = config_option_values(live.config_options, "model")
@@ -1080,7 +1188,7 @@ class AcpAdapter(Adapter):
                 "session/set_mode",
                 session,
             )
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1138,7 +1246,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "thinking", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             # Bridge chose this level by mapping, so a rejection is Bridge's
@@ -1181,7 +1289,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "effort", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = f"opencode rejected effort={level} for effort={session.effort}: {exc}"
@@ -1274,7 +1382,7 @@ class AcpAdapter(Adapter):
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)
-            except RpcTimeoutError:
+            except AcpUnavailableError:
                 raise
             except Exception as exc:
                 _, refreshed = config_option_values(live.config_options, "model")
@@ -1326,7 +1434,7 @@ class AcpAdapter(Adapter):
         if current != target:
             try:
                 await self._set_config_option(live, session, "model", target)
-            except RpcTimeoutError:
+            except AcpUnavailableError:
                 raise
             except Exception as exc:
                 _, refreshed = config_option_values(live.config_options, "model")
@@ -1363,7 +1471,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, option_id, value)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1402,7 +1510,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, option_id, level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = (
@@ -1414,15 +1522,18 @@ class AcpAdapter(Adapter):
         live.applied_effort = level
 
     async def _sync_selection(self, live: _Live, session: Session) -> None:
-        await self._sync_grok_model(live, session)
-        await self._sync_cursor_selection(live, session)
-        await self._sync_kimi_selection(live, session)
-        await self._sync_opencode_selection(live, session)
-        await self._sync_claude_selection(live, session)
-        await self._sync_devin_selection(live, session)
-        await self._sync_dsh_selection(live, session)
-        await self._sync_zcode_selection(live, session)
-        await self._sync_minimax_selection(live, session)
+        try:
+            await self._sync_grok_model(live, session)
+            await self._sync_cursor_selection(live, session)
+            await self._sync_kimi_selection(live, session)
+            await self._sync_opencode_selection(live, session)
+            await self._sync_claude_selection(live, session)
+            await self._sync_devin_selection(live, session)
+            await self._sync_dsh_selection(live, session)
+            await self._sync_zcode_selection(live, session)
+            await self._sync_minimax_selection(live, session)
+        except Exception as exc:
+            raise self._failure(exc, "session/configure", session) from None
 
     async def _sync_claude_effort(self, live: _Live, session: Session) -> None:
         if not session.effort:
@@ -1443,7 +1554,7 @@ class AcpAdapter(Adapter):
             return
         try:
             await self._set_config_option(live, session, "effort", level)
-        except RpcTimeoutError:
+        except AcpUnavailableError:
             raise
         except Exception as exc:
             message = f"claude rejected effort={level} for effort={session.effort}: {exc}"
@@ -1539,6 +1650,7 @@ class AcpAdapter(Adapter):
                 return
         live = await self._spawn(session)
         native = session.native_session_id
+        load_failure: Exception | None = None
         if native and self.can_revive():
             use_resume = self.agent.name in _RESUME_AGENTS or (
                 self.agent.name == "dsh" and live.dsh_native_acp
@@ -1553,8 +1665,11 @@ class AcpAdapter(Adapter):
                 # The worker is already dead; a new_session on the same
                 # connection cannot succeed.
                 raise
-            except Exception:
-                log.warning("session/load failed for %s; creating a new session", session.session_id, exc_info=True)
+            except AcpUnavailableError:
+                raise
+            except Exception as exc:
+                log.warning("session/load failed for %s; creating a new session: %s", session.session_id, _redact_diagnostic(str(exc)))
+                load_failure = exc
             else:
                 self._remember_config_options(live, revived)
                 await self._sync_selection(live, session)
@@ -1564,7 +1679,28 @@ class AcpAdapter(Adapter):
             "session/new",
             session,
         )
+        # Adopt the new id before any fallible bookkeeping: a transcript write
+        # failure must not leave the session pointing at the rejected id.
         session.native_session_id = created.session_id
+        if load_failure is not None:
+            # H-05: the coordinator must see that its session lost context.
+            # pending_warnings lands on the next turn's task.warnings; the
+            # transcript event keeps the switch auditable after the fact. Both
+            # are emitted only once session/new has actually succeeded — a
+            # failed fallback is a failed task, not a recreation.
+            live.pending_warnings.append(
+                f"session/load failed ({type(load_failure).__name__}); started a new worker "
+                "session — prior conversation context is lost"
+            )
+            append_event(
+                session.session_id,
+                "session_recreated",
+                {
+                    "old_native_session_id": native,
+                    "reason": _redact_diagnostic(str(load_failure)),
+                },
+                self.home,
+            )
         self._remember_config_options(live, created)
         if self.agent.name == "grok":
             # Grok /new applies the _meta reasoningEffort but always lands on
@@ -1575,11 +1711,16 @@ class AcpAdapter(Adapter):
         await self._sync_selection(live, session)
 
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
-        await self.ensure_session(session)
+        live = self._live.get(session.session_id)
+        if live is not None:
+            live.stderr_tail = ""
+        try:
+            await self.ensure_session(session)
+        except Exception as exc:
+            raise self._failure(exc, "process_start", session) from None
         live = self._live[session.session_id]
         assert live.conn is not None and live.client is not None
         live.client.reset_turn()
-        live.stderr_tail = ""
         warnings: list[str] = live.pending_warnings
         live.pending_warnings = []
         if self.agent.name not in _MODEL_EFFORT_AGENTS and (task.model or task.effort):
@@ -1588,12 +1729,12 @@ class AcpAdapter(Adapter):
                 f"model={task.model!r} effort={task.effort!r} were ignored"
             )
         append_event(session.session_id, "prompt_sent", {"text": task.message}, self.home)
-        prompt = live.conn.prompt(
-            session_id=session.native_session_id,
-            prompt=[text_block(task.message)],
-        )
-        live.prompt_task = asyncio.ensure_future(prompt)
         try:
+            prompt = live.conn.prompt(
+                session_id=session.native_session_id,
+                prompt=[text_block(task.message)],
+            )
+            live.prompt_task = asyncio.ensure_future(prompt)
             response = await live.prompt_task
         except asyncio.CancelledError:
             append_event(session.session_id, "turn_end", {"stop_reason": "cancelled"}, self.home)
@@ -1605,15 +1746,12 @@ class AcpAdapter(Adapter):
                 observed_model=live.applied_model,
                 observed_effort=live.applied_effort,
             )
-        except Exception:
-            if live.stderr_tail:
-                log.warning(
-                    "%s prompt failed for %s stderr_tail=%r",
-                    self.agent.name,
-                    session.session_id,
-                    live.stderr_tail,
-                )
-            raise
+        except Exception as exc:
+            if isinstance(exc, (ConnectionError, EOFError)):
+                await _observe_exit(live.proc)
+            raise self._failure(
+                exc, "session/prompt", session, prompt_may_have_been_sent=True,
+            ) from None
         finally:
             live.prompt_task = None
         stop = getattr(response, "stop_reason", None) or "end_turn"
@@ -1641,13 +1779,14 @@ class AcpAdapter(Adapter):
         live = self._live.get(session.session_id)
         if live is None or live.conn is None:
             return
-        try:
-            await asyncio.wait_for(live.conn.cancel(session_id=session.native_session_id), timeout=5)
-        except Exception:
-            log.warning("ACP cancel failed for %s", session.session_id, exc_info=True)
+        if session.native_session_id:
+            try:
+                await asyncio.wait_for(live.conn.cancel(session_id=session.native_session_id), timeout=5)
+            except Exception:
+                log.warning("ACP cancel failed for %s", session.session_id, exc_info=True)
         if live.prompt_task is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(live.prompt_task), timeout=10)
+                await asyncio.wait_for(asyncio.shield(live.prompt_task), timeout=PROMPT_CANCEL_GRACE_SEC)
                 return
             except (asyncio.CancelledError, Exception):
                 # CancelledError derives from BaseException and must be

@@ -7,16 +7,25 @@
 # url = "http://127.0.0.1:7897"
 # no_proxy = "localhost,127.0.0.1,::1"
 
-# Self-exit for abandoned MCP server instances whose host never closed stdin.
-# 7200 is already the default; set 0 to disable.
+# Optional idle self-exit; enable only when the host can reconnect reliably.
+# Disabled by default (0); a positive value opts into idle server shutdown.
 # [server]
 # idle_exit_sec = 7200
 
 # Cancel a turn whose worker has produced no output for this long (seconds).
 # Default 1800; 0 disables. Raise it for a worker that runs long silent
 # builds or test suites. The task then ends failed / stop_reason "stalled".
+# turn_timeout_sec instead caps a turn's wall-clock regardless of output
+# (default 0 = off; timeout ends failed / "timed_out").
 # [agents.grok]
 # stall_timeout_sec = 3600
+# turn_timeout_sec = 7200
+
+# How Bridge answers ACP permission prompts: allow_once (default, least
+# privilege), allow_always, or deny. Under allow_once a prompt that offers
+# only allow-always is denied.
+# [agents.grok]
+# permission_policy = "allow_always"
 
 # Dispatch policy: mode = manual | auto | eager (default auto).
 # instructions is free text the coordinator reads via list_agents; it
@@ -43,6 +52,11 @@
 # environment. DSH credentials usually live in ~/.dsh/.credentials.yaml.
 # [env.set]
 # DEEPSEEK_API_KEY = "do-not-commit"
+
+# Remove worker env keys matching these globs. Keys set via [env.set] or
+# the agent's own env always survive; there is no built-in denylist.
+# [env]
+# deny = ["AWS_*", "DATABASE_URL"]
 
 # [agents.grok.env]
 # HTTPS_PROXY = "http://127.0.0.1:7897"

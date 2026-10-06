@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -507,6 +508,66 @@ def install_host_env(config: EnvConfig, *, base: Mapping[str, str] | None = None
     return status
 
 
+# Bridge's own wiring must survive every deny pattern: stripping the
+# worker-context marker or the nested AGENT_BRIDGE_HOME would let a nested
+# Bridge run as a coordinator on the default home.
+BRIDGE_OWNED_ENV_KEYS = frozenset({WORKER_CONTEXT_ENV, "AGENT_BRIDGE_HOME"})
+
+
+def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None) -> bool:
+    """True when the user's ``env.deny`` globs would strip ``key`` from a worker env.
+
+    There is no built-in denylist: a default deny hid AWS_*/SSH_*/etc. from
+    workers that legitimately need them (Bedrock/Vertex auth, git-over-ssh),
+    so only the operator's configured globs strip keys. Shared by
+    _apply_env_deny and enforce_env_deny so a denied key cannot re-enter
+    through post-build rewriting.
+    """
+    if key in BRIDGE_OWNED_ENV_KEYS or (explicit and key in explicit):
+        return False
+    user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
+    return any(fnmatch.fnmatchcase(key, pat) for pat in user_deny)
+
+
+def enforce_env_deny(
+    env: Mapping[str, str],
+    cfg: EnvConfig,
+    explicit: Iterable[str] = (),
+) -> dict[str, str]:
+    """Re-apply the ``env.deny`` policy to a finalized spawn env.
+
+    Agent-specific rewriting downstream of build_worker_env (gateway key
+    derivation, DSH credential refills) can recreate a denied key, so every
+    worker subprocess spawn passes its final env through this one gate.
+    ``explicit`` (env.set keys plus the agent's own env keys) still wins.
+    """
+    allowed = set(explicit)
+    return {
+        key: value
+        for key, value in env.items()
+        if not denied_by_policy(key, cfg, allowed)
+    }
+
+
+def _apply_env_deny(
+    env: dict[str, str],
+    origin: dict[str, str],
+    cfg: EnvConfig,
+    explicit: set[str],
+) -> None:
+    """Strip env keys matching the user's ``env.deny`` globs.
+
+    Explicit intent always wins: a key assigned through ``env.set`` or the
+    agent's own ``env`` block survives any pattern. Denied keys are recorded
+    as ``origin[key] = "denied"`` so describe_env can tell withheld from
+    absent.
+    """
+    for key in list(env):
+        if denied_by_policy(key, cfg, explicit):
+            env.pop(key, None)
+            origin[key] = "denied"
+
+
 def build_worker_env(
     overrides: Mapping[str, str] | None = None,
     *,
@@ -518,6 +579,7 @@ def build_worker_env(
     machine_env: Mapping[str, str] | None = None,
     log_fill: bool = True,
     worker_context: bool = False,
+    home: Path | None = None,
 ) -> dict[str, str]:
     env, origin = resolve_env(
         config,
@@ -528,6 +590,9 @@ def build_worker_env(
         user_env=user_env,
         machine_env=machine_env,
     )
+    cfg = config or EnvConfig()
+    explicit = set(cfg.set) | set(overrides or {})
+    _apply_env_deny(env, origin, cfg, explicit)
     # After every merge so agents.toml / inherited env cannot clear the mark.
     # Also pin a nested data dir: if the worker inherits this MCP server, the
     # nested Bridge must not share the coordinator's state.json. A host MCP
@@ -537,7 +602,10 @@ def build_worker_env(
     if worker_context:
         env[WORKER_CONTEXT_ENV] = WORKER_CONTEXT_VALUE
         origin[WORKER_CONTEXT_ENV] = "worker-context"
-        env["AGENT_BRIDGE_HOME"] = str(nested_bridge_home(bridge_home()))
+        # The nested home derives from the registry home, not the env var:
+        # a Bridge launched with an explicit home= would otherwise send the
+        # worker's nested Bridge to a different directory (G2).
+        env["AGENT_BRIDGE_HOME"] = str(nested_bridge_home(home) if home is not None else nested_bridge_home(bridge_home()))
         origin["AGENT_BRIDGE_HOME"] = "worker-context"
     if log_fill:
         status = describe_env(config, env=env, origin=origin)

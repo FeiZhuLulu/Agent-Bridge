@@ -88,6 +88,7 @@ class CursorAgent(EchoAgent):
         return await super().initialize(protocol_version, **kwargs)
 
     async def new_session(self, cwd: str, mcp_servers=None, **kwargs: Any) -> NewSessionResponse:
+        await super().new_session(cwd, mcp_servers, **kwargs)
         return NewSessionResponse.model_validate(
             {"sessionId": self._session_id, "configOptions": self._options()}
         )

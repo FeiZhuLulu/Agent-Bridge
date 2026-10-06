@@ -5,6 +5,7 @@ from agent_bridge.worker_env import (
     apply_proxy_fallbacks,
     build_worker_env,
     describe_env,
+    enforce_env_deny,
     is_worker_context,
     parse_powershell_grok_proxy,
     parse_win_inet_proxy_server,
@@ -168,6 +169,21 @@ def test_worker_context_forced_after_overrides(tmp_path, monkeypatch):
     assert env["AGENT_BRIDGE_HOME"] == str((tmp_path / "nested").resolve())
 
 
+def test_worker_context_pins_nested_home_to_registry_home(tmp_path, monkeypatch):
+    # A Bridge started with an explicit home= must derive the worker's nested
+    # dir from that home, not from the process env var (G2).
+    monkeypatch.setenv("AGENT_BRIDGE_HOME", str(tmp_path / "from_env"))
+    env = build_worker_env(
+        base={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+        worker_context=True,
+        home=tmp_path / "from_registry",
+    )
+    assert env["AGENT_BRIDGE_HOME"] == str((tmp_path / "from_registry" / "nested").resolve())
+
+
 def test_default_build_worker_env_does_not_add_mark():
     env = build_worker_env(
         base={WORKER_CONTEXT_ENV: "coordinator"},
@@ -189,3 +205,104 @@ def test_is_worker_context_strict_value():
     assert is_worker_context({WORKER_CONTEXT_ENV: "coordinator"}) is False
     assert is_worker_context({}) is False
     assert is_worker_context({WORKER_CONTEXT_ENV: "Worker"}) is False
+
+
+def _env(base, *, config=None, overrides=None):
+    return build_worker_env(
+        overrides,
+        config=config,
+        base=base,
+        fallbacks={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+    )
+
+
+def test_worker_env_no_default_deny_but_user_deny_applies():
+    env = _env(
+        {
+            "AWS_REGION": "us-east-1",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "DATABASE_URL": "postgres://u:p@db",
+            "HOME": "/h",
+        }
+    )
+    assert env["AWS_REGION"] == "us-east-1"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+    assert env["DATABASE_URL"] == "postgres://u:p@db"
+    cfg = EnvConfig(deny=["AWS_*"])
+    env = _env(
+        {"AWS_REGION": "us-east-1", "SSH_AUTH_SOCK": "/tmp/agent.sock"}, config=cfg
+    )
+    assert "AWS_REGION" not in env
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+
+
+def test_worker_env_explicit_set_and_agent_env_survive_deny():
+    cfg = EnvConfig(set={"AWS_SECRET_ACCESS_KEY": "configured"}, deny=["AWS_*"])
+    env = _env({}, config=cfg)
+    assert env["AWS_SECRET_ACCESS_KEY"] == "configured"
+    env = _env(
+        {"GITHUB_TOKEN": "agent-wants"},
+        overrides={"GITHUB_TOKEN": "agent-wants"},
+        config=EnvConfig(deny=["GITHUB_*"]),
+    )
+    assert env["GITHUB_TOKEN"] == "agent-wants"
+
+
+def test_worker_env_inherit_does_not_exempt_user_deny():
+    # Both keys arrive via the process env; naming one in ``inherit`` does
+    # not exempt it from the user's deny globs.
+    cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"], deny=["AWS_*"])
+    env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_REGION" not in env
+
+
+def test_worker_env_user_deny_patterns():
+    cfg = EnvConfig(deny=["*_DEBUG", "CUSTOM*"])
+    env = _env({"APP_DEBUG": "1", "CUSTOM_FLAG": "x", "KEEP": "y"}, config=cfg)
+    assert "APP_DEBUG" not in env
+    assert "CUSTOM_FLAG" not in env
+    assert env["KEEP"] == "y"
+
+
+def test_bridge_owned_keys_survive_deny_star(tmp_path):
+    """deny=["*"] must not strip the worker-context marker or nested
+    AGENT_BRIDGE_HOME — that would break nested-Bridge isolation."""
+    cfg = EnvConfig(deny=["*"])
+    env = build_worker_env(
+        base={"SECRET_KEY": "s"},
+        config=cfg,
+        user_env={},
+        machine_env={},
+        log_fill=False,
+        worker_context=True,
+        home=tmp_path,
+    )
+    assert env[WORKER_CONTEXT_ENV] == WORKER_CONTEXT_VALUE
+    assert "AGENT_BRIDGE_HOME" in env
+    assert "SECRET_KEY" not in env
+    out = enforce_env_deny(env, cfg)
+    assert out[WORKER_CONTEXT_ENV] == WORKER_CONTEXT_VALUE
+    assert "AGENT_BRIDGE_HOME" in out
+    assert "SECRET_KEY" not in out
+
+
+def test_enforce_env_deny_on_rewritten_spawn_env():
+    """The final spawn gate strips keys that post-build rewriting recreated;
+    keys explicitly set via env.set or the agent's own env still win."""
+    cfg = EnvConfig(
+        set={"ANTHROPIC_AUTH_TOKEN": "explicit"},
+        deny=["ANTHROPIC_*"],
+    )
+    env = {
+        "ANTHROPIC_AUTH_TOKEN": "recreated-by-rewrite",
+        "ANTHROPIC_API_KEY": "recreated",
+        "OPENROUTER_API_KEY": "or",
+    }
+    out = enforce_env_deny(env, cfg, set(cfg.set) | {"OPENROUTER_API_KEY"})
+    assert out["ANTHROPIC_AUTH_TOKEN"] == "recreated-by-rewrite"
+    assert "ANTHROPIC_API_KEY" not in out
+    assert out["OPENROUTER_API_KEY"] == "or"

@@ -95,8 +95,8 @@ async def test_acp_failures_survive_tools_and_restart(
         assert failure["prompt_may_have_been_sent"] is possibly_sent
         assert failure["kind"] == kind
         assert failure["exit_code"] == exit_code
-        assert registry.check_task(task_id)["failure"] == failure
-        assert registry.get_result(task_id)["failure"] == failure
+        assert (await registry.check_task(task_id))["failure"] == failure
+        assert (await registry.get_result(task_id))["failure"] == failure
         if possibly_sent:
             assert marker.read_text(encoding="utf-8") == "executed\n"
         else:
@@ -108,8 +108,8 @@ async def test_acp_failures_survive_tools_and_restart(
     restored.config.agents["echo"] = cfg
     await restored.start()
     try:
-        assert restored.get_result(task_id)["failure"] == failure
-        assert restored.check_task(task_id)["status"] == "failed"
+        assert (await restored.get_result(task_id))["failure"] == failure
+        assert (await restored.check_task(task_id))["status"] == "failed"
     finally:
         await restored.stop()
 
@@ -139,7 +139,7 @@ async def test_cancel_of_cancel_ignoring_worker_ends_cancelled(bridge_home, tmp_
         assert cancelled["failure"] is None
         waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
         assert waited["status"] == "cancelled"
-        assert registry.check_task(dispatched["task_id"])["failure"] is None
+        assert (await registry.check_task(dispatched["task_id"]))["failure"] is None
         session = registry.sessions[dispatched["session_id"]]
         assert session.pid is None
         assert session.session_id not in read_json(pids_path(bridge_home), {})

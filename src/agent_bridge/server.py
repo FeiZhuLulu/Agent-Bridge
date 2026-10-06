@@ -156,7 +156,7 @@ async def wait_task(ctx: Context, task_id: str, timeout_sec: float = DEFAULT_WAI
 async def check_task(ctx: Context, task_id: str) -> dict[str, Any]:
     """Non-blocking status, elapsed time, and recent activity for a task. files_changed_state is pending until the final workspace diff, collected when the list/count are authoritative, or unavailable if collection could not run. files_changed is capped at 200 paths; files_changed_total carries the real count. silent_for_sec is the time since the worker's last output; Bridge fails the task with stop_reason "stalled" once it passes stall_timeout_sec."""
     try:
-        return {"ok": True, **_registry(ctx).check_task(task_id)}
+        return {"ok": True, **await _registry(ctx).check_task(task_id)}
     except Exception as exc:
         return _error(exc)
 
@@ -172,7 +172,7 @@ async def get_result(
     try:
         return {
             "ok": True,
-            **_registry(ctx).get_result(task_id, cursor=cursor, max_chars=max_chars),
+            **await _registry(ctx).get_result(task_id, cursor=cursor, max_chars=max_chars),
         }
     except Exception as exc:
         return _error(exc)

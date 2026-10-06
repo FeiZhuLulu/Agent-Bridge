@@ -414,6 +414,112 @@ def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
     drop_pid(tmp_path, "sess_keep")
 
 
+def test_record_pid_concurrent_processes_merge(tmp_path: Path):
+    # Three sibling instances race to register 30 workers each; a locked
+    # read-modify-write must leave all 90 rows, not the last writer's 30.
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    script = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from agent_bridge.processes import record_pid\n"
+        "home, tag = Path(sys.argv[1]), sys.argv[2]\n"
+        "for i in range(30):\n"
+        "    record_pid(home, f'{tag}-sess-{i}', os.getpid(), None, None)\n"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script, str(tmp_path), tag], env=env)
+        for tag in ("a", "b", "c")
+    ]
+    try:
+        for proc in procs:
+            assert proc.wait(timeout=30) == 0
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+    table = read_json(pids_path(tmp_path), {})
+    assert len(table) == 90
+    for tag in ("a", "b", "c"):
+        for i in range(30):
+            assert f"{tag}-sess-{i}" in table
+
+
+def test_record_pid_read_failure_never_wipes_table(tmp_path: Path, monkeypatch, caplog):
+    # An unreadable pids.json is not an empty one: the update must fail
+    # instead of writing back only the caller's own row.
+    record_pid(tmp_path, "sess_a", os.getpid(), 1.0, "python.exe")
+    record_pid(tmp_path, "sess_b", os.getpid(), 1.0, "python.exe")
+    before = read_json(pids_path(tmp_path), {})
+
+    def denied(_path):
+        raise PermissionError("locked away")
+
+    monkeypatch.setattr("agent_bridge.processes._read_pids_table", denied)
+    monkeypatch.setattr("agent_bridge.processes.PIDS_WRITE_RETRY_BASE_SEC", 0.001)
+    with caplog.at_level("WARNING"):
+        record_pid(tmp_path, "sess_c", os.getpid(), 1.0, "python.exe")
+
+    assert read_json(pids_path(tmp_path), {}) == before
+    assert "sess_c" not in before
+    assert any("could not update" in record.getMessage() for record in caplog.records)
+
+
+def test_record_pid_retries_transient_permission_error(tmp_path: Path, monkeypatch):
+    from agent_bridge import processes
+
+    record_pid(tmp_path, "sess_a", os.getpid(), 1.0, "python.exe")
+    record_pid(tmp_path, "sess_b", os.getpid(), 1.0, "python.exe")
+    real_read = processes._read_pids_table
+    calls = 0
+
+    def flaky(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("transient")
+        return real_read(path)
+
+    monkeypatch.setattr("agent_bridge.processes._read_pids_table", flaky)
+    record_pid(tmp_path, "sess_c", os.getpid(), 1.0, "python.exe")
+
+    assert calls == 2
+    table = read_json(pids_path(tmp_path), {})
+    assert {"sess_a", "sess_b", "sess_c"} <= set(table)
+
+
+def test_reap_orphans_keeps_sibling_records_added_mid_sweep(tmp_path: Path, monkeypatch):
+    # The orphan's pid is unused, so the sweep drops the record without
+    # killing anything; a sibling record registered while the sweep runs
+    # must survive the rewrite.
+    atomic_write_json(
+        pids_path(tmp_path),
+        {
+            "sess_orphan": {
+                "pid": 2_000_000_001,
+                "create_time": 1.0,
+                "image_name": "ghost.exe",
+            },
+        },
+    )
+    added = False
+    real_process = psutil.Process
+
+    def add_sibling_then_process(pid):
+        nonlocal added
+        if not added:
+            added = True
+            record_pid(tmp_path, "sess_sibling", os.getpid(), 1.0, "python.exe")
+        return real_process(pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", add_sibling_then_process)
+    killed = reap_orphans(tmp_path)
+    assert killed == []
+    table = read_json(pids_path(tmp_path), {})
+    assert "sess_orphan" not in table
+    assert "sess_sibling" in table
+
+
 @pytest.mark.asyncio
 async def test_interrupt_escalates_at_once_when_signal_fails(monkeypatch):
     async def never_wait():

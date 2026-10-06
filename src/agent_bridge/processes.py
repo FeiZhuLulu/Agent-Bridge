@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
 import signal
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,7 @@ from typing import Any
 import psutil
 
 from agent_bridge.paths import pids_path
-from agent_bridge.persist import atomic_write_json, read_json
+from agent_bridge.persist import FileLockTimeout, atomic_write_json, file_lock
 
 log = logging.getLogger(__name__)
 
@@ -194,12 +196,66 @@ async def reap_subprocess(proc: Any | None, timeout: float = 5.0) -> None:
         await asyncio.wait_for(proc.wait(), timeout=2)
 
 
-def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
-    path = pids_path(home)
+PIDS_WRITE_ATTEMPTS = 5
+PIDS_WRITE_RETRY_BASE_SEC = 0.05
+PIDS_LOCK_TIMEOUT_SEC = 5.0
+
+
+def _read_pids_table(path: Path) -> dict[str, Any]:
+    """Read pids.json under the caller's lock.
+
+    Missing or corrupt JSON reads as empty — atomic replacement can never
+    leave a partial file, so overwrite is safe. An OSError (locked-away
+    reads on Windows) is NOT an empty table: it propagates so the caller
+    retries or gives up instead of wiping siblings' registrations.
+    """
     try:
-        table = read_json(path, {})
-        if not isinstance(table, dict):
-            table = {}
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return table if isinstance(table, dict) else {}
+
+
+def _update_pids(home, mutate: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+    """Locked read-modify-write of pids.json.
+
+    ``mutate`` gets a copy of the current table; returning a changed dict
+    writes it back atomically, returning None writes nothing. PermissionError
+    (read or os.replace under a racing sibling) retries with the same
+    backoff as state.json writes; lock timeout or other OSError warns and
+    gives up — never raises, never writes a partial view.
+    """
+    path = pids_path(home)
+    lock_path = path.with_name(f"{path.name}.lock")
+    delay = PIDS_WRITE_RETRY_BASE_SEC
+    for attempt in range(PIDS_WRITE_ATTEMPTS):
+        try:
+            with file_lock(lock_path, timeout_sec=PIDS_LOCK_TIMEOUT_SEC):
+                current = _read_pids_table(path)
+                updated = mutate(dict(current))
+                if updated is not None and updated != current:
+                    atomic_write_json(path, updated)
+            return
+        except FileLockTimeout as exc:
+            log.warning("could not update %s: %s", path, exc)
+            return
+        except PermissionError:
+            if attempt + 1 == PIDS_WRITE_ATTEMPTS:
+                log.warning("could not update %s after retries", path, exc_info=True)
+                return
+            time.sleep(delay)
+            delay *= 2
+        except OSError:
+            log.warning("could not update %s", path, exc_info=True)
+            return
+
+
+def record_pid(home, session_id: str, pid: int, create_time: float | None, image_name: str | None) -> None:
+    def mutate(table: dict[str, Any]) -> dict[str, Any]:
         table[session_id] = {
             "pid": pid,
             "create_time": create_time,
@@ -209,20 +265,18 @@ def record_pid(home, session_id: str, pid: int, create_time: float | None, image
             "owner_pid": os.getpid(),
             "owner_create_time": process_create_time(os.getpid()),
         }
-        atomic_write_json(path, table)
-    except OSError:
-        log.warning("could not record pid for session %s", session_id, exc_info=True)
+        return table
+
+    _update_pids(home, mutate)
 
 
 def drop_pid(home, session_id: str) -> None:
-    path = pids_path(home)
-    try:
-        table = read_json(path, {})
-        if isinstance(table, dict) and session_id in table:
-            table.pop(session_id, None)
-            atomic_write_json(path, table)
-    except OSError:
-        log.warning("could not drop pid for session %s", session_id, exc_info=True)
+    def mutate(table: dict[str, Any]) -> dict[str, Any] | None:
+        if session_id not in table:
+            return None
+        return {key: value for key, value in table.items() if key != session_id}
+
+    _update_pids(home, mutate)
 
 
 def owner_alive(pid: int | None, create_time: float | None) -> bool:
@@ -260,17 +314,24 @@ def reap_orphans(home) -> list[int]:
     records survive the rewrite.
     """
     path = pids_path(home)
-    table = read_json(path, {})
-    if not isinstance(table, dict):
-        table = {}
+    lock_path = path.with_name(f"{path.name}.lock")
+    # Snapshot under the lock; killing takes seconds and must not hold it.
+    try:
+        with file_lock(lock_path, timeout_sec=PIDS_LOCK_TIMEOUT_SEC):
+            table = _read_pids_table(path)
+    except OSError as exc:
+        # An unreadable table is not an empty one: reap nothing this boot.
+        log.warning("could not read pid table %s; skipping orphan reap: %s", path, exc)
+        return []
     killed: list[int] = []
-    kept: dict[str, Any] = {}
+    processed: dict[str, Any] = {}
     for session_id, info in table.items():
         if not isinstance(info, dict):
+            processed[session_id] = info
             continue
         if _owner_alive(info):
-            kept[session_id] = info
             continue
+        processed[session_id] = info
         pid = info.get("pid")
         create_time = info.get("create_time")
         image_name = info.get("image_name")
@@ -305,13 +366,20 @@ def reap_orphans(home) -> list[int]:
                 pid,
                 session_id,
             )
-    if table != kept:
-        try:
-            atomic_write_json(path, kept)
-        except OSError:
-            # A transient Windows file lock (antivirus, racing sibling boot)
-            # must not abort server startup; the next boot retries.
-            log.warning("could not rewrite pid table %s", path, exc_info=True)
+
+    def mutate(current: dict[str, Any]) -> dict[str, Any] | None:
+        # Only remove records this pass actually processed and only when the
+        # row still matches the snapshot — registrations a sibling added or
+        # rewrote while we killed processes stay.
+        out = dict(current)
+        removed = False
+        for session_id, info in processed.items():
+            if out.get(session_id) == info:
+                out.pop(session_id)
+                removed = True
+        return out if removed else None
+
+    _update_pids(home, mutate)
     return killed
 
 

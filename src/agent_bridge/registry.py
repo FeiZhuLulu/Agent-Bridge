@@ -109,7 +109,10 @@ STATE_FLUSH_POLL_SEC = 0.05
 # state.json is an index, not a data store: task message/result bodies are
 # persisted truncated so a long-lived Bridge keeps each write bounded.
 STATE_MESSAGE_MAX = 2000
-STATE_RESULT_TEXT_MAX = 6000
+# A sibling may write a result artifact before its task row lands in
+# state.json; the sweep lock does not cover the artifact write, so only
+# delete orphans old enough that a live write cannot still be in flight.
+ORPHAN_RESULT_MIN_AGE_SEC = 3600
 # Persisted request_id bindings kept; bindings also drop with their task.
 REQUEST_KEEP_MAX = 1000
 
@@ -246,10 +249,11 @@ class Registry:
     def _state_task_row(task: Task) -> dict:
         row = task.model_dump(mode="json")
         # Full bodies already live in result files and transcripts; writing
-        # them into state.json again grew the payload without bound.
+        # them into state.json again grew the payload without bound. Keep
+        # result_text whole: when the artifact write failed it is the only
+        # copy (RESULT_STORE_MAX), and trimming it would lose the tail.
         if len(row["message"]) > STATE_MESSAGE_MAX:
             row["message"] = row["message"][:STATE_MESSAGE_MAX]
-        row["result_text"] = _tail(row["result_text"], STATE_RESULT_TEXT_MAX)
         return row
 
     def _own_rows(self) -> dict[str, list[dict]]:
@@ -1084,6 +1088,11 @@ class Registry:
             if task_id in known:
                 continue
             try:
+                if time.time() - orphan.stat().st_mtime < ORPHAN_RESULT_MIN_AGE_SEC:
+                    # Recent file: a sibling may have written the artifact
+                    # before its task row reached disk (the write lock does
+                    # not cover it), so keep it for the next boot's sweep.
+                    continue
                 orphan.unlink()
             except OSError:
                 log.warning("could not remove orphan result %s", orphan)
@@ -1339,7 +1348,7 @@ class Registry:
             )
         payload["silent_for_sec"] = (
             int(worker_silence_sec(task.session_id, self.home) or 0)
-            if task.status == TaskStatus.running
+            if task.status == TaskStatus.running and task.task_id in self.tasks
             else None
         )
         cfg = self.config.agents.get(task.agent)

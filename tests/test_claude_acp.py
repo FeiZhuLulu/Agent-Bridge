@@ -4,7 +4,7 @@ import pytest
 
 from agent_bridge.adapters.acp import AcpAdapter, _Live
 from agent_bridge.claude_meta import CLAUDE_MODE_BYPASS
-from agent_bridge.config import AgentConfig
+from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.models import Session
 
 MODEL_OPTION = {
@@ -257,3 +257,24 @@ async def test_non_claude_agents_are_untouched_by_the_claude_path():
     assert live.conn.calls == []
     adapter._remember_config_options(live, FakeResponse(config_options=[MODEL_OPTION]))
     assert live.config_options == []
+
+
+def test_env_deny_survives_claude_gateway_rewrite(tmp_path, monkeypatch):
+    """apply_claude_gateway_env recreates ANTHROPIC_AUTH_TOKEN from
+    OPENROUTER_API_KEY after build_worker_env's deny pass; the final spawn
+    gate must still strip it."""
+    for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    adapter = AcpAdapter(
+        AgentConfig(
+            name="claude",
+            protocol="acp",
+            command=["claude-agent-acp"],
+            env={"OPENROUTER_API_KEY": "or-test"},
+        ),
+        tmp_path,
+        EnvConfig(deny=["ANTHROPIC_AUTH_TOKEN"]),
+    )
+    env = adapter._env()
+    assert env["OPENROUTER_API_KEY"] == "or-test"
+    assert "ANTHROPIC_AUTH_TOKEN" not in env

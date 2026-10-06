@@ -5,6 +5,7 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -363,13 +364,20 @@ async def test_start_sweeps_orphan_result_files(bridge_home, monkeypatch):
     )
     results = bridge_home / "results"
     results.mkdir(parents=True, exist_ok=True)
-    (results / "task_orphan.txt").write_text("orphan", encoding="utf-8")
+    stale = results / "task_orphan.txt"
+    stale.write_text("orphan", encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+    # A fresh orphan may belong to a sibling that wrote the artifact before
+    # its task row reached disk — the sweep must leave it alone.
+    (results / "task_orphan_fresh.txt").write_text("recent", encoding="utf-8")
     (results / "task_foreign.txt").write_text("kept", encoding="utf-8")
 
     registry = Registry.create(bridge_home)
     await registry.start()
     try:
-        assert not (results / "task_orphan.txt").exists()
+        assert not stale.exists()
+        assert (results / "task_orphan_fresh.txt").read_text(encoding="utf-8") == "recent"
         assert (results / "task_foreign.txt").read_text(encoding="utf-8") == "kept"
     finally:
         await registry.stop()
@@ -411,6 +419,76 @@ async def test_check_task_reads_sibling_task_from_state(bridge_home, monkeypatch
             registry._require_task("task_remote")
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_from_state_reports_null_silence(bridge_home, monkeypatch):
+    """A sibling's running task read from disk has no live silence data."""
+    monkeypatch.setattr("agent_bridge.registry.owner_alive", lambda pid, create_time: True)
+    foreign = Task(
+        task_id="task_remote_run",
+        session_id="sess_remote_run",
+        agent="fake",
+        message="running elsewhere",
+        cwd=str(Path.cwd()),
+        status=TaskStatus.running,
+        started_at=iso(),
+        owner_pid=9999,
+        owner_create_time=1.0,
+    )
+    atomic_write_json(
+        state_path(bridge_home),
+        {"sessions": [], "tasks": [foreign.model_dump(mode="json")]},
+    )
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        snap = registry.check_task("task_remote_run")
+        assert snap["from_state"] is True
+        assert snap["silent_for_sec"] is None
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_result_survives_restart_when_artifact_write_fails(
+    bridge_home, tmp_path, monkeypatch
+):
+    """With the result file unwritable, the state.json row is the only copy;
+    it must carry the whole RESULT_STORE_MAX text, not a 6000-char tail."""
+    import agent_bridge.registry as registry_mod
+
+    original = registry_mod.atomic_write_text
+
+    def fail_result_write(path, text, *args, **kwargs):
+        if Path(path).parent.name == "results":
+            raise OSError("disk full")
+        return original(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(registry_mod, "atomic_write_text", fail_result_write)
+    big = "z" * 20000
+
+    async def big_turn(self, session, task):
+        return TurnResult(text=big)
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", big_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "big", cwd=str(tmp_path))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+    finally:
+        await registry.stop()
+
+    again = Registry.create(bridge_home)
+    await again.start()
+    try:
+        result = again.get_result(dispatched["task_id"])
+        assert result["result_text"] == big
+        assert len(result["result_text"]) == 20000
+    finally:
+        await again.stop()
 
 
 def test_sibling_state_updates_are_serialized(bridge_home, tmp_path, monkeypatch):

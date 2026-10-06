@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_bridge.config import AgentConfig, EnvConfig
 from agent_bridge.models import Session, Task, TurnResult
+from agent_bridge.worker_env import enforce_env_deny
 
 # asyncio's default StreamReader limit is 64KB. Workers emit one JSON event
 # per line, and a single edit event can embed a whole file, so long lines are
@@ -29,6 +31,18 @@ class Adapter(ABC):
 
     def can_revive(self) -> bool:
         return self.agent.revivable
+
+    def _enforce_spawn_env(self, env: Mapping[str, str]) -> dict[str, str]:
+        """Last ``env.deny`` gate on the exact env a worker spawn receives.
+
+        Agent rewrites after build_worker_env (gateway keys, DSH refills)
+        can recreate a denied key; run this on the final env, not earlier.
+        """
+        return enforce_env_deny(
+            env,
+            self.env_config,
+            set(self.env_config.set) | set(self.agent.env),
+        )
 
     @abstractmethod
     async def ensure_session(self, session: Session) -> None: ...

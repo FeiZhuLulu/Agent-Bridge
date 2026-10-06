@@ -21,7 +21,7 @@ from agent_bridge.dsh_home import (
 from agent_bridge.kimi_observe import kimi_home
 from agent_bridge.minimax_meta import describe_minimax_auth, minimax_data_dir
 from agent_bridge.processes import reap_subprocess, resolve_command
-from agent_bridge.worker_env import build_worker_env
+from agent_bridge.worker_env import build_worker_env, enforce_env_deny
 from agent_bridge.zcode_meta import describe_zcode_auth, zcode_home
 
 log = logging.getLogger(__name__)
@@ -222,11 +222,16 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
 
     if cfg.name == "devin":
         resolved = apply_devin_env(resolved)
+        # The rewritten env is handed to a spawned CLI; re-apply env.deny so
+        # apply_devin_env cannot reintroduce a denied key.
+        env_cfg = env_config or EnvConfig()
+        spawn_env = enforce_env_deny(resolved, env_cfg, set(env_cfg.set) | set(cfg.env))
         details.append(
             "model=ids the session advertises (`devin models list`), level is part of the id "
             "e.g. swe-1-7-medium, claude-opus-5-high; no effort option; mode forced to bypass"
         )
-        details.append(f"auth={await _devin_auth(command[0], resolved)}")
+        details.append(f"auth={await _devin_auth(command[0], spawn_env)}")
+        resolved = spawn_env
         if resolved.get("WINDSURF_API_KEY"):
             details.append("WINDSURF_API_KEY=set")
 

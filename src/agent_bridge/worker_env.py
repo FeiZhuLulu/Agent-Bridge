@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -514,14 +514,33 @@ def denied_by_policy(key: str, cfg: EnvConfig, explicit: set[str] | None = None)
     There is no built-in denylist: a default deny hid AWS_*/SSH_*/etc. from
     workers that legitimately need them (Bedrock/Vertex auth, git-over-ssh),
     so only the operator's configured globs strip keys. Shared by
-    _apply_env_deny and injection points downstream of it (e.g. the DSH
-    launch helper pulling credential refs from Windows env) so a denied key
-    cannot re-enter through another code path.
+    _apply_env_deny and enforce_env_deny so a denied key cannot re-enter
+    through post-build rewriting.
     """
     if explicit and key in explicit:
         return False
     user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
     return any(fnmatch.fnmatchcase(key, pat) for pat in user_deny)
+
+
+def enforce_env_deny(
+    env: Mapping[str, str],
+    cfg: EnvConfig,
+    explicit: Iterable[str] = (),
+) -> dict[str, str]:
+    """Re-apply the ``env.deny`` policy to a finalized spawn env.
+
+    Agent-specific rewriting downstream of build_worker_env (gateway key
+    derivation, DSH credential refills) can recreate a denied key, so every
+    worker subprocess spawn passes its final env through this one gate.
+    ``explicit`` (env.set keys plus the agent's own env keys) still wins.
+    """
+    allowed = set(explicit)
+    return {
+        key: value
+        for key, value in env.items()
+        if not denied_by_policy(key, cfg, allowed)
+    }
 
 
 def _apply_env_deny(

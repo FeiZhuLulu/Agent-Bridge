@@ -697,10 +697,12 @@ class AcpAdapter(Adapter):
     def _env(self) -> dict[str, str]:
         env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
         if self.agent.name == "claude":
-            return apply_claude_gateway_env(env)
-        if self.agent.name == "devin":
-            return apply_devin_env(env)
-        return env
+            env = apply_claude_gateway_env(env)
+        elif self.agent.name == "devin":
+            env = apply_devin_env(env)
+        # Gateway derivation above can recreate a denied key; the deny gate
+        # runs on the rewritten env, not on build_worker_env's output.
+        return self._enforce_spawn_env(env)
 
     async def _drain_stderr(
         self,
@@ -791,6 +793,7 @@ class AcpAdapter(Adapter):
     ) -> dict[str, str]:
         if self._cursor_models_cache is not None:
             return self._cursor_models_cache
+        env = self._enforce_spawn_env(env)
         try:
             model_cmd = cursor_list_models_command(command)
             proc = await asyncio.create_subprocess_exec(
@@ -845,7 +848,6 @@ class AcpAdapter(Adapter):
                 session_id=session.session_id,
                 model=session.model,
                 effort=session.effort,
-                env_cfg=self.env_config,
             )
         elif self.agent.name == "grok":
             cmd = with_grok_cli_selection(cmd, session.model, session.effort)
@@ -862,6 +864,7 @@ class AcpAdapter(Adapter):
                     "model_discovery", session, kind="unsupported_model",
                 )
             cmd = with_cursor_cli_model(cmd, session.model)
+        env = self._enforce_spawn_env(env)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

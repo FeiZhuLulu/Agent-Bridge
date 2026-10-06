@@ -7,12 +7,10 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_bridge.config import EnvConfig
 from agent_bridge.models import dsh_effort
 from agent_bridge.paths import bridge_home, bundled_dsh_cordis
 from agent_bridge.processes import resolve_command
 from agent_bridge.worker_env import (
-    denied_by_policy,
     pick_env_keys,
     read_windows_machine_env,
     read_windows_user_env,
@@ -479,14 +477,13 @@ def apply_dsh_worker_env(
     effort: str | None = None,
     user_env: Mapping[str, str] | None = None,
     machine_env: Mapping[str, str] | None = None,
-    env_cfg: EnvConfig | None = None,
 ) -> dict[str, str]:
     """Attach DSH home, the user's saved default model, and credential env refs.
 
     No provider is required. Official DeepSeek is only one of the routes DSH
     already knows; users configure providers in ``$DSH_HOME/settings.yaml``.
-    ``env_cfg`` re-applies the env deny policy to keys filled from the host's
-    user/machine env so a denied credential cannot re-enter here.
+    env.deny is not consulted here: the caller passes the returned dict
+    through enforce_env_deny at the spawn site, which is the single gate.
     """
     out = dict(env)
     home = dsh_home(out)
@@ -503,8 +500,6 @@ def apply_dsh_worker_env(
         user = user_env if user_env is not None else read_windows_user_env()
         for incoming in (machine, user):
             for key, value in pick_env_keys(incoming, extra_keys).items():
-                if key not in out and env_cfg is not None and denied_by_policy(key, env_cfg):
-                    continue
                 out.setdefault(key, value)
     roots = _node_module_roots(command or [])
     if roots:
@@ -542,7 +537,6 @@ def prepare_dsh_launch(
     effort: str | None = None,
     user_env: Mapping[str, str] | None = None,
     machine_env: Mapping[str, str] | None = None,
-    env_cfg: EnvConfig | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     return with_bridge_cordis(command), apply_dsh_worker_env(
         env,
@@ -552,5 +546,4 @@ def prepare_dsh_launch(
         effort=effort,
         user_env=user_env,
         machine_env=machine_env,
-        env_cfg=env_cfg,
     )

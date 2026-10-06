@@ -5,6 +5,7 @@ from agent_bridge.worker_env import (
     apply_proxy_fallbacks,
     build_worker_env,
     describe_env,
+    enforce_env_deny,
     is_worker_context,
     parse_powershell_grok_proxy,
     parse_win_inet_proxy_server,
@@ -265,3 +266,21 @@ def test_worker_env_user_deny_patterns():
     assert "APP_DEBUG" not in env
     assert "CUSTOM_FLAG" not in env
     assert env["KEEP"] == "y"
+
+
+def test_enforce_env_deny_on_rewritten_spawn_env():
+    """The final spawn gate strips keys that post-build rewriting recreated;
+    keys explicitly set via env.set or the agent's own env still win."""
+    cfg = EnvConfig(
+        set={"ANTHROPIC_AUTH_TOKEN": "explicit"},
+        deny=["ANTHROPIC_*"],
+    )
+    env = {
+        "ANTHROPIC_AUTH_TOKEN": "recreated-by-rewrite",
+        "ANTHROPIC_API_KEY": "recreated",
+        "OPENROUTER_API_KEY": "or",
+    }
+    out = enforce_env_deny(env, cfg, set(cfg.set) | {"OPENROUTER_API_KEY"})
+    assert out["ANTHROPIC_AUTH_TOKEN"] == "recreated-by-rewrite"
+    assert "ANTHROPIC_API_KEY" not in out
+    assert out["OPENROUTER_API_KEY"] == "or"

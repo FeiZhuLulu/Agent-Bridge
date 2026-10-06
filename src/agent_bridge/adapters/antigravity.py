@@ -316,7 +316,9 @@ class AgyAdapter(Adapter):
         conversation (those counters cover every turn so far); otherwise ``turn``.
         """
         cmd = self._build_cmd(session, task)
-        env = build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
+        env = self._enforce_spawn_env(
+            build_worker_env(self.agent.env, config=self.env_config, worker_context=True, home=self.home)
+        )
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

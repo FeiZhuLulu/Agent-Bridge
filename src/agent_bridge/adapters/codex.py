@@ -105,6 +105,7 @@ class CodexAdapter(Adapter):
     async def run_turn(self, session: Session, task: Task) -> TurnResult:
         env = self._worker_env()
         cmd = self._build_cmd(session, task, env)
+        env = self._enforce_spawn_env(env)
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

@@ -797,14 +797,19 @@ class Registry:
             # worker starts: a crash between them would otherwise replay the
             # dispatch as a duplicate. Failure degrades to persisted=False,
             # never a rejected dispatch.
-            persisted = await self.flush_state()
             log.info(
                 "task_dispatched task_id=%s session_id=%s agent=%s",
                 task.task_id,
                 session.session_id,
                 agent,
             )
-            self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
+            try:
+                persisted = await self.flush_state()
+            finally:
+                # Even when the caller cancels mid-flush, the registered task
+                # must still start — a request_id retry would otherwise reuse
+                # a row that never runs.
+                self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
         return {
             "task_id": task.task_id,
             "session_id": session.session_id,
@@ -1372,6 +1377,15 @@ class Registry:
             return None
         if task.task_id not in self.tasks:
             return True
+        done = self._done.get(task.task_id)
+        if done is None or not done.is_set():
+            # _run_task marks the status terminal in-memory, then collects
+            # final files_changed and flushes the transcript before its
+            # closing save. Done set means that save has been issued (it
+            # runs synchronously right after set()); before that, issue the
+            # save here so a read cannot answer persisted=True while disk
+            # still says running.
+            self.save()
         return await self.flush_state()
 
     async def _with_persisted(self, task: Task, payload: dict) -> dict:

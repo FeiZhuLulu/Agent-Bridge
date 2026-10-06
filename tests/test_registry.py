@@ -814,6 +814,95 @@ async def test_cancel_task_reports_persisted_on_terminal(bridge_home, tmp_path):
         await registry.stop()
 
 
+@pytest.mark.asyncio
+async def test_check_task_persists_terminal_row_during_finalize(
+    bridge_home, tmp_path, monkeypatch
+):
+    """task.status flips terminal before _run_task's finally issues the final
+    save (files_changed collection sits in between). A check_task inside that
+    window must land the terminal row itself instead of answering
+    persisted=True for a disk row that still says running."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        from agent_bridge import workspace
+
+        real_merge = workspace.merge_files_changed
+
+        def slow_merge(*args, **kwargs):
+            time.sleep(1.0)
+            return real_merge(*args, **kwargs)
+
+        # The failure path reaches the pending-files_changed merge in finally
+        # *after* status is already terminal — a deterministic widen window.
+        async def boom(_self, _session, _task):
+            raise RuntimeError("synthetic turn failure")
+
+        monkeypatch.setattr("agent_bridge.registry.merge_files_changed", slow_merge)
+        monkeypatch.setattr(FakeAdapter, "run_turn", boom)
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        checked = {}
+        for _ in range(200):
+            checked = await registry.check_task(dispatched["task_id"])
+            if checked["status"] in terminal:
+                break
+            await asyncio.sleep(0.05)
+        assert checked["status"] == "failed"
+        assert checked["persisted"] is True
+        rows = read_json(state_path(bridge_home), {}).get("tasks", [])
+        row = next(r for r in rows if r["task_id"] == dispatched["task_id"])
+        assert row["status"] == "failed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cancelled_during_flush_still_runs_task(
+    bridge_home, tmp_path, monkeypatch
+):
+    """If the MCP dispatch call is cancelled while awaiting the initial
+    flush, the already-registered task must still start — otherwise a
+    request_id retry would reuse a row that never runs."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        request_id = str(uuid.uuid4())
+        real_flush = registry.flush_state
+        gate = asyncio.Event()
+
+        async def hung_flush():
+            await gate.wait()
+            return await real_flush()
+
+        monkeypatch.setattr(registry, "flush_state", hung_flush)
+        dispatching = asyncio.create_task(
+            registry.dispatch_task(
+                "fake", "tiny", cwd=str(work.resolve()), request_id=request_id
+            )
+        )
+        await asyncio.sleep(0.05)  # let dispatch register the task and reach the flush
+        dispatching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatching
+        monkeypatch.setattr(registry, "flush_state", real_flush)
+
+        (task_id,) = [tid for tid in registry.tasks if registry.tasks[tid].agent == "fake"]
+        waited = await registry.wait_task(task_id, timeout_sec=10)
+        assert waited["status"] == "completed"
+        retry = await registry.dispatch_task(
+            "fake", "tiny", cwd=str(work.resolve()), request_id=request_id
+        )
+        assert retry["reused"] is True
+        assert retry["task_id"] == task_id
+    finally:
+        await registry.stop()
+
+
 def test_state_write_retries_bounded_permission_errors(bridge_home, monkeypatch):
     registry = Registry.create(bridge_home)
     original_write = atomic_write_json

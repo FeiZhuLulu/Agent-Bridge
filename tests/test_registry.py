@@ -1781,3 +1781,35 @@ async def test_stall_cancel_finishes_after_turn_returns(bridge_home, tmp_path, m
         assert cancel_finished.is_set()
     finally:
         await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_error_and_warnings_are_sanitized_before_persisting(
+    bridge_home, tmp_path, monkeypatch
+):
+    """H-04: worker-derived text crosses into state.json/transcripts — scrub it."""
+    secret = "tp-leak0123456789abcdef"
+
+    async def leaky_turn(self, session, task):
+        return TurnResult(
+            text="",
+            stop_reason="error",
+            error=f"worker boom: Authorization: Bearer {secret} api_key={secret}",
+            warnings=[f"Set-Cookie: session={secret}"],
+        )
+
+    monkeypatch.setattr(FakeAdapter, "run_turn", leaky_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "leak", cwd=str(tmp_path))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "failed"
+        assert secret not in (waited["error"] or "")
+        assert "[redacted]" in (waited["error"] or "")
+        assert secret not in json.dumps(waited["warnings"])
+        registry.save()
+        state = json.loads(state_path(bridge_home).read_text(encoding="utf-8"))
+        assert secret not in json.dumps(state)
+    finally:
+        await registry.stop()

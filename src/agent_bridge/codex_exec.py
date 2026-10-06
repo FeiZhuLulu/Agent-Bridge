@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from agent_bridge.diagnostics import redact_diagnostic
 from agent_bridge.processes import resolve_command
 
 log = logging.getLogger(__name__)
@@ -289,13 +290,15 @@ def finalize_codex_turn(
     if returncode not in (0, None):
         warnings.append(f"codex exited with code {returncode}")
     if state.turn_failed:
-        return "error", state.error or "codex turn failed", warnings
+        return "error", redact_diagnostic(state.error or "codex turn failed"), warnings
     if state.turn_completed:
-        warnings.extend(state.errors)
+        warnings.extend(redact_diagnostic(err) for err in state.errors)
         return "end_turn", None, warnings
     if state.errors:
-        return "error", state.error or "codex turn failed", warnings
-    stderr_error = (stderr or "").strip()
+        return "error", redact_diagnostic(state.error or "codex turn failed"), warnings
+    # Codex stderr is raw worker output (may echo env secrets it read);
+    # sanitize before it becomes the task's error text.
+    stderr_error = redact_diagnostic((stderr or "").strip())
     if stderr_error:
         return "error", stderr_error, warnings
     error = (

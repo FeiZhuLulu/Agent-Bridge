@@ -189,3 +189,74 @@ def test_is_worker_context_strict_value():
     assert is_worker_context({WORKER_CONTEXT_ENV: "coordinator"}) is False
     assert is_worker_context({}) is False
     assert is_worker_context({WORKER_CONTEXT_ENV: "Worker"}) is False
+
+
+def _env(base, *, config=None, overrides=None):
+    return build_worker_env(
+        overrides,
+        config=config,
+        base=base,
+        fallbacks={},
+        user_env={},
+        machine_env={},
+        log_fill=False,
+    )
+
+
+def test_worker_env_default_deny_strips_credential_keys():
+    env = _env(
+        {
+            "AWS_SECRET_ACCESS_KEY": "s3cr3t",
+            "AWS_ACCESS_KEY_ID": "AKIA123",
+            "GITHUB_TOKEN": "ghp_leak",
+            "NPM_TOKEN": "npm_leak",
+            "DATABASE_URL": "postgres://u:p@db",
+            "HOME": "/h",
+            "PATH": "/bin",
+        }
+    )
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "NPM_TOKEN" not in env
+    assert "DATABASE_URL" not in env
+    assert env["HOME"] == "/h"
+    assert env["PATH"] == "/bin"
+
+
+def test_worker_env_default_deny_keeps_inherited_llm_keys():
+    env = _env(
+        {"KIMI_API_KEY": "k", "OPENAI_API_KEY": "o", "ANTHROPIC_ADMIN_KEY": "admin"}
+    )
+    # Both are named on DEFAULT_INHERIT_KEYS -> explicitly wanted by config.
+    assert env["KIMI_API_KEY"] == "k"
+    assert env["OPENAI_API_KEY"] == "o"
+    # A vendor-namespaced key NOT on the inherit list is still a credential.
+    assert "ANTHROPIC_ADMIN_KEY" not in env
+
+
+def test_worker_env_explicit_set_and_agent_env_survive_deny():
+    cfg = EnvConfig(set={"AWS_SECRET_ACCESS_KEY": "configured", "OPENAI_API_KEY": "also-configured"})
+    env = _env({}, config=cfg)
+    assert env["AWS_SECRET_ACCESS_KEY"] == "configured"
+    env = _env({"GITHUB_TOKEN": "agent-wants"}, overrides={"GITHUB_TOKEN": "agent-wants"})
+    assert env["GITHUB_TOKEN"] == "agent-wants"
+
+
+def test_worker_env_inherit_exempts_default_deny_only():
+    cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"], deny=["AWS_*"])
+    env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
+    # User deny beats the inherit exemption for the default denylist.
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    cfg = EnvConfig(inherit=["AWS_SECRET_ACCESS_KEY"])
+    env = _env({"AWS_SECRET_ACCESS_KEY": "s3cr3t", "AWS_REGION": "us"}, config=cfg)
+    assert env["AWS_SECRET_ACCESS_KEY"] == "s3cr3t"
+    assert "AWS_REGION" not in env  # still denied: not explicitly wanted
+
+
+def test_worker_env_user_deny_patterns():
+    cfg = EnvConfig(deny=["*_DEBUG", "CUSTOM*"])
+    env = _env({"APP_DEBUG": "1", "CUSTOM_FLAG": "x", "KEEP": "y"}, config=cfg)
+    assert "APP_DEBUG" not in env
+    assert "CUSTOM_FLAG" not in env
+    assert env["KEEP"] == "y"

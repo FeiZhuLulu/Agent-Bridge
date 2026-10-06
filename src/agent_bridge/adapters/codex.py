@@ -19,6 +19,7 @@ from agent_bridge.codex_exec import (
     resolve_codex_command,
     yolo_requested,
 )
+from agent_bridge.diagnostics import redact_diagnostic
 from agent_bridge.models import Session, Task, TurnResult
 from agent_bridge.processes import (
     drop_pid,
@@ -194,7 +195,9 @@ class CodexAdapter(Adapter):
                     observed_effort=observed_effort,
                 )
             if stop_reason == "error":
-                append_event(session.session_id, "error", {"error": error}, self.home)
+                append_event(
+                    session.session_id, "error", {"error": redact_diagnostic(error or "")}, self.home
+                )
                 return TurnResult(
                     text=state.text,
                     files_changed=sorted(state.files),

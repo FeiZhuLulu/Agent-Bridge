@@ -31,6 +31,7 @@ from agent_bridge.claude_meta import (
 )
 from agent_bridge.config import AgentConfig
 from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
+from agent_bridge.diagnostics import redact_diagnostic as _redact_diagnostic
 from agent_bridge.dsh_home import command_has_native_acp, prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
 from agent_bridge.minimax_meta import (
@@ -95,19 +96,6 @@ def _tool_io_summary(value: Any) -> str | None:
         return None
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     return text if len(text) <= _TOOL_IO_LIMIT else text[:_TOOL_IO_LIMIT] + "…"
-
-
-def _redact_diagnostic(text: str) -> str:
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-    text = re.sub(r"(?im)^.*(?:authorization|(?:set-)?cookie)\s*[:=].*$", "[redacted]", text)
-    text = re.sub(
-        r"""(?i)(\b(?:[\w-]*(?:token|secret|password|api[_-]?key)|authorization|cookie)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
-        r"\1[redacted]", text,
-    )
-    text = re.sub(r"(?i)\b(?:bearer|basic)\s+\S+", "[redacted]", text)
-    text = re.sub(r"""(?i)\b(?:https?|wss?)://[^\s<>"']+""", "[redacted URL]", text)
-    text = re.sub(r"\b(?:sk-[\w-]+|gh[pousr]_\w+)\b", "[redacted]", text)
-    return text[:2048]
 
 
 def _stderr_summary(text: str) -> str | None:
@@ -484,18 +472,31 @@ def _text_of(content: Any) -> str:
     return str(dumped)
 
 
-def _pick_permission_option(options: Iterable[PermissionOption]) -> PermissionOption | None:
+def _pick_permission_option(
+    options: Iterable[PermissionOption],
+    policy: str = "allow_once",
+) -> PermissionOption | None:
+    """Pick the permission option matching the agent's policy.
+
+    Bridge is the only approver in the loop — there is no human to click
+    "allow". Default policy ``allow_once`` grants each request for this turn
+    only; ``allow_always`` additionally persists the grant inside the worker;
+    ``deny`` cancels every request.
+    """
+    if policy == "deny":
+        return None
+    allow_always_first = policy == "allow_always"
     ranked: list[tuple[int, PermissionOption]] = []
     for option in options:
         kind = str(getattr(option, "kind", "")).lower().replace("_", "-")
         option_id = str(getattr(option, "option_id", "")).lower().replace("_", "-")
         blob = f"{kind} {option_id}"
         if "allow-always" in blob or kind == "allow-always":
-            score = 0
+            score = 0 if allow_always_first else 50
         elif "allow-once" in blob or kind == "allow-once" or blob.strip().startswith("allow"):
-            score = 1
+            score = 1 if allow_always_first else 0
         else:
-            score = 50
+            score = 50 if allow_always_first else 90
         ranked.append((score, option))
     ranked.sort(key=lambda item: item[0])
     return ranked[0][1] if ranked else None
@@ -508,9 +509,10 @@ async def _observe_exit(proc: asyncio.subprocess.Process | None) -> None:
 
 
 class _BridgeClient:
-    def __init__(self, session_id: str, home: Path) -> None:
+    def __init__(self, session_id: str, home: Path, permission_policy: str = "allow_once") -> None:
         self.session_id = session_id
         self.home = home
+        self.permission_policy = permission_policy
         self.text_parts: list[str] = []
         self.files: set[str] = set()
         self.usage: dict[str, Any] = {}
@@ -529,7 +531,7 @@ class _BridgeClient:
         options: list[Any] | None,
         **kwargs: Any,
     ) -> RequestPermissionResponse:
-        option = _pick_permission_option(options or [])
+        option = _pick_permission_option(options or [], self.permission_policy)
         dumped = _dump(tool_call)
         if option is None:
             append_event(
@@ -872,7 +874,9 @@ class AcpAdapter(Adapter):
             raise RuntimeError(f"{self.agent.name} did not expose stdio")
         live = _Live()
         live.proc = proc
-        live.client = _BridgeClient(session.session_id, self.home)
+        live.client = _BridgeClient(
+            session.session_id, self.home, self.agent.permission_policy
+        )
         live.conn = connect_to_agent(live.client, proc.stdin, proc.stdout)
         live.stderr_task = asyncio.create_task(
             self._drain_stderr(proc, session.session_id, live)

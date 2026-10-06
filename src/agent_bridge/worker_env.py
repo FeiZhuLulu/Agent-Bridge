@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -507,6 +508,76 @@ def install_host_env(config: EnvConfig, *, base: Mapping[str, str] | None = None
     return status
 
 
+# Glob patterns for credential-shaped env keys a worker subprocess must
+# never inherit implicitly. LLM vendor keys are intentionally NOT blanket-
+# denied: they are on DEFAULT_INHERIT_KEYS because a worker CLI needs one
+# configured key to run. Anything a worker legitimately needs can still be
+# passed explicitly (``env.set``, agent ``env``, or ``env.inherit``).
+DEFAULT_ENV_DENY_PATTERNS: tuple[str, ...] = (
+    "AWS_*",
+    "AZURE_*",
+    "GCP_*",
+    "GOOGLE_*",
+    "GCLOUD_*",
+    "KUBE*",
+    "DOCKER_*",
+    "VAULT_*",
+    "SSH_*",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_*",
+    "NPM_*",
+    "PYPI_*",
+    "TWINE_*",
+    "NUGET_*",
+    "CARGO_*",
+    "*_SECRET",
+    "*_SECRET_*",
+    "*_PASSWORD",
+    "*_PASSWORD_*",
+    "*_CREDENTIALS",
+    "*_PRIVATE_KEY*",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "*_DSN",
+    "OPENAI_*",
+    "ANTHROPIC_*",
+    "SENTRY_*",
+    "DATADOG_*",
+)
+
+
+def _apply_env_deny(
+    env: dict[str, str],
+    origin: dict[str, str],
+    cfg: EnvConfig,
+    explicit: set[str],
+) -> None:
+    """Strip credential-shaped keys a worker never explicitly asked for.
+
+    Explicit intent always wins: a key assigned through ``env.set`` or the
+    agent's own ``env`` block survives any pattern. The built-in denylist
+    additionally yields to keys named in ``env.inherit`` (the operator opted
+    those in by name); user ``env.deny`` patterns apply on top and only lose
+    to explicit ``set``/agent ``env`` values. Denied keys are recorded as
+    ``origin[key] = "denied"`` so describe_env can tell withheld from absent.
+    """
+    inherited = set(cfg.inherit)
+    user_deny = [str(pat) for pat in (cfg.deny or []) if str(pat).strip()]
+    for key in list(env):
+        if key in explicit:
+            continue
+        if user_deny and any(fnmatch.fnmatchcase(key, pat) for pat in user_deny):
+            env.pop(key, None)
+            origin[key] = "denied"
+            continue
+        if key in inherited:
+            continue
+        if any(fnmatch.fnmatchcase(key, pat) for pat in DEFAULT_ENV_DENY_PATTERNS):
+            env.pop(key, None)
+            origin[key] = "denied"
+
+
 def build_worker_env(
     overrides: Mapping[str, str] | None = None,
     *,
@@ -528,6 +599,9 @@ def build_worker_env(
         user_env=user_env,
         machine_env=machine_env,
     )
+    cfg = config or EnvConfig()
+    explicit = set(cfg.set) | set(overrides or {})
+    _apply_env_deny(env, origin, cfg, explicit)
     # After every merge so agents.toml / inherited env cannot clear the mark.
     # Also pin a nested data dir: if the worker inherits this MCP server, the
     # nested Bridge must not share the coordinator's state.json. A host MCP

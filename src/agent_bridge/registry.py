@@ -925,8 +925,10 @@ class Registry:
         try:
             with file_lock(lock_path, timeout_sec=STATE_LOCK_TIMEOUT_SEC):
                 disk = read_json_strict(path, {})
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
             # Unknown task set — deleting on a stale view risks live results.
+            # FileLockTimeout is a TimeoutError: a slow sibling writer must not
+            # abort startup over an optional sweep.
             log.warning("could not re-read %s; skipping orphan result sweep", path)
             return
         known = set(self.tasks) | foreign_task_ids

@@ -103,6 +103,19 @@ async def test_fallback_endpoint_overrides_cannot_reuse_official_cache(name, fla
         await cache.close()
 
 
+def test_codex_agent_config_overrides_block_quota_lookup():
+    # config_overrides become `codex exec -c` pairs; like `-c` flags in
+    # command they can select a custom provider, so fail closed.
+    agent = AgentConfig(
+        name="codex",
+        protocol="codex",
+        command=["codex"],
+        config_overrides=['model_provider="my-gateway"'],
+    )
+    reason = quota_block_reason(agent, {})
+    assert reason is not None and "configuration overrides" in reason
+
+
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize(("name", "folder", "flag", "text"), [
     ("codex", ".codex", "-pwork", '[profiles.work]\nmodel_provider="custom"'),

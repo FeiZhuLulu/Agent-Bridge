@@ -491,7 +491,21 @@ If OpenCode's configured default model is disabled, the first prompt fails with 
 
 Bridge drives Desktop-bundled or PATH `codex` through `codex exec --json`. It does not open ChatGPT.exe. Discovery order: `CODEX_CLI_PATH` (env or `$CODEX_HOME/config.toml` / `~/.codex/config.toml`), then `%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<hash>\\codex.exe` (newest mtime among binaries that pass `exec --help` capability checks), then PATH `codex`.
 
-Login stays in `$CODEX_HOME` when set, otherwise `~/.codex`. `--ignore-user-config` skips Desktop `config.toml` (MCP / Computer Use), and Bridge adds `-c cli_auth_credentials_store="auto"` so ChatGPT login still resolves from keyring or `auth.json`. Project `.codex/config.toml`, `AGENTS.md`, and execpolicy rules can still apply. Bridge inherits `CODEX_HOME` so a custom home used by Desktop is visible to the worker.
+Login stays in `$CODEX_HOME` when set, otherwise `~/.codex`. `--ignore-user-config` skips Desktop `config.toml` (MCP / Computer Use), and Bridge adds `-c cli_auth_credentials_store="auto"` so ChatGPT login still resolves from keyring or `auth.json`. Project `.codex/config.toml` and project hooks/rules normally do not load, because Codex reads project trust from the user config this flag skips; `AGENTS.md` and rules under `$CODEX_HOME/rules` still apply. Bridge inherits `CODEX_HOME` so a custom home used by Desktop is visible to the worker.
+
+`[agents.codex] config_overrides` adds raw `codex exec -c <item>` pairs — for settings `--ignore-user-config` would skip, e.g. a custom model provider. The block below merges field-wise into the bundled codex entry, so only `config_overrides` is needed:
+
+```toml
+[agents.codex]
+config_overrides = [
+  'model_provider="my-gateway"',
+  'model_providers.my-gateway.name="My Gateway"',
+  'model_providers.my-gateway.base_url="https://example.com/v1"',
+  'model_providers.my-gateway.env_key="MY_GATEWAY_API_KEY"',
+]
+```
+
+Keep secrets out of overrides: a key can only be referenced via `env_key` (command-line arguments are visible in the process list). Since Codex clears the MCP child environment, a variable named by `env_key` must also be listed in the host's `env_vars` / `[env.inherit]` like any other worker credential. Task-level `model`/`effort` are appended after overrides, so they keep priority.
 
 Default approval is `--approve-for-me` (auto review + workspace-write). `--yolo` is only used when `[agents.codex] session_meta = { yolo = true }`. Prompt is UTF-8 stdin (`-`), never an argv string.
 

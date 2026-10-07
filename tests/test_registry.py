@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -408,10 +409,10 @@ async def test_check_task_reads_sibling_task_from_state(bridge_home, monkeypatch
     await registry.start()
     try:
         assert "task_remote" not in registry.tasks
-        snap = registry.check_task("task_remote")
+        snap = await registry.check_task("task_remote")
         assert snap["status"] == "completed"
         assert snap["from_state"] is True
-        result = registry.get_result("task_remote")
+        result = await registry.get_result("task_remote")
         assert result["result_text"] == "remote result"
         with pytest.raises(KeyError, match="unknown task"):
             await registry.wait_task("task_remote", timeout_sec=0.1)
@@ -443,7 +444,7 @@ async def test_check_task_from_state_reports_null_silence(bridge_home, monkeypat
     registry = Registry.create(bridge_home)
     await registry.start()
     try:
-        snap = registry.check_task("task_remote_run")
+        snap = await registry.check_task("task_remote_run")
         assert snap["from_state"] is True
         assert snap["silent_for_sec"] is None
     finally:
@@ -484,7 +485,7 @@ async def test_result_survives_restart_when_artifact_write_fails(
     again = Registry.create(bridge_home)
     await again.start()
     try:
-        result = again.get_result(dispatched["task_id"])
+        result = await again.get_result(dispatched["task_id"])
         assert result["result_text"] == big
         assert len(result["result_text"]) == 20000
     finally:
@@ -692,6 +693,214 @@ async def test_start_raises_when_state_never_persists(bridge_home, monkeypatch):
     monkeypatch.setattr(registry, "_write_state", fail_always)
     with pytest.raises(RuntimeError, match=r"could not persist state\.json"):
         await registry.start()
+
+
+@pytest.mark.asyncio
+async def test_check_task_terminal_waits_for_slow_state_write(
+    bridge_home, tmp_path, monkeypatch
+):
+    """check_task must not answer terminal before the terminal row is on disk."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    original_write = registry._write_state
+    try:
+
+        def slow_write(own):
+            time.sleep(0.3)
+            original_write(own)
+
+        monkeypatch.setattr(registry, "_write_state", slow_write)
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        checked = {}
+        for _ in range(200):
+            checked = await registry.check_task(dispatched["task_id"])
+            if checked["status"] in terminal:
+                break
+            await asyncio.sleep(0.05)
+        assert checked["status"] == "completed"
+        assert checked["persisted"] is True
+        rows = read_json(state_path(bridge_home), {}).get("tasks", [])
+        row = next(r for r in rows if r["task_id"] == dispatched["task_id"])
+        assert row["status"] == "completed"
+    finally:
+        monkeypatch.setattr(registry, "_write_state", original_write)
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_returns_after_task_row_and_request_binding_on_disk(
+    bridge_home, tmp_path, monkeypatch
+):
+    """A dispatch answer implies the task row and request_id binding landed;
+    a coordinator crash before that would otherwise replay a duplicate."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    original_write = registry._write_state
+    try:
+
+        def slow_write(own):
+            time.sleep(0.3)
+            original_write(own)
+
+        monkeypatch.setattr(registry, "_write_state", slow_write)
+        request_id = str(uuid.uuid4())
+        dispatched = await registry.dispatch_task(
+            "fake", "tiny", cwd=str(work.resolve()), request_id=request_id
+        )
+        assert dispatched["persisted"] is True
+        payload = read_json(state_path(bridge_home), {})
+        assert {r["task_id"] for r in payload.get("tasks", [])} == {dispatched["task_id"]}
+        bindings = {r["request_id"]: r for r in payload.get("requests", [])}
+        assert bindings[request_id]["task_id"] == dispatched["task_id"]
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
+        assert waited["persisted"] is True
+    finally:
+        monkeypatch.setattr(registry, "_write_state", original_write)
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_reports_unpersisted_when_writes_fail(
+    bridge_home, tmp_path, monkeypatch
+):
+    """A broken disk degrades check_task to persisted=False; the in-memory
+    result stays readable."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    original_write = registry._write_state
+    try:
+
+        def fail_always(own):
+            raise PermissionError(5, "synthetic sharing/access failure")
+
+        monkeypatch.setattr(registry, "_write_state", fail_always)
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        assert dispatched["persisted"] is False
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=10)
+        assert waited["status"] == "completed"
+        checked = await registry.check_task(dispatched["task_id"])
+        assert checked["status"] == "completed"
+        assert checked["persisted"] is False
+        result = await registry.get_result(dispatched["task_id"])
+        assert result["persisted"] is False
+        assert result["result_text"]
+    finally:
+        monkeypatch.setattr(registry, "_write_state", original_write)
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_reports_persisted_on_terminal(bridge_home, tmp_path):
+    """cancel_task on an already-terminal task returns persisted=True."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert waited["status"] == "completed"
+        cancelled = await registry.cancel_task(dispatched["task_id"])
+        assert cancelled["status"] == "completed"
+        assert cancelled["persisted"] is True
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_task_persists_terminal_row_during_finalize(
+    bridge_home, tmp_path, monkeypatch
+):
+    """task.status flips terminal before _run_task's finally issues the final
+    save (files_changed collection sits in between). A check_task inside that
+    window must land the terminal row itself instead of answering
+    persisted=True for a disk row that still says running."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        from agent_bridge import workspace
+
+        real_merge = workspace.merge_files_changed
+
+        def slow_merge(*args, **kwargs):
+            time.sleep(1.0)
+            return real_merge(*args, **kwargs)
+
+        # The failure path reaches the pending-files_changed merge in finally
+        # *after* status is already terminal — a deterministic widen window.
+        async def boom(_self, _session, _task):
+            raise RuntimeError("synthetic turn failure")
+
+        monkeypatch.setattr("agent_bridge.registry.merge_files_changed", slow_merge)
+        monkeypatch.setattr(FakeAdapter, "run_turn", boom)
+        dispatched = await registry.dispatch_task("fake", "tiny", cwd=str(work.resolve()))
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        checked = {}
+        for _ in range(200):
+            checked = await registry.check_task(dispatched["task_id"])
+            if checked["status"] in terminal:
+                break
+            await asyncio.sleep(0.05)
+        assert checked["status"] == "failed"
+        assert checked["persisted"] is True
+        rows = read_json(state_path(bridge_home), {}).get("tasks", [])
+        row = next(r for r in rows if r["task_id"] == dispatched["task_id"])
+        assert row["status"] == "failed"
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cancelled_during_flush_still_runs_task(
+    bridge_home, tmp_path, monkeypatch
+):
+    """If the MCP dispatch call is cancelled while awaiting the initial
+    flush, the already-registered task must still start — otherwise a
+    request_id retry would reuse a row that never runs."""
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        request_id = str(uuid.uuid4())
+        real_flush = registry.flush_state
+        gate = asyncio.Event()
+
+        async def hung_flush():
+            await gate.wait()
+            return await real_flush()
+
+        monkeypatch.setattr(registry, "flush_state", hung_flush)
+        dispatching = asyncio.create_task(
+            registry.dispatch_task(
+                "fake", "tiny", cwd=str(work.resolve()), request_id=request_id
+            )
+        )
+        await asyncio.sleep(0.05)  # let dispatch register the task and reach the flush
+        dispatching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatching
+        monkeypatch.setattr(registry, "flush_state", real_flush)
+
+        (task_id,) = [tid for tid in registry.tasks if registry.tasks[tid].agent == "fake"]
+        waited = await registry.wait_task(task_id, timeout_sec=10)
+        assert waited["status"] == "completed"
+        retry = await registry.dispatch_task(
+            "fake", "tiny", cwd=str(work.resolve()), request_id=request_id
+        )
+        assert retry["reused"] is True
+        assert retry["task_id"] == task_id
+    finally:
+        await registry.stop()
 
 
 def test_state_write_retries_bounded_permission_errors(bridge_home, monkeypatch):
@@ -913,7 +1122,7 @@ async def test_get_result_includes_workspace_writes(bridge_home, tmp_path, monke
         assert waited["model"] == "gemini-3.7-flash"
         assert waited["effort"] == "low"
         assert waited["observed_model"] is None
-        result = registry.get_result(dispatched["task_id"])
+        result = await registry.get_result(dispatched["task_id"])
         assert result["model"] == "gemini-3.7-flash"
         assert "observed_model" in result
         assert result["result_text"] == result_text
@@ -950,7 +1159,7 @@ async def test_get_result_reads_complete_unicode_result_in_pages(
         cursor = 0
         parts: list[str] = []
         while True:
-            page = registry.get_result(
+            page = await registry.get_result(
                 dispatched["task_id"], cursor=cursor, max_chars=17_000
             )
             assert page["result_complete"] is True
@@ -1020,7 +1229,7 @@ async def test_kimi_silent_failure_becomes_a_warning(bridge_home, tmp_path, monk
         assert waited["observed_model"] == "kimi-code/k3-256k"
         assert waited["observed_effort"] == "high"
         assert any("402 membership" in w for w in waited["warnings"])
-        result = registry.get_result(dispatched["task_id"])
+        result = await registry.get_result(dispatched["task_id"])
         assert "end_turn with empty text" in result["hint"]
     finally:
         await registry.stop()
@@ -1084,7 +1293,7 @@ async def test_opencode_observed_model_comes_from_the_adapter(bridge_home, tmp_p
         assert waited["effort"] == "max"
         assert waited["observed_model"] == "opencode/x-preview-f-free"
         assert waited["observed_effort"] == "high"
-        result = registry.get_result(dispatched["task_id"])
+        result = await registry.get_result(dispatched["task_id"])
         assert "last values Bridge successfully set" in result["hint"]
     finally:
         await registry.stop()
@@ -1124,7 +1333,7 @@ async def test_claude_observed_model_comes_from_the_adapter(bridge_home, tmp_pat
         assert waited["effort"] == "max"
         assert waited["observed_model"] == "sonnet"
         assert waited["observed_effort"] == "xhigh"
-        result = registry.get_result(dispatched["task_id"])
+        result = await registry.get_result(dispatched["task_id"])
         assert "Claude Code observed_model/effort" in result["hint"]
         assert "last values Bridge successfully set" in result["hint"]
     finally:
@@ -1507,9 +1716,9 @@ async def test_files_changed_is_capped(bridge_home, tmp_path, monkeypatch):
         assert waited["files_changed"] == paths[:200]
         assert waited["files_changed_total"] == 500
         assert waited["files_changed_truncated"] is True
-        result = registry.get_result(dispatched["task_id"])
+        result = await registry.get_result(dispatched["task_id"])
         assert "first 200 of 500" in result["hint"]
-        checked = registry.check_task(dispatched["task_id"])
+        checked = await registry.check_task(dispatched["task_id"])
         assert checked["files_changed_total"] == 500
         assert checked["files_changed_truncated"] is True
     finally:
@@ -1553,7 +1762,7 @@ async def test_running_files_changed_is_pending_until_collection(
         dispatched = await registry.dispatch_task("fake", "write", cwd=str(work.resolve()))
         await asyncio.wait_for(wrote.wait(), timeout=5)
 
-        running = registry.check_task(dispatched["task_id"])
+        running = await registry.check_task(dispatched["task_id"])
         assert running["status"] == "running"
         assert running["files_changed"] == []
         assert running["files_changed_total"] == 0
@@ -1904,7 +2113,7 @@ async def test_check_task_reports_silent_for_sec(bridge_home, tmp_path, monkeypa
     try:
         dispatched = await registry.dispatch_task("fake", "slow", cwd=str(work.resolve()))
         await asyncio.sleep(0.5)
-        checked = registry.check_task(dispatched["task_id"])
+        checked = await registry.check_task(dispatched["task_id"])
         assert isinstance(checked["silent_for_sec"], int)
         assert 0 <= checked["silent_for_sec"] <= 2
         assert checked["stall_timeout_sec"] == 1800

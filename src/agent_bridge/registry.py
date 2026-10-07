@@ -736,6 +736,7 @@ class Registry:
                     "effort": task.effort,
                     "request_id": request_id,
                     "reused": True,
+                    "persisted": await self.flush_state(),
                 }
             if session_id:
                 session = self.sessions.get(session_id)
@@ -792,19 +793,30 @@ class Registry:
             self._cancel_idle(session.session_id)
             self._prune()
             self.save()
+            # The task row and request_id binding must reach disk before the
+            # worker starts: a crash between them would otherwise replay the
+            # dispatch as a duplicate. Failure degrades to persisted=False,
+            # never a rejected dispatch.
             log.info(
                 "task_dispatched task_id=%s session_id=%s agent=%s",
                 task.task_id,
                 session.session_id,
                 agent,
             )
-            self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
+            try:
+                persisted = await self.flush_state()
+            finally:
+                # Even when the caller cancels mid-flush, the registered task
+                # must still start — a request_id retry would otherwise reuse
+                # a row that never runs.
+                self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
         return {
             "task_id": task.task_id,
             "session_id": session.session_id,
             "agent": agent,
             "model": session.model,
             "effort": session.effort,
+            "persisted": persisted,
             **({"request_id": request_id, "reused": False} if request_id is not None else {}),
         }
 
@@ -1355,6 +1367,33 @@ class Registry:
         payload["stall_timeout_sec"] = cfg.stall_timeout_sec if cfg is not None else None
         return payload
 
+    async def _persisted(self, task: Task) -> bool | None:
+        """Persistence verdict for terminal answers; None while non-terminal.
+
+        A disk-fallback row belongs to another instance and is already on
+        disk by definition, so it answers True without a local flush.
+        """
+        if task.status not in TERMINAL_STATUSES:
+            return None
+        if task.task_id not in self.tasks:
+            return True
+        done = self._done.get(task.task_id)
+        if done is None or not done.is_set():
+            # _run_task marks the status terminal in-memory, then collects
+            # final files_changed and flushes the transcript before its
+            # closing save. Done set means that save has been issued (it
+            # runs synchronously right after set()); before that, issue the
+            # save here so a read cannot answer persisted=True while disk
+            # still says running.
+            self.save()
+        return await self.flush_state()
+
+    async def _with_persisted(self, task: Task, payload: dict) -> dict:
+        persisted = await self._persisted(task)
+        if persisted is not None:
+            payload["persisted"] = persisted
+        return payload
+
     async def wait_task(self, task_id: str, timeout_sec: float = DEFAULT_WAIT_SEC) -> dict:
         task = self._require_task(task_id)
         event = self._done.setdefault(task_id, asyncio.Event())
@@ -1363,21 +1402,19 @@ class Registry:
                 await asyncio.wait_for(event.wait(), timeout=timeout_sec)
             except TimeoutError:
                 return {"timed_out": True, **self._task_snapshot(self.tasks[task_id])}
-        persisted = False
-        if task.status in TERMINAL_STATUSES:
-            # A terminal answer must also be on disk, not merely queued
-            # behind the background flusher.
-            persisted = await self.flush_state()
+        # A terminal answer must also be on disk, not merely queued
+        # behind the background flusher.
         return {
             "timed_out": False,
-            "persisted": persisted,
+            "persisted": (await self._persisted(task)) is True,
             **self._task_snapshot(self.tasks[task_id], include_result=True),
         }
 
-    def check_task(self, task_id: str) -> dict:
-        return self._task_snapshot(self._require_task(task_id, allow_disk=True))
+    async def check_task(self, task_id: str) -> dict:
+        task = self._require_task(task_id, allow_disk=True)
+        return await self._with_persisted(task, self._task_snapshot(task))
 
-    def get_result(
+    async def get_result(
         self,
         task_id: str,
         cursor: int = 0,
@@ -1419,7 +1456,7 @@ class Registry:
                 ),
             }
         )
-        return payload
+        return await self._with_persisted(task, payload)
 
     def get_transcript(self, session_id: str, offset: int = 0, limit: int = 50, kinds: list[str] | None = None) -> dict:
         if session_id not in self.sessions and not transcript_path(session_id, self.home).is_file():
@@ -1432,7 +1469,7 @@ class Registry:
             raise RuntimeError(NESTED_CANCEL_ERROR)
         task = self._require_task(task_id)
         if task.status in TERMINAL_STATUSES:
-            return self._task_snapshot(task)
+            return await self._with_persisted(task, self._task_snapshot(task))
         self._cancel_requested.add(task_id)
         session = self.sessions[task.session_id]
         adapter = self._adapters.get(session.session_id)
@@ -1457,7 +1494,8 @@ class Registry:
             self._bg.pop(task_id, None)
             self._done[task_id].set()
             self.save()
-        return self._task_snapshot(self.tasks[task_id])
+        task = self.tasks[task_id]
+        return await self._with_persisted(task, self._task_snapshot(task))
 
     def list_sessions(self, active_only: bool = False) -> list[dict]:
         rows = []
